@@ -1,0 +1,18 @@
+# made by CasualArclamp
+[package]
+name = "declab-cli"
+description = "DecLAB command line: list the decoders, run one over IQ"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "declab"
+path = "src/main.rs"
+
+[dependencies]
+declab-api = { path = "../../crates/declab-api", default-features = false }
+declab-decoders = { path = "../../crates/declab-decoders", default-features = false }
+anyhow.workspace = true

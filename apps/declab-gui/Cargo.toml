@@ -1,0 +1,26 @@
+# made by CasualArclamp
+[package]
+name = "declab-gui"
+description = "DecLAB desktop GUI (egui): DVB-T/T2, DVB-S/S2/S2X, DVB-RCS2 and DAB/DAB+ in one receiver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "declab-gui"
+path = "src/main.rs"
+
+[dependencies]
+declab-api = { path = "../../crates/declab-api" }
+declab-decoders = { path = "../../crates/declab-decoders" }
+anyhow.workspace = true
+# The glow (OpenGL) renderer instead of eframe's default wgpu, as in the
+# other Dec apps. "x11"/"wayland" only matter on Linux.
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+
+# With eframe's defaults off, re-enable winit's (Linux only) so building needs
+# no X11/Wayland dev packages.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = "0.30.13"

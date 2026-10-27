@@ -1,0 +1,18 @@
+# made by CasualArclamp
+[package]
+name = "declab-api"
+description = "DecLAB decoder plug-in API: what a decoder is given and what it hands back"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# A decoder's own settings panel (egui). Off for headless tools.
+default = ["ui"]
+ui = ["dep:egui"]
+
+[dependencies]
+num-complex.workspace = true
+egui = { workspace = true, optional = true }

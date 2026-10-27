@@ -1,0 +1,35 @@
+# made by CasualArclamp
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/CasualArclamp/DecLAB"
+rust-version = "1.95"
+
+[workspace.dependencies]
+num-complex = "0.4.6"
+rustfft = "6.4"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+# egui only, not eframe: a decoder's panel draws with egui but never owns a
+# window, so the API crate does not pull in a renderer.
+egui = { version = "0.36.2", default-features = false, features = ["default_fonts"] }
+
+# DSP is unusably slow unoptimised; keep dev builds fast enough to decode real
+# captures in tests while still compiling quickly (as in DecDVB-T and DecDAB).
+[profile.dev]
+opt-level = 1
+incremental = false
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+debug = "line-tables-only"
+lto = "thin"
