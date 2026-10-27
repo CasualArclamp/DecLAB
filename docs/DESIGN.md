@@ -266,3 +266,22 @@ none. The card shows RDS sync, RDS SNR and corrected blocks.
   row (~31 rows/s), cropped to ±3 kHz so the colours follow the band and
   not the filter's stopband: the two biphase sidebands about ±1 kHz and
   the null at 0 Hz show on a clean signal.
+
+## 9. Multiplex waterfall, Es/N0, clock time (2026-10-27)
+
+- `WaterfallRow` gained `low_hz` and `marks`. A decoder waterfall named
+  like a scope is drawn small under it; any other is drawn large in the
+  right-hand column, which held the services. The services (and text, when
+  the card has none) now sit under the card.
+- WFM sends "FM multiplex": 1024-point Hann FFTs of the demodulated
+  multiplex at 384 kS/s, 12 to a row (~31 rows/s), 0-100 kHz, marked at the
+  pilot (19), the stereo subcarrier (38) and RDS (57 kHz).
+- RDS Es/N0 is now taken along the decision axis (A = mean |re|, σ² = mean
+  re² − A², Es/N0 = A²/2σ²). The first figure (re² − im²)/im² was 3 dB
+  optimistic; dividing by 2im² read 0.4 dB on air because the pilot's
+  phase jitter spreads the cloud across the axis, which the scope shows
+  but decisions never see. Now the recording's 101.1 MHz reads 2.0 dB at
+  35 % BLER, the synthetic test 1.9 dB at 42 %.
+- Clock time (4A) only from blocks that passed their check uncorrected,
+  with a year 2000-2099 and an offset within ±13 h (a wrong correction had
+  shown 1888-11-24 UTC−11:30).

@@ -138,9 +138,10 @@ pub struct RdsDecoder {
     theta:f32,
     /// Mean symbol power, for normalising the timing error.
     power:f32,
-    /// Derotated symbol statistics for the SNR: mean of re², of im².
+    /// Derotated symbol statistics for the SNR: mean of re².
     re2:f32,
-    im2:f32,
+    /// Mean |re| of the derotated symbols.
+    re_abs:f32,
     points:VecDeque<Complex32>,
     // ---- blocks
     reg:u32,
@@ -155,6 +156,9 @@ pub struct RdsDecoder {
     recent:VecDeque<bool>,
     words:[u16;4],
     valid:[bool;4],
+    /// The block was put right by the burst correction (good, but a wrong
+    /// correction is possible: clock time does not trust it).
+    fixed:[bool;4],
     /// Block C carried C′ (a version B group).
     c_prime:bool,
     bursts:HashMap<u16,u32>,
@@ -205,7 +209,7 @@ impl Default for RdsDecoder {
             theta: 0.0,
             power: 1e-6,
             re2: 0.0,
-            im2: 0.0,
+            re_abs: 0.0,
             points: VecDeque::with_capacity(SCOPE_POINTS),
             reg: 0,
             bits_seen: 0,
@@ -217,6 +221,7 @@ impl Default for RdsDecoder {
             recent: VecDeque::with_capacity(FLYWHEEL),
             words: [0; 4],
             valid: [false; 4],
+            fixed: [false; 4],
             c_prime: false,
             bursts: burst_table(),
             pi: None,
@@ -262,11 +267,19 @@ impl RdsDecoder {
     /// The subcarrier's phase against the pilot's third harmonic, degrees
     /// (0 or 180: in phase; ±90: in quadrature).
     pub fn phase_deg(&self)->f32 { self.theta.to_degrees() }
-    /// The symbols' SNR, dB: their power on the decision axis over the
-    /// power across it (Es/N0 of the BPSK symbols, about).
+    /// The symbols' Es/N0, dB, from the decision axis alone: the clusters
+    /// sit at ±A with spread σ along it (A = mean |re|, σ² = mean re² − A²),
+    /// and N0 = 2σ² (noise in both dimensions), so Es/N0 = A² / 2σ².
+    /// Spread across the axis is left out: on air the pilot's phase jitter
+    /// puts energy there that never crosses the decision line (taking it
+    /// as noise read 0.4 dB for a station decoding at 35 % block errors).
+    /// This reads within ~0.3 dB of theory at 2 dB and ~1.4 dB low at 7 dB
+    /// (synthetic), and gives the same block error rate for the same
+    /// reading on air and in the test.
     pub fn snr_db(&self)->f32 {
-        let noise=self.im2.max(1e-12);
-        10.0*((self.re2-noise).max(1e-12)/noise).log10()
+        let a2=self.re_abs*self.re_abs;
+        let sigma2=(self.re2-a2).max(1e-12);
+        10.0*(a2.max(1e-12)/(2.0*sigma2)).log10()
     }
     /// Block sync held.
     pub fn synced(&self)->bool { self.synced }
@@ -414,7 +427,7 @@ impl RdsDecoder {
         let d=sym*rot;
         self.power+=(d.norm_sqr()-self.power)*0.01;
         self.re2+=(d.re*d.re-self.re2)*0.01;
-        self.im2+=(d.im*d.im-self.im2)*0.01;
+        self.re_abs+=(d.re.abs()-self.re_abs)*0.01;
         if self.points.len()>=SCOPE_POINTS { self.points.pop_front(); }
         self.points.push_back(d);
 
@@ -458,7 +471,7 @@ impl RdsDecoder {
                 self.valid=[false;4];
                 self.expect=i;
                 self.in_block=0;
-                self.take(i,(self.reg>>10) as u16,cp,true);
+                self.take(i,(self.reg>>10) as u16,cp,true,false);
                 return;
             }
             self.cand=Some((self.bit_no,i));
@@ -486,11 +499,11 @@ impl RdsDecoder {
         match got {
             Some((w,cp,fixed)) => {
                 if fixed { self.blocks_fixed+=1; } else { self.blocks_ok+=1; }
-                self.take(i,w,cp,true);
+                self.take(i,w,cp,true,fixed);
             }
             None => {
                 self.blocks_bad+=1;
-                self.take(i,0,false,false);
+                self.take(i,0,false,false,false);
             }
         }
         if self.recent.len()==FLYWHEEL { self.recent.pop_front(); }
@@ -503,10 +516,11 @@ impl RdsDecoder {
     }
 
     /// Block `i` of the group (good or not); a group is handled at its D.
-    fn take(&mut self,i:usize,word:u16,c_prime:bool,good:bool){
-        if i==0 { self.valid=[false;4]; }
+    fn take(&mut self,i:usize,word:u16,c_prime:bool,good:bool,fixed:bool){
+        if i==0 { self.valid=[false;4]; self.fixed=[false;4]; }
         self.words[i]=word;
         self.valid[i]=good;
+        self.fixed[i]=fixed;
         if i==2 { self.c_prime=c_prime; }
         if i==3 { self.group(); }
     }
@@ -563,14 +577,20 @@ impl RdsDecoder {
             } else if dv {
                 put(addr,addr*2,d);
             }
-        } else if typ==4 && ver==0 && cv && dv {
+        } else if typ==4 && ver==0 && cv && dv && !self.fixed[1] && !self.fixed[2] && !self.fixed[3] {
+            // Clock time only from blocks that passed their check as sent: a
+            // wrongly corrected block once read "1888-11-24 UTC-11:30".
             // EN 62106 3.1.5.6: MJD over blocks B-C, then hour, minute, offset.
             let (c,d)=(u32::from(c),u32::from(d));
             let mjd=((u32::from(b)&3)<<15)|(c>>1);
             let hour=(((c&1)<<4)|(d>>12)) as u8;
             let minute=((d>>6)&0x3f) as u8;
             let off=(d&0x1f) as i8*if d&0x20!=0 {-1} else {1};
-            if hour<24 && minute<60 { self.ct=Some((mjd,hour,minute,off)); }
+            // A plausible date (2000-2099) and offset (±13 h) only.
+            let year=mjd_date(mjd).0;
+            if hour<24 && minute<60 && (2000..2100).contains(&year) && off.abs()<=26 {
+                self.ct=Some((mjd,hour,minute,off));
+            }
         }
     }
 }
@@ -667,6 +687,17 @@ mod tests {
         let d = decode_noisy(TAU / 4.0, 6.0, 0.2);
         assert_eq!(d.station().as_deref(), Some("DECLAB"));
         assert!(d.groups() > 30, "{} groups in 6 s", d.groups());
+    }
+
+    #[test]
+    fn es_n0_agrees_with_the_noise_put_in() {
+        // sigma 0.2 is +1.0 dB in the 4.8 kHz band; the matched filter
+        // gathers a symbol's energy against 1187.5 Hz of noise: Es/N0 is
+        // 10 log10(4800 / 1187.5) = 6.1 dB higher, about 7.1 dB.
+        let d = decode_noisy(0.4, 4.0, 0.2);
+        let es_n0 = d.snr_db();
+        // The |re| moments read a little low at this SNR (5.7 dB seen).
+        assert!((5.0..8.5).contains(&es_n0), "Es/N0 {es_n0:.1} dB, about 7.1 expected");
     }
 
     /// Not a check: prints groups decoded against noise (--nocapture).

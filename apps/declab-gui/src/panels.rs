@@ -71,11 +71,13 @@ pub fn boxed(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 
 /// A decoder's small waterfall, ready to draw: its texture and the texture
 /// coordinates that put the newest row on top.
-pub struct Mini<'a> {
-    pub name: &'a str,
+pub struct Mini {
+    pub name: &'static str,
     pub tex: egui::TextureId,
     pub uv: egui::Rect,
+    pub low_hz: f32,
     pub span_hz: f32,
+    pub marks: Vec<(f32, &'static str)>,
 }
 
 /// The height of a small waterfall under the scope, points.
@@ -86,6 +88,8 @@ const MINI_H: f32 = 64.0;
 ///
 /// `which` names the scope shown: "" for the channel IQ, else one of the
 /// decoder's own (`DecoderView::scopes`).
+// Everything the box shows comes in as arguments; a struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 pub fn scope_and_card(
     ui: &mut Ui,
     view: &DecoderView,
@@ -94,7 +98,9 @@ pub fn scope_and_card(
     name: &str,
     freq_hz: f64,
     minis: &[Mini],
-) {
+    selected: Option<u32>,
+) -> Option<u32> {
+    let mut pick = None;
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
@@ -131,9 +137,30 @@ pub fn scope_and_card(
             };
             egui::ScrollArea::vertical().id_salt("card").max_height(ui.available_height()).show(ui, |ui| {
                 draw_card(ui, card, colour, freq_hz, view.cpu_percent);
+                // The services under the card, a row each; the decoder's text
+                // too when its card does not carry it.
+                if !view.services.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("services").size(11.0).color(GREY));
+                    for s in &view.services {
+                        let label = if s.name.is_empty() { format!("[{}]", s.id) } else { s.name.clone() };
+                        let on = selected == Some(s.id) || (selected.is_none() && view.services.len() == 1);
+                        let text = RichText::new(format!("{label}   {}", s.kind)).size(13.0);
+                        if ui.selectable_label(on, text).clicked() {
+                            pick = Some(s.id);
+                        }
+                    }
+                }
+                if view.card.as_ref().is_none_or(|c| c.text.is_empty()) {
+                    for t in view.text.values() {
+                        ui.add_space(4.0);
+                        ui.add(egui::Label::new(RichText::new(t).size(13.0).color(Color32::WHITE)).wrap());
+                    }
+                }
             });
         });
     });
+    pick
 }
 
 /// A card for a decoder that sends none: its measurements as details.
@@ -250,32 +277,67 @@ fn draw_card(ui: &mut Ui, c: &declab_api::Card, colour: Color32, freq_hz: f64, c
     }
 }
 
-fn mini_waterfall(ui: &mut Ui, m: &Mini) {
-    ui.add_space(4.0);
-    let (rect, _) = ui.allocate_exact_size(vec2(SCOPE, MINI_H), Sense::hover());
+/// A decoder waterfall's image with its marks (lines, labels along the top).
+fn waterfall_image(ui: &mut Ui, m: &Mini, size: egui::Vec2, labels: bool) -> egui::Rect {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter_at(rect);
     p.image(m.tex, rect, m.uv, Color32::WHITE);
-    // 0 Hz, and the edges of the ±2.4 kHz band RDS is filtered to.
-    let x_of = |hz: f32| rect.center().x + hz / m.span_hz.max(1.0) * rect.width();
-    p.line_segment([pos2(x_of(0.0), rect.top()), pos2(x_of(0.0), rect.bottom())], Stroke::new(1.0, Color32::from_white_alpha(40)));
-    for hz in [-2400.0, 2400.0] {
-        let x = x_of(hz);
-        if rect.x_range().contains(x) {
-            p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0, Color32::from_white_alpha(25)));
+    let x_of = |hz: f32| rect.left() + (hz - m.low_hz) / m.span_hz.max(1.0) * rect.width();
+    for (hz, label) in &m.marks {
+        let x = x_of(*hz);
+        if !rect.x_range().contains(x) {
+            continue;
+        }
+        p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0, Color32::from_white_alpha(45)));
+        if labels && !label.is_empty() {
+            p.text(pos2(x + 3.0, rect.top() + 2.0), Align2::LEFT_TOP, *label, FontId::monospace(10.0), Color32::from_gray(220));
         }
     }
-    let half = m.span_hz / 2e3;
+    rect
+}
+
+fn mini_waterfall(ui: &mut Ui, m: &Mini) {
+    ui.add_space(4.0);
+    waterfall_image(ui, m, vec2(SCOPE, MINI_H), false);
+    let (lo, hi) = (m.low_hz / 1e3, (m.low_hz + m.span_hz) / 1e3);
     ui.horizontal(|ui| {
         ui.set_width(SCOPE);
-        ui.label(RichText::new(format!("−{half:.0}")).size(10.0).color(GREY));
+        ui.label(RichText::new(format!("{lo:+.0}")).size(10.0).color(GREY));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(format!("+{half:.0} kHz")).size(10.0).color(GREY));
+            ui.label(RichText::new(format!("{hi:+.0} kHz")).size(10.0).color(GREY));
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add_space((SCOPE / 2.0 - 60.0).max(0.0));
                 ui.label(RichText::new(format!("{} carrier", m.name)).size(10.0).color(GREY));
             });
         });
     });
+}
+
+/// A decoder's large waterfall (WFM's multiplex), filling its box.
+pub fn big_waterfall(ui: &mut Ui, m: &Mini) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(m.name).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new("baseband, after the FM demodulator").size(11.0).color(GREY));
+        });
+    });
+    let w = ui.available_width();
+    let h = (ui.available_height() - 24.0).max(40.0);
+    let rect = waterfall_image(ui, m, vec2(w, h), true);
+    // A kHz scale: every 10 kHz, labelled every 20.
+    let p = ui.painter();
+    let x_of = |hz: f32| rect.left() + (hz - m.low_hz) / m.span_hz.max(1.0) * rect.width();
+    let mut k = (m.low_hz / 10e3).ceil() * 10e3;
+    while k <= m.low_hz + m.span_hz {
+        let x = x_of(k);
+        p.line_segment([pos2(x, rect.bottom()), pos2(x, rect.bottom() + 4.0)], Stroke::new(1.0, GREY));
+        // Every other tick labelled, clear of "kHz" at the right.
+        if (k / 10e3).round() as i64 % 2 == 0 && x < rect.right() - 36.0 {
+            p.text(pos2(x, rect.bottom() + 5.0), Align2::CENTER_TOP, format!("{:.0}", k / 1e3), FontId::monospace(10.0), GREY);
+        }
+        k += 10e3;
+    }
+    p.text(pos2(rect.right(), rect.bottom() + 5.0), Align2::RIGHT_TOP, "kHz", FontId::monospace(10.0), GREY);
 }
 
 /// IQ points, scaled so their RMS sits at 45 % of the half-width.

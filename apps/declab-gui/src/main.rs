@@ -140,6 +140,16 @@ fn main() -> eframe::Result {
     )
 }
 
+/// One of the decoder's own waterfalls (`declab_api::WaterfallRow`).
+struct MiniState {
+    name: &'static str,
+    hist: History,
+    ring: RingImage,
+    low_hz: f32,
+    span_hz: f32,
+    marks: Vec<(f32, &'static str)>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SourceKind {
     Airspy,
@@ -214,8 +224,8 @@ struct App {
 
     history: History,
     ring: RingImage,
-    /// The decoder's small waterfalls, by name, and their span (Hz).
-    minis: Vec<(&'static str, History, RingImage, f32)>,
+    /// The decoder's own waterfalls, by name.
+    minis: Vec<MiniState>,
     smooth: Vec<f32>,
     row_center: f64,
     row_rate: f64,
@@ -500,18 +510,23 @@ impl App {
     fn poll(&mut self) {
         let Some(h) = &self.host else { return };
         for (name, row) in h.take_waterfall_rows() {
-            let i = match self.minis.iter().position(|m| m.0 == name) {
+            let i = match self.minis.iter().position(|m| m.name == name) {
                 Some(i) => i,
                 None => {
                     let mut hist = History::default();
-                    // Three seconds or so at the decoder's ~31 rows a second.
-                    hist.set_capacity(96);
-                    self.minis.push((name, hist, RingImage::default(), row.span_hz));
+                    // A small one: three seconds or so at ~31 rows a second;
+                    // a large one about as many rows as it is tall.
+                    let small = self.view.scopes.iter().any(|(n, _)| *n == name);
+                    hist.set_capacity(if small { 96 } else { 240 });
+                    self.minis.push(MiniState { name, hist, ring: RingImage::default(), low_hz: 0.0, span_hz: 0.0, marks: Vec::new() });
                     self.minis.len() - 1
                 }
             };
-            self.minis[i].3 = row.span_hz;
-            self.minis[i].1.push(row.db);
+            let m = &mut self.minis[i];
+            m.low_hz = row.low_hz;
+            m.span_hz = row.span_hz;
+            m.marks = row.marks;
+            m.hist.push(row.db);
         }
         for row in h.take_rows() {
             if row.sample_rate != self.row_rate || row.center_hz != self.row_center {
@@ -825,19 +840,39 @@ impl eframe::App for App {
             let h = ui.available_height();
             let gap = ui.spacing().item_spacing.x;
             let widths = [w * 0.5 - gap, w * 0.25 - gap, w * 0.25 - gap];
+            // The decoder's waterfalls, their textures brought up to date.
+            let minis: Vec<panels::Mini> = self
+                .minis
+                .iter_mut()
+                .filter_map(|m| {
+                    m.ring.update(&ctx, &m.hist).map(|(tex, uv)| panels::Mini {
+                        name: m.name,
+                        tex,
+                        uv,
+                        low_hz: m.low_hz,
+                        span_hz: m.span_hz,
+                        marks: m.marks.clone(),
+                    })
+                })
+                .collect();
+            let mut picked = None;
             ui.horizontal_top(|ui| {
                 let chan = self.chan_hz;
                 ui.allocate_ui_with_layout(egui::vec2(widths[0], h), egui::Layout::top_down(egui::Align::Min), |ui| {
                     panels::boxed(ui, |ui| {
-                        let ctx = ui.ctx().clone();
-                        let minis: Vec<panels::Mini> = self
-                            .minis
-                            .iter_mut()
-                            .filter_map(|(name, hist, ring, span)| {
-                                ring.update(&ctx, hist).map(|(tex, uv)| panels::Mini { name, tex, uv, span_hz: *span })
-                            })
-                            .collect();
-                        panels::scope_and_card(ui, &self.view, colour, &mut self.scope, info.name, chan, &minis)
+                        let pick = panels::scope_and_card(
+                            ui,
+                            &self.view,
+                            colour,
+                            &mut self.scope,
+                            info.name,
+                            chan,
+                            &minis,
+                            self.selected_service,
+                        );
+                        if let Some(id) = pick {
+                            picked = Some(id);
+                        }
                     })
                 });
                 ui.allocate_ui_with_layout(egui::vec2(widths[1], h), egui::Layout::top_down(egui::Align::Min), |ui| panels::boxed(ui, |ui| {
@@ -865,15 +900,25 @@ impl eframe::App for App {
                 }));
                 ui.allocate_ui_with_layout(egui::vec2(widths[2], h), egui::Layout::top_down(egui::Align::Min), |ui| {
                     panels::boxed(ui, |ui| {
-                        if let Some(id) = panels::services(ui, &self.view, self.selected_service) {
-                            self.selected_service = Some(id);
-                            if let Some(h) = &self.host {
-                                h.command(declab_api::Command::SelectService(id));
+                        // A decoder's large waterfall (WFM: its multiplex), else
+                        // the services on their own.
+                        match minis.iter().find(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name)) {
+                            Some(m) => panels::big_waterfall(ui, m),
+                            None => {
+                                if let Some(id) = panels::services(ui, &self.view, self.selected_service) {
+                                    picked = Some(id);
+                                }
                             }
                         }
                     })
                 });
             });
+            if let Some(id) = picked {
+                self.selected_service = Some(id);
+                if let Some(h) = &self.host {
+                    h.command(declab_api::Command::SelectService(id));
+                }
+            }
         });
 
         let mut actions = Vec::new();

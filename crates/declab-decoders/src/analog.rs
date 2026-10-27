@@ -37,6 +37,10 @@ const EPS: f32 = 1e-9;
 /// Measurements, scopes and the card are reported this often, seconds: 60
 /// times a second, so the GUI's 60 fps has something new each frame.
 const REPORT_S: f64 = 1.0 / 60.0;
+/// The multiplex waterfall's FFT size (375 Hz bins at 384 kS/s) and the
+/// FFTs averaged into a row.
+const MPX_FFT: usize = 1024;
+const MPX_AVG: usize = 12;
 /// The SSB/CW filter's length at 48 kHz: a transition about 650 Hz wide.
 const SSB_TAPS: usize = 401;
 
@@ -206,6 +210,15 @@ struct Analog {
     rate_mark: (u64, u64),
     samples: u64,
     rds_rate: f64,
+    /// The multiplex's waterfall: Hann-windowed FFTs of the demodulated
+    /// multiplex, power averaged into rows (see `mpx_spectrum`).
+    mpx_fft: Option<std::sync::Arc<dyn rustfft::Fft<f32>>>,
+    mpx_win: Vec<f32>,
+    mpx_buf: Vec<f32>,
+    mpx_scratch: Vec<Iq>,
+    mpx_acc: Vec<f32>,
+    mpx_n: usize,
+    mpx_rows: Vec<Vec<f32>>,
 }
 
 impl Analog {
@@ -248,6 +261,13 @@ impl Analog {
             rate_mark: (0, 0),
             samples: 0,
             rds_rate: 0.0,
+            mpx_fft: None,
+            mpx_win: Vec::new(),
+            mpx_buf: Vec::with_capacity(MPX_FFT),
+            mpx_scratch: Vec::with_capacity(MPX_FFT),
+            mpx_acc: vec![0.0; MPX_FFT / 2],
+            mpx_n: 0,
+            mpx_rows: Vec::new(),
         }
     }
 
@@ -303,7 +323,7 @@ impl Analog {
             details.push(kv("content", if r.music() { "music" } else { "speech" }.to_string()));
         }
         details.push(kv("RDS sync", if r.synced() { "held" } else { "searching" }.to_string()));
-        details.push(kv("RDS SNR", format!("{:.1} dB", r.snr_db())));
+        details.push(kv("RDS Es/N0", format!("{:.1} dB", r.snr_db())));
         details.push(kv("groups", format!("{}", r.groups())));
         details.push(kv("groups/s", format!("{:.1}", self.rds_rate)));
         if let Some(b) = r.bler() {
@@ -342,6 +362,54 @@ impl Analog {
         }
     }
 
+    /// The multiplex waterfall's span from 0 Hz: 100 kHz (the multiplex is
+    /// 53 kHz of stereo, RDS to 59.4, anything else above), in whole bins.
+    fn mpx_span_hz(&self, rate: f64) -> f32 {
+        (Self::mpx_bins(rate) as f64 * rate / MPX_FFT as f64) as f32
+    }
+
+    fn mpx_bins(rate: f64) -> usize {
+        ((100e3 / (rate / MPX_FFT as f64)).ceil() as usize).min(MPX_FFT / 2)
+    }
+
+    /// The multiplex's spectrum: FFTs of `MPX_FFT` samples, `MPX_AVG` to a
+    /// row (about 31 rows a second at 384 kS/s), 0 to 100 kHz.
+    fn mpx_spectrum(&mut self, rate: f64) {
+        let fft = self
+            .mpx_fft
+            .get_or_insert_with(|| rustfft::FftPlanner::new().plan_fft_forward(MPX_FFT))
+            .clone();
+        if self.mpx_win.is_empty() {
+            self.mpx_win = (0..MPX_FFT)
+                .map(|k| 0.5 - 0.5 * (std::f32::consts::TAU * k as f32 / MPX_FFT as f32).cos())
+                .collect();
+        }
+        let bins = Self::mpx_bins(rate);
+        let mut start = 0;
+        while self.mpx_buf.len() - start >= MPX_FFT {
+            self.mpx_scratch.clear();
+            self.mpx_scratch.extend(
+                self.mpx_buf[start..start + MPX_FFT].iter().zip(&self.mpx_win).map(|(x, w)| Iq::new(x * w, 0.0)),
+            );
+            fft.process(&mut self.mpx_scratch);
+            for (a, z) in self.mpx_acc.iter_mut().zip(&self.mpx_scratch) {
+                *a += z.norm_sqr();
+            }
+            self.mpx_n += 1;
+            start += MPX_FFT;
+            if self.mpx_n == MPX_AVG {
+                let k = (MPX_AVG * MPX_FFT) as f32;
+                self.mpx_rows.push(self.mpx_acc[..bins].iter().map(|p| 10.0 * (p / k).max(1e-20).log10()).collect());
+                self.mpx_acc.iter_mut().for_each(|a| *a = 0.0);
+                self.mpx_n = 0;
+                if self.mpx_rows.len() > 64 {
+                    self.mpx_rows.remove(0);
+                }
+            }
+        }
+        self.mpx_buf.drain(..start);
+    }
+
     /// The pilot over the guard band's noise, dB.
     fn pilot_snr_db(&self) -> f32 {
         20.0 * (self.meas_level.max(EPS) / self.guard_level.max(EPS)).log10()
@@ -364,11 +432,32 @@ impl Analog {
             out.measure("Pilot", self.pilot_snr_db() as f64, "dB");
             out.measure("RDS groups", self.rds.groups() as f64, "");
             out.measure("RDS phase", self.rds.phase_deg() as f64, "°");
-            out.measure("RDS SNR", self.rds.snr_db() as f64, "dB");
+            out.measure("RDS Es/N0", self.rds.snr_db() as f64, "dB");
             out.scopes.push(("RDS", self.rds.points()));
             let span_hz = self.rds.row_span_hz() as f32;
             for db in self.rds.take_rows() {
-                out.waterfalls.push(("RDS", WaterfallRow { span_hz, db }));
+                out.waterfalls.push((
+                    "RDS",
+                    WaterfallRow {
+                        low_hz: -span_hz / 2.0,
+                        span_hz,
+                        db,
+                        // 0 Hz and the edges of the ±2.4 kHz RDS band.
+                        marks: vec![(-2400.0, ""), (0.0, ""), (2400.0, "")],
+                    },
+                ));
+            }
+            let mpx_span = self.mpx_span_hz(rate);
+            for db in self.mpx_rows.drain(..) {
+                out.waterfalls.push((
+                    "FM multiplex",
+                    WaterfallRow {
+                        low_hz: 0.0,
+                        span_hz: mpx_span,
+                        db,
+                        marks: vec![(19_000.0, "19 pilot"), (38_000.0, "38 stereo"), (57_000.0, "57 RDS")],
+                    },
+                ));
             }
             let station = self.rds.station();
             if station != self.last_station {
@@ -473,6 +562,7 @@ impl Decoder for Analog {
                 let multiplex = multiplex - self.fm_dc;
                 if mode == Mode::Wfm && rate >= 140_000.0 {
                     self.rds.feed(multiplex, self.pilot_phase, rate);
+                    self.mpx_buf.push(multiplex);
                 }
                 let mono = self.mono.tick(multiplex, audio_k);
                 if stereo {
@@ -547,6 +637,9 @@ impl Decoder for Analog {
             }
         }
         self.count += iq.len() as u64;
+        if !self.mpx_buf.is_empty() {
+            self.mpx_spectrum(rate);
+        }
         if muted {
             self.pcm.fill(0.0);
         }

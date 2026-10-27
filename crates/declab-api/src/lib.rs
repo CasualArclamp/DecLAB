@@ -177,13 +177,19 @@ pub struct Card {
     pub text: Vec<(String, String)>,
 }
 
-/// One row of a decoder's own small waterfall (WFM's RDS subcarrier):
-/// power in dB across `span_hz` about the decoder's own 0 Hz, the most
-/// negative frequency first.
+/// One row of a decoder's own waterfall: power in dB from `low_hz` across
+/// `span_hz` (the decoder's own frequencies: WFM's RDS subcarrier about
+/// 0 Hz, its multiplex from 0 to 100 kHz), lowest frequency first.
+///
+/// A waterfall named like one of the decoder's scopes is drawn small under
+/// that scope; any other is drawn large beside the card.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct WaterfallRow {
+    pub low_hz: f32,
     pub span_hz: f32,
     pub db: Vec<f32>,
+    /// Frequencies to mark, with a short label ("19 pilot"); may be empty.
+    pub marks: Vec<(f32, &'static str)>,
 }
 
 /// Decoded audio, interleaved f32 at `sample_rate`.
