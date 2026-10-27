@@ -52,6 +52,8 @@ struct Options {
     chan: Option<f64>,
     zoom: Option<f64>,
     wheel: bool,
+    /// `--scope NAME`: show this decoder scope (for screenshots).
+    scope: Option<String>,
     screenshot: Option<PathBuf>,
     after: f64,
 }
@@ -87,6 +89,7 @@ impl Options {
                     })
                 }
                 "--wheel" => o.wheel = true,
+                "--scope" => o.scope = Some(value("a scope name")?),
                 "--screenshot" => o.screenshot = Some(value("a .png path")?.into()),
                 "--after" => o.after = value("seconds")?.parse().map_err(|_| "--after: seconds")?,
                 "-h" | "--help" => {
@@ -100,6 +103,10 @@ impl Options {
         }
         Ok(o)
     }
+}
+
+fn opts_scope(o: &Options) -> String {
+    o.scope.clone().unwrap_or_default()
 }
 
 fn main() -> eframe::Result {
@@ -193,6 +200,8 @@ struct App {
     bandwidth_hz: f64,
     selected_service: Option<u32>,
     volume: f32,
+    /// The scope shown: "" for the channel IQ, else a decoder scope's name.
+    scope: String,
 
     /// The view: its centre, and how far it is zoomed into the source's span.
     view_hz: f64,
@@ -257,6 +266,7 @@ impl App {
             bandwidth_hz: 0.0,
             selected_service: None,
             volume: prefs::num(&p, "volume").unwrap_or(0.8),
+            scope: opts_scope(&opts),
             view_hz: center_hz,
             zoom: opts.zoom.or(prefs::num(&p, "zoom")).unwrap_or(1.0),
             dragging: false,
@@ -751,7 +761,7 @@ impl eframe::App for App {
             let w = ui.available_width();
             ui.columns(3, |cols| {
                 let _ = w;
-                panels::boxed(&mut cols[0], |ui| panels::scope_and_readings(ui, &self.view, colour));
+                panels::boxed(&mut cols[0], |ui| panels::scope_and_readings(ui, &self.view, colour, &mut self.scope));
                 panels::boxed(&mut cols[1], |ui| {
                     let (cmds, bw, vol) = panels::decoder_settings(
                         ui,

@@ -15,7 +15,9 @@ pub const RED: Color32 = Color32::from_rgb(255, 138, 128);
 const GREY: Color32 = Color32::from_gray(154);
 const BOX: Color32 = Color32::from_rgb(24, 24, 24);
 /// A reading tile's width, margins included.
-const TILE_W: f32 = 126.0;
+const TILE_W: f32 = 122.0;
+/// The scope's side, points.
+const SCOPE: f32 = 170.0;
 
 /// Format a reading: few digits for big numbers, more for small ones.
 pub fn value(v: f64) -> String {
@@ -69,16 +71,38 @@ pub fn boxed(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 }
 
 /// The constellation scope and the readings beside it.
-pub fn scope_and_readings(ui: &mut Ui, view: &DecoderView, colour: Color32) {
+///
+/// `which` names the scope shown: "" for the channel IQ, else one of the
+/// decoder's own (`DecoderView::scopes`); a row of names picks it.
+pub fn scope_and_readings(ui: &mut Ui, view: &DecoderView, colour: Color32, which: &mut String) {
+    let total = ui.available_width();
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
-            ui.label(RichText::new("channel IQ").color(GREY).size(11.0));
-            scope(ui, &view.constellation, colour, 180.0);
+            ui.horizontal(|ui| {
+                let mut pick = |ui: &mut Ui, key: &str, label: &str| {
+                    let on = which.as_str() == key;
+                    let text = RichText::new(label).size(11.0).color(if on { Color32::WHITE } else { GREY });
+                    if ui.selectable_label(on, text).clicked() {
+                        *which = key.to_string();
+                    }
+                };
+                pick(ui, "", "channel IQ");
+                for (name, _) in &view.scopes {
+                    pick(ui, name, name);
+                }
+            });
+            let pts = view
+                .scopes
+                .iter()
+                .find(|(n, _)| *n == which.as_str())
+                .map_or(&view.constellation, |(_, p)| p);
+            scope(ui, pts, colour, SCOPE);
         });
         ui.add_space(8.0);
         ui.vertical(|ui| {
-            // As many columns of tiles as fit beside the scope.
-            let cols = ((ui.available_width() + 8.0) / (TILE_W + 8.0)).floor().max(1.0) as usize;
+            // As many columns of tiles as fit beside the scope (measured from
+            // the box: inside a horizontal row egui offers the whole row).
+            let cols = ((total - SCOPE - 16.0 + 8.0) / (TILE_W + 8.0)).floor().max(1.0) as usize;
             let cpu = format!("{:.0}", view.cpu_percent);
             let tiles: Vec<(&str, String, &str)> = view
                 .measurements
@@ -86,13 +110,17 @@ pub fn scope_and_readings(ui: &mut Ui, view: &DecoderView, colour: Color32) {
                 .map(|m| (m.name, value(m.value), m.unit))
                 .chain(std::iter::once(("decoder CPU", cpu, "%")))
                 .collect();
-            egui::Grid::new("readings").num_columns(cols).spacing([8.0, 8.0]).show(ui, |ui| {
-                for (i, (name, v, unit)) in tiles.iter().enumerate() {
-                    tile(ui, name, v, unit);
-                    if i % cols == cols - 1 {
-                        ui.end_row();
+            // A decoder with many readings scrolls rather than pushing the
+            // panel out of the window.
+            egui::ScrollArea::vertical().id_salt("readings").max_height(SCOPE + 22.0).show(ui, |ui| {
+                egui::Grid::new("readings").num_columns(cols).spacing([8.0, 8.0]).show(ui, |ui| {
+                    for (i, (name, v, unit)) in tiles.iter().enumerate() {
+                        tile(ui, name, v, unit);
+                        if i % cols == cols - 1 {
+                            ui.end_row();
+                        }
                     }
-                }
+                });
             });
         });
     });

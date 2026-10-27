@@ -252,6 +252,8 @@ impl Analog {
         if self.mode == Mode::Wfm && rate >= 120_000.0 {
             out.measure("Pilot", self.pilot_snr_db() as f64, "dB");
             out.measure("RDS groups", self.rds.groups() as f64, "");
+            out.measure("RDS phase", self.rds.phase_deg() as f64, "°");
+            out.scopes.push(("RDS", self.rds.take_points()));
             let station = self.rds.station();
             if station != self.last_station {
                 out.services = Some(vec![Service {

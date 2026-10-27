@@ -165,3 +165,27 @@ DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
   at 98.8 MHz with a 440 Hz left / 1 kHz right tone, three mono ones),
   made by `python tools/make_fm.py out/sim_fm_98.000MHz_10Msps.cs8 4`
   (numpy); the capture itself is not committed.
+
+## 6. Live test and RDS (2026-10-27)
+
+- **Live GUI on the Airspy** (with DecDVB-T closed): the FM band shows
+  stations here after all (96.1, 97.3, 100.1 MHz among them; the earlier
+  CLI probes had missed them). WFM on 96.1 MHz: constant-envelope ring,
+  pilot 20-49 dB, stereo, about 17 % of a core for the decoder, 31-50 % for
+  the whole app.
+- **Fixed from the live run:** ~170 blocks were dropped at every start
+  while the decoder's worker waited for the sound device to open; sound now
+  has its own thread (`AudioOut::spawn`) and none are dropped.
+- **RDS** was slow live (17 groups in 15 s, part of the RadioText, no PS).
+  DecSAT's RDS used only the in-phase part of the 57 kHz subcarrier, which
+  EN 62106 lets a station put in phase or in quadrature with the pilot's
+  third harmonic. Now: I and Q, the BPSK phase followed from the symbols
+  squared, chips decided on the derotated signal. Unit-tested with
+  synthesized group 0A at 0, 90, 180 and 270 degrees (PS read every time);
+  `tools/make_fm.py` puts RDS (PS "DECLAB") on its stereo station, and the
+  GUI decodes it at ~10.7 groups/s. **Not yet tried live** (DecDVB-T had
+  the Airspy again).
+- **Decoder scopes:** `Sink::scopes` carries named scopes beside the
+  channel IQ; WFM sends "RDS" (one derotated point per symbol) and an
+  "RDS phase" reading. The GUI offers them above the scope
+  (`--scope RDS` for screenshots).

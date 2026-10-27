@@ -3,7 +3,9 @@
 
 Stations (offset Hz, level, stereo?, left tone, right tone):
 the one at +0.8 MHz (98.8 MHz) is stereo: 440 Hz left, 1 kHz right,
-pilot at 10 %. Usage: python make_fm.py OUT.cs8 [seconds]
+pilot at 10 %, and RDS (PI C123, PS "DECLAB") on a 57 kHz subcarrier in
+quadrature to the pilot's third harmonic, at 5 %.
+Usage: python make_fm.py OUT.cs8 [seconds]
 """
 import sys
 
@@ -19,6 +21,34 @@ STATIONS = [
 ]
 
 
+POLY = 0x5B9
+OFFSETS = [0x0FC, 0x198, 0x168, 0x1B4]
+
+
+def syndrome(v):
+    for bit in range(25, 9, -1):
+        if v & (1 << bit):
+            v ^= POLY << (bit - 10)
+    return v & 0x3FF
+
+
+def rds_chips(seconds):
+    """Group 0A x4 (PS "DECLAB  "), differentially coded, two biphase chips a bit."""
+    ps = b"DECLAB  "
+    bits = []
+    for seg in range(4):
+        d = (ps[2 * seg] << 8) | ps[2 * seg + 1]
+        for info, off in [(0xC123, OFFSETS[0]), (seg, OFFSETS[1]), (0xE0CD, OFFSETS[2]), (d, OFFSETS[3])]:
+            w = (info << 10) | (syndrome(info << 10) ^ off)
+            bits += [(w >> i) & 1 for i in range(25, -1, -1)]
+    level = 0
+    chips = []
+    for i in range(int(seconds * 1187.5) + 2):
+        level ^= bits[i % len(bits)]
+        chips += [1.0, -1.0] if level else [-1.0, 1.0]
+    return np.array(chips)
+
+
 def main():
     out = sys.argv[1]
     seconds = float(sys.argv[2]) if len(sys.argv) > 2 else 4.0
@@ -26,6 +56,7 @@ def main():
     chunk = 1_000_000
     rng = np.random.default_rng(1)
     phases = [0.0] * len(STATIONS)
+    chips = rds_chips(seconds)
     with open(out, 'wb') as f:
         for start in range(0, total, chunk):
             n = min(chunk, total - start)
@@ -37,7 +68,9 @@ def main():
                 if stereo:
                     pilot = np.sin(2 * np.pi * 19e3 * t)
                     sub = np.sin(2 * np.pi * 38e3 * t)
-                    m = 0.45 * (left + right) / 2 * 2 * 0.9 + 0.45 * (left - right) * sub * 0.9 + 0.1 * pilot
+                    rds = chips[np.minimum((t * 2375.0).astype(np.int64), len(chips) - 1)]
+                    sub57 = np.cos(3 * 2 * np.pi * 19e3 * t + np.pi / 2)
+                    m = 0.45 * (left + right) / 2 * 2 * 0.85 + 0.45 * (left - right) * sub * 0.85 + 0.1 * pilot + 0.05 * rds * sub57
                 else:
                     m = 0.9 * left
                 inst = 2 * np.pi * (off + DEV * m) / FS

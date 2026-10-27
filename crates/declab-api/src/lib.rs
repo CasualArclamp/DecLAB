@@ -188,6 +188,9 @@ pub struct Sink {
     /// Equalised constellation points for the scope (a decimated handful,
     /// not every carrier).
     pub constellation: Vec<Iq>,
+    /// More scopes, by name (WFM's "RDS" symbols): the GUI offers each
+    /// beside the constellation. Points as for `constellation`.
+    pub scopes: Vec<(&'static str, Vec<Iq>)>,
     /// One line for the log panel.
     pub log: Vec<String>,
     /// A frequency correction for the host's tuner, Hz (an OFDM receiver's
@@ -219,6 +222,7 @@ impl Sink {
         self.services = None;
         self.measurements.clear();
         self.constellation.clear();
+        self.scopes.clear();
         self.log.clear();
         self.retune_by_hz = None;
         self.custom.clear();

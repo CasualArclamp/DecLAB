@@ -136,6 +136,8 @@ pub struct DecoderView {
     /// The latest value of each measurement, in the order first seen.
     pub measurements: Vec<Measurement>,
     pub constellation: Vec<Iq>,
+    /// The decoder's other scopes, the latest points of each.
+    pub scopes: Vec<(&'static str, Vec<Iq>)>,
     pub log: VecDeque<String>,
     pub services: Vec<Service>,
     pub text: HashMap<u32, String>,
@@ -705,7 +707,6 @@ fn worker_thread(
     let mut generation: Option<u32> = None;
     let mut first_sample = 0u64;
     let mut audio: Option<AudioOut> = None;
-    let mut audio_failed = false;
     let mut busy = Duration::ZERO;
     let mut window = Instant::now();
 
@@ -722,7 +723,7 @@ fn worker_thread(
             WorkerMsg::Stop => break,
             WorkerMsg::Command(c) => {
                 if matches!(c, Command::SelectService(_))
-                    && let Some(a) = &mut audio
+                    && let Some(a) = &audio
                 {
                     a.clear();
                 }
@@ -788,25 +789,14 @@ fn worker_thread(
             }
         }
         if !sink.audio.is_empty() {
-            if audio.is_none() && !audio_failed {
-                match AudioOut::open() {
-                    Ok(a) => {
-                        sh.view.lock().unwrap().audio = Some(a.describe());
-                        audio = Some(a);
-                    }
-                    Err(e) => {
-                        audio_failed = true;
-                        sh.view.lock().unwrap().audio = Some(format!("no sound: {e}"));
-                    }
-                }
-            }
-            if let Some(a) = &mut audio {
-                a.set_volume(f32::from_bits(sh.volume.load(Ordering::Relaxed)));
-                for chunk in &sink.audio {
-                    a.push(chunk.sample_rate, chunk.channels, &chunk.samples);
-                }
+            // The sound thread opens the device; nothing here waits for it.
+            let a = audio.get_or_insert_with(AudioOut::spawn);
+            a.set_volume(f32::from_bits(sh.volume.load(Ordering::Relaxed)));
+            for chunk in sink.audio.drain(..) {
+                a.push(chunk.sample_rate, chunk.channels, chunk.samples);
             }
         }
+        let audio_status = audio.as_ref().and_then(AudioOut::status);
         if !sink.custom.is_empty() {
             let mut q = sh.custom.lock().unwrap();
             q.extend(sink.custom.drain(..));
@@ -815,6 +805,9 @@ fn worker_thread(
             }
         }
         let mut v = sh.view.lock().unwrap();
+        if audio_status.is_some() {
+            v.audio = audio_status;
+        }
         v.lock = sink.lock;
         for m in sink.measurements.drain(..) {
             match v.measurements.iter_mut().find(|x| x.name == m.name) {
@@ -824,6 +817,15 @@ fn worker_thread(
         }
         if !sink.constellation.is_empty() {
             std::mem::swap(&mut v.constellation, &mut sink.constellation);
+        }
+        for (name, pts) in sink.scopes.drain(..) {
+            if pts.is_empty() {
+                continue;
+            }
+            match v.scopes.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, old)) => *old = pts,
+                None => v.scopes.push((name, pts)),
+            }
         }
         for line in sink.log.drain(..) {
             v.log.push_back(line);

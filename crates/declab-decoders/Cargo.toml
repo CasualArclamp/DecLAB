@@ -15,4 +15,5 @@ ui = ["declab-api/ui", "dep:egui"]
 [dependencies]
 declab-api = { path = "../declab-api", default-features = false }
 declab-dsp = { path = "../declab-dsp" }
+num-complex.workspace = true
 egui = { workspace = true, optional = true }

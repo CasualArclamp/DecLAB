@@ -512,6 +512,7 @@ dependencies = [
  "declab-api",
  "declab-dsp",
  "egui",
+ "num-complex",
 ]
 
 [[package]]

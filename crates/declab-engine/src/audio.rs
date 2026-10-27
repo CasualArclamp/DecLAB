@@ -8,9 +8,15 @@
 //! kept in a ring the device's callback empties. The ring primes with
 //! [`START_MS`] before playing, and is cut back to [`MAX_MS`] if a source
 //! runs ahead of the sound card (a file played faster than real time).
+//!
+//! The device lives on a thread of its own ([`AudioOut::spawn`]): opening a
+//! WASAPI device can take a second or two, and a decoder's worker that
+//! waited for it lost that much of a live radio's signal (seen live: ~170
+//! blocks dropped at every start).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -36,11 +42,81 @@ struct Resample {
     last: [f32; 2],
 }
 
-/// The sound output. Dropping it stops the sound.
+/// Chunks queued for the sound thread before new ones are dropped.
+const QUEUE: usize = 64;
+
+enum Msg {
+    Pcm { rate: u32, channels: u16, samples: Vec<f32> },
+    Clear,
+}
+
+/// The sound output, run on a thread of its own. Dropping it stops the
+/// thread and the sound.
 pub struct AudioOut {
-    ring: Arc<Mutex<Ring>>,
-    /// Volume, 0..1, as f32 bits (an atomic float).
+    tx: SyncSender<Msg>,
     volume: Arc<AtomicU32>,
+    /// The device in use, or why there is none; `None` while it opens.
+    status: Arc<Mutex<Option<String>>>,
+}
+
+impl AudioOut {
+    /// Start the sound thread; it opens the default device by itself.
+    pub fn spawn() -> AudioOut {
+        let (tx, rx) = mpsc::sync_channel::<Msg>(QUEUE);
+        let volume = Arc::new(AtomicU32::new(0.8f32.to_bits()));
+        let status = Arc::new(Mutex::new(None));
+        let (v, st) = (volume.clone(), status.clone());
+        std::thread::Builder::new()
+            .name("declab-audio".into())
+            .spawn(move || {
+                let mut dev = match Device::open(v) {
+                    Ok(d) => {
+                        *st.lock().unwrap() = Some(d.describe());
+                        d
+                    }
+                    Err(e) => {
+                        *st.lock().unwrap() = Some(format!("no sound: {e}"));
+                        // Keep taking chunks so the sender never fills.
+                        for _ in rx {}
+                        return;
+                    }
+                };
+                for m in rx {
+                    match m {
+                        Msg::Pcm { rate, channels, samples } => dev.push(rate, channels, &samples),
+                        Msg::Clear => dev.clear(),
+                    }
+                }
+            })
+            .expect("cannot start the sound thread");
+        AudioOut { tx, volume, status }
+    }
+
+    /// The device in use, or why there is none (`None` while it opens).
+    pub fn status(&self) -> Option<String> {
+        self.status.lock().unwrap().clone()
+    }
+
+    pub fn set_volume(&self, v: f32) {
+        self.volume.store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Queue `samples` (interleaved, `channels` of them) at `rate`; never waits.
+    pub fn push(&self, rate: u32, channels: u16, samples: Vec<f32>) {
+        if let Err(TrySendError::Full(_)) = self.tx.try_send(Msg::Pcm { rate, channels, samples }) {
+            // The sound card is behind: this chunk is lost, not the radio's samples.
+        }
+    }
+
+    /// Drop what is queued (a new station).
+    pub fn clear(&self) {
+        let _ = self.tx.try_send(Msg::Clear);
+    }
+}
+
+/// The open device: the ring its callback empties.
+struct Device {
+    ring: Arc<Mutex<Ring>>,
     rate: u32,
     resample: Resample,
     name: String,
@@ -48,9 +124,9 @@ pub struct AudioOut {
     _stream: cpal::Stream,
 }
 
-impl AudioOut {
+impl Device {
     /// Open the default output device.
-    pub fn open() -> Result<AudioOut, String> {
+    fn open(volume: Arc<AtomicU32>) -> Result<Device, String> {
         let host = cpal::default_host();
         let dev = host.default_output_device().ok_or("no sound output device")?;
         let name = dev
@@ -61,7 +137,6 @@ impl AudioOut {
         let (rate, ch, fmt) = (cfg.sample_rate(), cfg.channels() as usize, cfg.sample_format());
         let config: cpal::StreamConfig = cfg.into();
         let ring = Arc::new(Mutex::new(Ring::default()));
-        let volume = Arc::new(AtomicU32::new(0.8f32.to_bits()));
         let start = (rate * START_MS / 1000) as usize * 2;
         let err = |e| eprintln!("audio output: {e}");
         // Rust note: `callback::<f32>` picks the generic function's sample
@@ -81,9 +156,8 @@ impl AudioOut {
         }
         .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
-        Ok(AudioOut {
+        Ok(Device {
             ring,
-            volume,
             rate,
             resample: Resample::default(),
             name,
@@ -91,16 +165,11 @@ impl AudioOut {
         })
     }
 
-    pub fn describe(&self) -> String {
+    fn describe(&self) -> String {
         format!("{} · {} kHz", self.name, self.rate as f64 / 1000.0)
     }
 
-    pub fn set_volume(&self, v: f32) {
-        self.volume.store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
-    }
-
-    /// Queue `samples` (interleaved, `channels` of them) at `rate`.
-    pub fn push(&mut self, rate: u32, channels: u16, samples: &[f32]) {
+    fn push(&mut self, rate: u32, channels: u16, samples: &[f32]) {
         let ch = channels.max(1) as usize;
         let rs = &mut self.resample;
         if rs.in_rate != rate {
@@ -129,8 +198,7 @@ impl AudioOut {
         }
     }
 
-    /// Drop what is queued (a new station).
-    pub fn clear(&mut self) {
+    fn clear(&mut self) {
         let mut ring = self.ring.lock().unwrap();
         ring.buf.clear();
         ring.primed = false;
