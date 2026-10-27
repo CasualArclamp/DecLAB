@@ -189,3 +189,20 @@ DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
   channel IQ; WFM sends "RDS" (one derotated point per symbol) and an
   "RDS phase" reading. The GUI offers them above the scope
   (`--scope RDS` for screenshots).
+
+### Live RDS check (2026-10-27, later)
+
+- The 96.1 MHz signal that gave RDS earlier had gone. The broadcasts now
+  heard, 97.3 and 101.1 MHz, are stereo (pilot 23-32 dB) but give no RDS.
+  `tools/rds_look.py` on a 20 s recording (`out/fm_99.200MHz_10Msps.cs8`,
+  `declab run … --record`) shows why: the 57 kHz band is at the FM noise
+  floor (-65 dB beside -65 dB), the pilot 37 dB above its own. The aerial
+  is UHF band-pass filtered; the stations arrive too weak for RDS.
+- More Airspy gain makes it worse: at LNA 14 / mixer 12-15 / VGA 10-12 the
+  pilot falls to the noise (input -9 to -16 dBFS): the tuner is overloaded,
+  most likely by the UHF TV the filter passes. 12/10/8 is the best setting.
+- The RDS I/Q rework is therefore verified on synthesized RDS only; it
+  needs a station with RDS above the noise (a proper FM aerial).
+- A 96-100 % decoder CPU reading seen once live at +3.1 MHz did not
+  reproduce: both offsets decode the recording at the same speed (~6x
+  real time).

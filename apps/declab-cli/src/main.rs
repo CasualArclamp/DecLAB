@@ -7,7 +7,7 @@
 //! declab run <decoder> --file <capture> [--rate HZ] [--freq HZ] [--offset HZ]
 //!                      [--bandwidth HZ] [--seconds S] [--realtime]
 //! declab run <decoder> --radio hackrf|airspy --freq HZ [--rate HZ] [--offset HZ]
-//!                      [--gain AMP,LNA,VGA] [--seconds S]
+//!                      [--gain AMP,LNA,VGA] [--seconds S] [--record OUT.cs8]
 //! ```
 //!
 //! `run` prints the decoder's lock and measurements once a second and plays
@@ -101,6 +101,10 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         },
     );
     host.set_decoder(Some(factory));
+    if let Some(path) = o.get("--record") {
+        // The raw samples, as they come from the source (format from the extension).
+        host.record(Some(PathBuf::from(path)));
+    }
     let spec = factory.input(host.source_rate());
     let offset = o.hz("--offset")?.unwrap_or(0.0);
     let bandwidth = o.hz("--bandwidth")?.unwrap_or(spec.bandwidth_hz);
