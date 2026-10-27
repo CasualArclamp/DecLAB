@@ -39,6 +39,8 @@ use wheel::{Entry, Outcome, Wheel, family_colour};
 
 /// Smallest view span, Hz: zooming stops here.
 const MIN_SPAN_HZ: f64 = 20e3;
+/// Frames a second while a source runs: decoders report 60 times a second.
+const FPS: f64 = 60.0;
 /// Retunes while the band is being dragged, at most this often.
 const RETUNE_EVERY: Duration = Duration::from_millis(90);
 
@@ -222,6 +224,10 @@ struct App {
     cpu: CpuGauge,
 
     started: Instant,
+    /// Frames drawn, and the pacing (see `pace`).
+    frames: u64,
+    last_frame: Option<Instant>,
+    delay_ms: f64,
     shot_sent: bool,
     saving: bool,
 }
@@ -282,6 +288,9 @@ impl App {
             view: DecoderView::default(),
             cpu: CpuGauge::default(),
             started: Instant::now(),
+            frames: 0,
+            last_frame: None,
+            delay_ms: 1000.0 / FPS,
             shot_sent: false,
             saving,
             opts,
@@ -432,16 +441,12 @@ impl App {
         self.last_retune = Instant::now();
     }
 
-    /// Keep the view inside what the source covers (a radio's view moves the
-    /// radio, so only a file's is held in).
+    /// Keep the view's centre on what the source covers: a file's band can
+    /// be dragged until its edge reaches the middle of the view; a radio's
+    /// view is the radio's span, which a drag retunes.
     fn clamp_view(&mut self) {
-        let half = (self.rate() - self.span()).max(0.0) / 2.0;
-        if !self.live {
-            self.view_hz = self.view_hz.clamp(self.center_hz - half, self.center_hz + half);
-        } else {
-            let c = self.center_hz;
-            self.view_hz = self.view_hz.clamp(c - half, c + half);
-        }
+        let half = if self.live { (self.rate() - self.span()).max(0.0) / 2.0 } else { self.rate() / 2.0 };
+        self.view_hz = self.view_hz.clamp(self.center_hz - half, self.center_hz + half);
     }
 
     fn apply_gains(&mut self) {
@@ -670,6 +675,23 @@ impl App {
         for a in actions {
             match a {
                 band::Action::Tune(hz) => self.tune_channel(hz),
+                band::Action::Bandwidth(bw) => {
+                    self.bandwidth_hz = bw.clamp(500.0, self.rate());
+                    if let Some(h) = &self.host {
+                        h.set_channel_at(self.chan_hz, self.bandwidth_hz);
+                    }
+                }
+                band::Action::MoveChannel(hz) => {
+                    self.chan_hz = (hz / 100.0).round() * 100.0;
+                    if let Some(h) = &self.host {
+                        h.set_channel_at(self.chan_hz, self.bandwidth_hz);
+                    }
+                }
+                band::Action::ChannelDragEnd => {
+                    // Settle on the raster as a click would.
+                    let hz = self.chan_hz;
+                    self.tune_channel(hz);
+                }
                 band::Action::Pan(d) => {
                     self.dragging = true;
                     self.view_hz += d;
@@ -706,6 +728,25 @@ impl App {
         }
     }
 
+    /// The wait to ask egui for before the next frame. egui's repaint timer
+    /// does not keep the interval it is given (a 16 ms request drew a few
+    /// hundred frames a second here, a core and more), so the wait is steered
+    /// by the gaps between frames actually seen, to hold `FPS`. DecDVB-T's
+    /// way (same author).
+    fn pace(&mut self) -> Duration {
+        let target = 1000.0 / FPS;
+        let now = Instant::now();
+        if let Some(prev) = self.last_frame.replace(now) {
+            let gap = now.duration_since(prev).as_secs_f64() * 1e3;
+            // A long gap is a pause (input, nothing running), not a measurement.
+            if gap < 4.0 * target {
+                self.delay_ms += 0.5 * (target - gap);
+            }
+        }
+        self.delay_ms = self.delay_ms.clamp(1.0, 4.0 * target);
+        Duration::from_secs_f64(self.delay_ms / 1e3)
+    }
+
     fn handle_screenshot(&mut self, ctx: &egui::Context) {
         let Some(path) = self.opts.screenshot.clone() else { return };
         if !self.shot_sent && self.started.elapsed().as_secs_f64() >= self.opts.after {
@@ -723,8 +764,9 @@ impl App {
         let (w, h) = (image.size[0] as u32, image.size[1] as u32);
         match image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
             Ok(()) => eprintln!(
-                "screenshot saved to {} (app CPU {:.0} %, decoder {:.0} %, {})",
+                "screenshot saved to {} ({:.0} fps, app CPU {:.0} %, decoder {:.0} %, {})",
                 path.display(),
+                self.frames as f64 / self.started.elapsed().as_secs_f64(),
                 self.cpu.percent,
                 self.view.cpu_percent,
                 self.stats.describe
@@ -738,6 +780,7 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.frames += 1;
         self.poll();
         self.cpu.poll();
         if self.opts.wheel && self.wheel.is_none() && self.started.elapsed() > Duration::from_millis(300) {
@@ -754,15 +797,24 @@ impl eframe::App for App {
         egui::Panel::bottom("status").show(ui, |ui| {
             panels::status(ui, &self.stats, &self.view, running, self.cpu.percent, self.error.as_deref());
         });
-        egui::Panel::bottom("decoder").resizable(false).exact_size(280.0).show(ui, |ui| {
+        egui::Panel::bottom("decoder").resizable(false).exact_size(330.0).show(ui, |ui| {
             ui.add_space(6.0);
             panels::card(ui, info.name, colour, &self.view, running);
             ui.add_space(6.0);
+            // The scope and the card take half the width, the decoder's
+            // settings and its services a quarter each.
             let w = ui.available_width();
-            ui.columns(3, |cols| {
-                let _ = w;
-                panels::boxed(&mut cols[0], |ui| panels::scope_and_readings(ui, &self.view, colour, &mut self.scope));
-                panels::boxed(&mut cols[1], |ui| {
+            let h = ui.available_height();
+            let gap = ui.spacing().item_spacing.x;
+            let widths = [w * 0.5 - gap, w * 0.25 - gap, w * 0.25 - gap];
+            ui.horizontal_top(|ui| {
+                let chan = self.chan_hz;
+                ui.allocate_ui_with_layout(egui::vec2(widths[0], h), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    panels::boxed(ui, |ui| {
+                        panels::scope_and_card(ui, &self.view, colour, &mut self.scope, info.name, chan)
+                    })
+                });
+                ui.allocate_ui_with_layout(egui::vec2(widths[1], h), egui::Layout::top_down(egui::Align::Min), |ui| panels::boxed(ui, |ui| {
                     let (cmds, bw, vol) = panels::decoder_settings(
                         ui,
                         info.name,
@@ -784,14 +836,16 @@ impl eframe::App for App {
                     if vol {
                         self.save_prefs();
                     }
-                });
-                panels::boxed(&mut cols[2], |ui| {
-                    if let Some(id) = panels::services(ui, &self.view, self.selected_service) {
-                        self.selected_service = Some(id);
-                        if let Some(h) = &self.host {
-                            h.command(declab_api::Command::SelectService(id));
+                }));
+                ui.allocate_ui_with_layout(egui::vec2(widths[2], h), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    panels::boxed(ui, |ui| {
+                        if let Some(id) = panels::services(ui, &self.view, self.selected_service) {
+                            self.selected_service = Some(id);
+                            if let Some(h) = &self.host {
+                                h.command(declab_api::Command::SelectService(id));
+                            }
                         }
-                    }
+                    })
                 });
             });
         });
@@ -811,6 +865,8 @@ impl eframe::App for App {
                 spectrum_db: &self.smooth,
                 row_center_hz: self.row_center,
                 row_rate: self.row_rate,
+                wf_center_hz: self.history.anchor().map_or(self.row_center, |a| a.0),
+                wf_rate: self.history.anchor().map_or(self.row_rate, |a| a.1),
                 view_center_hz: self.view_hz,
                 view_span_hz: self.span(),
                 levels: self.history.levels(),
@@ -841,8 +897,10 @@ impl eframe::App for App {
         self.handle_screenshot(&ctx);
         // Stopped, the window only redraws on input (it costs a fifth of a
         // core to draw it 30 times a second for nothing).
+        // 60 frames a second while running: decoders report 60 times a second.
         if self.host.is_some() || self.opts.screenshot.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(33));
+            let wait = self.pace();
+            ctx.request_repaint_after(wait);
         }
     }
 }

@@ -16,6 +16,25 @@ use num_complex::Complex32;
 
 const TAU:f64=std::f64::consts::TAU;
 const POLY:u16=0x5B9;
+
+/// The programme type's name (EN 62106 annex F, the European RDS table).
+pub fn pty_name(pty:u8)->&'static str {
+    const NAMES:[&str;32]=["None","News","Current affairs","Information","Sport","Education","Drama","Culture",
+        "Science","Varied","Pop music","Rock music","Easy listening","Light classical","Serious classical",
+        "Other music","Weather","Finance","Children's","Social affairs","Religion","Phone-in","Travel",
+        "Leisure","Jazz","Country","National music","Oldies","Folk music","Documentary","Alarm test","Alarm"];
+    NAMES[usize::from(pty&31)]
+}
+
+/// Year, month, day of a Modified Julian Day (EN 62106 annex G).
+fn mjd_date(mjd:u32)->(u32,u32,u32) {
+    let mjd=f64::from(mjd);
+    let y1=((mjd-15078.2)/365.25).floor();
+    let m1=((mjd-14956.1-(y1*365.25).floor())/30.6001).floor();
+    let d=mjd-14956.0-(y1*365.25).floor()-(m1*30.6001).floor();
+    let k=if m1==14.0||m1==15.0 {1.0} else {0.0};
+    ((y1+k+1900.0) as u32,(m1-1.0-k*12.0) as u32,d as u32)
+}
 const OFFSETS:[u16;5]=[0x0FC,0x198,0x168,0x1B4,0x350];
 /// Symbols kept for the scope between reports.
 const SCOPE_POINTS: usize = 400;
@@ -51,6 +70,22 @@ pub struct RdsDecoder {
     ps:[u8;8],
     text:[u8;64],
     groups:u64,
+    /// Traffic programme / announcement, music (vs speech), from block B.
+    tp:bool,
+    ta:bool,
+    music:bool,
+    /// RadioText's A/B flag: a change clears the text (EN 62106 3.1.5.3).
+    rt_ab:Option<bool>,
+    /// Alternative frequencies heard (group 0A), as codes 1-204.
+    af:std::collections::BTreeSet<u8>,
+    /// Clock time (group 4A): MJD, hour, minute (UTC), local offset in
+    /// half hours.
+    ct:Option<(u32,u8,u8,i8)>,
+    /// Groups heard of each type, index type*2 + version (0A, 0B, 1A…).
+    types:[u64;32],
+    /// Blocks that passed and failed the CRC while in sync.
+    blocks_ok:u64,
+    blocks_bad:u64,
 }
 impl Default for RdsDecoder {
     fn default() -> Self {
@@ -75,6 +110,15 @@ impl Default for RdsDecoder {
             ps: [0; 8],
             text: [0; 64],
             groups: 0,
+            tp: false,
+            ta: false,
+            music: false,
+            rt_ab: None,
+            af: std::collections::BTreeSet::new(),
+            ct: None,
+            types: [0; 32],
+            blocks_ok: 0,
+            blocks_bad: 0,
         }
     }
 }
@@ -91,10 +135,39 @@ impl RdsDecoder {
         (!t.is_empty()).then_some(t)
     }
     pub fn groups(&self)->u64 { self.groups }
-    /// The symbols since the last call, derotated (on the real axis when
-    /// the phase is followed), for the constellation scope.
-    pub fn take_points(&mut self)->Vec<Complex32> {
-        self.points.drain(..).collect()
+    /// The last few hundred symbols, derotated (on the real axis when the
+    /// phase is followed), for the constellation scope. Kept, not drained:
+    /// reports come 60 times a second, far faster than the symbols.
+    pub fn points(&self)->Vec<Complex32> {
+        self.points.iter().copied().collect()
+    }
+    pub fn pi(&self)->Option<u16> { self.pi }
+    pub fn pty(&self)->Option<u8> { self.pty }
+    pub fn tp_ta(&self)->(bool,bool) { (self.tp,self.ta) }
+    pub fn music(&self)->bool { self.music }
+    /// Block error rate while in sync, 0..1 (None before any block).
+    pub fn bler(&self)->Option<f64> {
+        let n=self.blocks_ok+self.blocks_bad;
+        (n>0).then(|| self.blocks_bad as f64/n as f64)
+    }
+    /// The alternative frequencies heard, MHz (EN 62106 3.2.1.6.1: code n is
+    /// 87.5 + 0.1 n MHz).
+    pub fn af_mhz(&self)->Vec<f64> {
+        self.af.iter().map(|&c| 87.5+0.1*f64::from(c)).collect()
+    }
+    /// Clock time as "YYYY-MM-DD hh:mm UTC+h:mm", if group 4A was heard.
+    pub fn clock(&self)->Option<String> {
+        let (mjd,h,m,off)=self.ct?;
+        let (y,mo,d)=mjd_date(mjd);
+        let sign=if off<0 {'-'} else {'+'};
+        let half=off.unsigned_abs();
+        Some(format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02} UTC{sign}{}:{:02}",half/2,(half%2)*30))
+    }
+    /// "0A 120 · 2A 40 · 4A 1": the group types heard, most first.
+    pub fn group_types(&self)->String {
+        let mut v:Vec<(usize,u64)>=self.types.iter().copied().enumerate().filter(|(_,n)| *n>0).collect();
+        v.sort_by_key(|x| std::cmp::Reverse(x.1));
+        v.iter().map(|(i,n)| format!("{}{} {n}",i/2,if i%2==0 {'A'} else {'B'})).collect::<Vec<_>>().join(" · ")
     }
     /// The subcarrier's phase against the pilot's third harmonic, degrees
     /// (0 or 180: in phase; ±90: in quadrature).
@@ -181,14 +254,17 @@ impl RdsDecoder {
             self.words[0]=(word>>10) as u16;
             self.block=1;
             self.bits_seen=0;
+            self.blocks_ok+=1;
         } else if crc==wanted || (self.block==2 && crc==OFFSETS[4]) {
             self.words[self.block]=(word>>10) as u16;
             self.block+=1;
             self.bits_seen=0;
+            self.blocks_ok+=1;
             if self.block==4 {self.group();self.block=0;}
         } else {
             self.block=0;
             self.bits_seen=0;
+            self.blocks_bad+=1;
         }
     }
     fn group(&mut self){
@@ -199,10 +275,33 @@ impl RdsDecoder {
         let typ=(b>>12)&0xf;
         let ver=(b>>11)&1;
         let addr=(b&0xf) as usize;
-        if typ==0 && addr<4 {
-            self.ps[addr*2]=(self.words[3]>>8) as u8;
-            self.ps[addr*2+1]=self.words[3] as u8;
+        self.types[(typ*2+ver) as usize]+=1;
+        self.tp=(b>>10)&1==1;
+        if typ==0 {
+            // EN 62106 3.1.5.1: TA, M/S, then the PS segment address.
+            self.ta=(b>>4)&1==1;
+            self.music=(b>>3)&1==1;
+            let seg=(b&3) as usize;
+            self.ps[seg*2]=(self.words[3]>>8) as u8;
+            self.ps[seg*2+1]=self.words[3] as u8;
+            if ver==0 {
+                for code in [(self.words[2]>>8) as u8, self.words[2] as u8] {
+                    if (1..=204).contains(&code) { self.af.insert(code); }
+                }
+            }
+        } else if typ==4 && ver==0 {
+            // EN 62106 3.1.5.6: MJD over blocks B-C, then hour, minute, offset.
+            let c=u32::from(self.words[2]);
+            let d=u32::from(self.words[3]);
+            let mjd=((u32::from(b)&3)<<15)|(c>>1);
+            let hour=(((c&1)<<4)|(d>>12)) as u8;
+            let minute=((d>>6)&0x3f) as u8;
+            let off=(d&0x1f) as i8*if d&0x20!=0 {-1} else {1};
+            if hour<24 && minute<60 { self.ct=Some((mjd,hour,minute,off)); }
         } else if typ==2 {
+            let ab=(b>>4)&1==1;
+            if self.rt_ab.is_some_and(|x| x!=ab) { self.text=[0;64]; }
+            self.rt_ab=Some(ab);
             if ver==0 && addr<16 {
                 let i=addr*4;
                 self.text[i]=(self.words[2]>>8) as u8;
@@ -284,9 +383,27 @@ mod tests {
     }
 
     #[test]
+    fn group_types_and_errors_are_counted() {
+        let d = decode(0.0, 3.0);
+        assert!(d.group_types().starts_with("0A "), "{}", d.group_types());
+        assert_eq!(d.pi(), Some(0xC123));
+        assert!(d.bler().is_some_and(|b| b < 0.05), "{:?}", d.bler());
+        // Block C of the test groups is 0xE0CD: AF codes 0xE0 (a filler,
+        // 224) and 0xCD (205, not a frequency): none kept.
+        assert!(d.af_mhz().is_empty());
+    }
+
+    #[test]
+    fn modified_julian_day_to_date() {
+        // EN 62106 annex G's example: MJD 45218 is 1982-09-06.
+        assert_eq!(mjd_date(45218), (1982, 9, 6));
+        assert_eq!(mjd_date(61340), (2026, 10, 27));
+    }
+
+    #[test]
     fn the_scope_points_lie_on_the_real_axis_once_derotated() {
-        let mut d = decode(TAU / 4.0, 2.0);
-        let pts = d.take_points();
+        let d = decode(TAU / 4.0, 2.0);
+        let pts = d.points();
         assert!(pts.len() > 100);
         let tail = &pts[pts.len() / 2..];
         let (re, im): (f32, f32) = tail.iter().fold((0.0, 0.0), |(a, b), z| (a + z.re.abs(), b + z.im.abs()));

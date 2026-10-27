@@ -58,7 +58,10 @@ enum Msg {
     },
     /// Rows a second (the display's frame rate).
     Rate(f64),
-    /// Forget the rows held and the half-made one (a retune).
+    /// Forget the half-made row (a retune: its windows straddle two
+    /// tunings). The rows held keep their own centres and go out as paced:
+    /// dropping them, and waiting for a new lead, froze the waterfall for a
+    /// quarter of a second at every retune, so a dragged band never moved.
     Clear,
 }
 
@@ -115,7 +118,7 @@ impl Waterfall {
         self.send(Msg::Rate(rows_per_s));
     }
 
-    /// A retune: the rows held are the old channel's.
+    /// A retune: the half-made row is dropped (see [`Msg::Clear`]).
     pub fn clear(&mut self) {
         self.seen = 0;
         self.sent = 0;
@@ -225,8 +228,6 @@ fn run(rx: Receiver<Msg>, fft: usize, rows_per_s: f64, out: Arc<Mutex<VecDeque<R
                 let _ = spec.take_row(&mut row);
             }
             Ok(Msg::Clear) => {
-                held.clear();
-                next = None;
                 let _ = spec.take_row(&mut row);
             }
             Err(RecvTimeoutError::Timeout) => {}

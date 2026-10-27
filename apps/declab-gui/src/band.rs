@@ -4,6 +4,8 @@
 //! (same author); the view here can be zoomed and moved:
 //!
 //! - **left click** tunes the decoder's channel to the frequency clicked;
+//! - **left-drag an edge** of the channel sets its bandwidth (both edges
+//!   move, the channel stays centred); **left-drag inside** it moves it;
 //! - **middle-drag** moves the band (a radio is retuned to follow);
 //! - **middle click** (no drag) opens the decoder wheel where the pointer is;
 //! - **scroll** zooms about the pointer.
@@ -30,6 +32,10 @@ pub struct BandInput<'a> {
     pub spectrum_db: &'a [f32],
     pub row_center_hz: f64,
     pub row_rate: f64,
+    /// The waterfall's frame: the centre and rate its rows are held about
+    /// (`History::anchor`), which need not be the newest row's.
+    pub wf_center_hz: f64,
+    pub wf_rate: f64,
     /// The view: its centre and width, Hz.
     pub view_center_hz: f64,
     pub view_span_hz: f64,
@@ -50,6 +56,12 @@ pub struct BandInput<'a> {
 /// What the pointer did.
 pub enum Action {
     Tune(f64),
+    /// An edge of the channel was dragged: this bandwidth, Hz.
+    Bandwidth(f64),
+    /// The channel was dragged here (its centre, Hz).
+    MoveChannel(f64),
+    /// A drag of the channel or its edges ended.
+    ChannelDragEnd,
     /// Move the view by this many Hz (positive: to higher frequencies).
     Pan(f64),
     /// The middle button was released without a drag.
@@ -57,6 +69,18 @@ pub enum Action {
     OpenWheel(Pos2),
     /// Zoom by this factor (> 1: in) keeping `anchor_hz` under the pointer.
     Zoom { factor: f64, anchor_hz: f64, frac: f64 },
+}
+
+/// How near an edge of the channel, points, a drag takes the edge.
+const EDGE_GRAB: f32 = 5.0;
+
+/// What a left-drag started on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Grab {
+    /// An edge of the channel: the bandwidth.
+    Edge,
+    /// Inside the channel, this far from its centre (Hz): the channel.
+    Body(f64),
 }
 
 /// The spectrum's height in a band view `height` points tall.
@@ -168,14 +192,17 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
         painter.add(Shape::line(pts, Stroke::new(1.2, TRACE)));
     }
 
-    // The waterfall: the part of the rows in view, newest on top.
+    // The waterfall: the part of its rows in view, newest on top. Drawn at
+    // fractional pixels, so a drag moves it smoothly.
+    let wf_lo = inp.wf_center_hz - inp.wf_rate / 2.0;
+    let (w_lo, w_hi) = (wf_lo.max(lo_hz), (wf_lo + inp.wf_rate).min(lo_hz + span));
     if let Some((tex, uv)) = inp.waterfall
-        && inp.row_rate > 0.0
-        && seen_hi > seen_lo
+        && inp.wf_rate > 0.0
+        && w_hi > w_lo
     {
-        let u0 = ((seen_lo - row_lo) / inp.row_rate) as f32;
-        let u1 = ((seen_hi - row_lo) / inp.row_rate) as f32;
-        let r = Rect::from_min_max(pos2(x_of(seen_lo), wf.top()), pos2(x_of(seen_hi), wf.bottom()));
+        let u0 = ((w_lo - wf_lo) / inp.wf_rate) as f32;
+        let u1 = ((w_hi - wf_lo) / inp.wf_rate) as f32;
+        let r = Rect::from_min_max(pos2(x_of(w_lo), wf.top()), pos2(x_of(w_hi), wf.bottom()));
         let uv = Rect::from_min_max(pos2(u0, uv.min.y), pos2(u1, uv.max.y));
         painter.image(tex, r, uv, Color32::WHITE);
     }
@@ -212,7 +239,7 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
     painter.text(
         pos2(plot_r - 6.0, wf.bottom() - 6.0),
         Align2::RIGHT_BOTTOM,
-        "left click: tune · middle-drag: move band · middle click: decoders · scroll: zoom",
+        "left click: tune · drag edges: bandwidth · middle-drag: move band · middle click: decoders · scroll: zoom",
         FontId::monospace(11.0),
         Color32::from_gray(160),
     );
@@ -268,6 +295,60 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
         }
     }
 
+    // The channel's edges and body: hovering shows what a drag would do.
+    let edges = inp.channel.as_ref().map(|(hz, bw, _, _)| (*hz, *bw, x_of(hz - bw / 2.0), x_of(hz + bw / 2.0)));
+    let grab_of = |p: Pos2| -> Option<Grab> {
+        let (hz, _, xa, xb) = edges?;
+        if !in_plot(p) {
+            return None;
+        }
+        if (p.x - xa).abs() <= EDGE_GRAB || (p.x - xb).abs() <= EDGE_GRAB {
+            Some(Grab::Edge)
+        } else if p.x > xa && p.x < xb {
+            Some(Grab::Body(hz_of(p.x) - hz))
+        } else {
+            None
+        }
+    };
+    if let Some(p) = resp.hover_pos() {
+        match grab_of(p) {
+            Some(Grab::Edge) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
+            Some(Grab::Body(_)) => ui.ctx().set_cursor_icon(CursorIcon::Grab),
+            None => {}
+        }
+    }
+    let grab_id = resp.id.with("grab");
+    // Where the button went down, not where the drag was recognised (a few
+    // points on): an edge is only a few points wide.
+    if resp.drag_started_by(PointerButton::Primary)
+        && let Some(p) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
+    {
+        let g = grab_of(p);
+        ui.data_mut(|d| d.insert_temp(grab_id, g));
+    }
+    if resp.dragged_by(PointerButton::Primary)
+        && let Some(p) = resp.interact_pointer_pos()
+        && let Some((hz, _, _, _)) = edges
+    {
+        match ui.data(|d| d.get_temp::<Option<Grab>>(grab_id)).flatten() {
+            Some(Grab::Edge) => {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                actions.push(Action::Bandwidth(2.0 * (hz_of(p.x) - hz).abs()));
+            }
+            Some(Grab::Body(off)) => {
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                actions.push(Action::MoveChannel(hz_of(p.x) - off));
+            }
+            None => {}
+        }
+    }
+    if resp.drag_stopped_by(PointerButton::Primary) {
+        if ui.data(|d| d.get_temp::<Option<Grab>>(grab_id)).flatten().is_some() {
+            actions.push(Action::ChannelDragEnd);
+        }
+        ui.data_mut(|d| d.remove::<Option<Grab>>(grab_id));
+    }
+
     if resp.clicked_by(PointerButton::Primary)
         && let Some(p) = resp.interact_pointer_pos()
         && in_plot(p)
@@ -304,6 +385,10 @@ mod tests {
     /// Run frames of the band (98 MHz, 10 MHz wide) with these events, one
     /// list per frame, and gather what it asks for.
     fn run(frames: Vec<Vec<egui::Event>>, inert: bool) -> Vec<Action> {
+        run_with(frames, inert, None)
+    }
+
+    fn run_with(frames: Vec<Vec<egui::Event>>, inert: bool, channel: Option<(f64, f64)>) -> Vec<Action> {
         let spectrum = vec![-80.0f32; 1024];
         let mut sim = Sim::new(W, 600.0);
         let mut out = Vec::new();
@@ -316,11 +401,13 @@ mod tests {
                     spectrum_db: &spectrum,
                     row_center_hz: 98e6,
                     row_rate: 10e6,
+                    wf_center_hz: 98e6,
+                    wf_rate: 10e6,
                     view_center_hz: 98e6,
                     view_span_hz: 10e6,
                     levels: (-90.0, -40.0),
                     waterfall: None,
-                    channel: None,
+                    channel: channel.map(|(hz, bw)| (hz, bw, Color32::WHITE, String::new())),
                     moving: None,
                     inert,
                     idle_text: "",
@@ -413,6 +500,48 @@ mod tests {
             true,
         );
         assert!(a.is_empty());
+    }
+
+    /// The x of `hz` in the test band.
+    fn x(hz: f64) -> f32 {
+        LEFT + ((hz - 93e6) / 10e6 * PLOT_W) as f32
+    }
+
+    fn drag(x0: f32, x1: f32) -> Vec<Vec<egui::Event>> {
+        let mut f = vec![vec![moved(x0, 300.0)], vec![button(x0, 300.0, PointerButton::Primary, true)]];
+        let steps = 5;
+        for k in 1..=steps {
+            f.push(vec![moved(x0 + (x1 - x0) * k as f32 / steps as f32, 300.0)]);
+        }
+        f.push(vec![button(x1, 300.0, PointerButton::Primary, false)]);
+        f
+    }
+
+    #[test]
+    fn dragging_an_edge_sets_the_bandwidth() {
+        // A 1 MHz channel at 98 MHz: drag its upper edge out to 98.8 MHz.
+        let a = run_with(drag(x(98.5e6), x(98.8e6)), false, Some((98e6, 1e6)));
+        let bw: Vec<f64> = a.iter().filter_map(|a| if let Action::Bandwidth(b) = a { Some(*b) } else { None }).collect();
+        let last = *bw.last().expect("bandwidth actions");
+        assert!((last - 1.6e6).abs() < 30e3, "{last}");
+        assert!(a.iter().any(|a| matches!(a, Action::ChannelDragEnd)));
+        assert!(!a.iter().any(|a| matches!(a, Action::Tune(_) | Action::MoveChannel(_))));
+    }
+
+    #[test]
+    fn dragging_inside_the_channel_moves_it() {
+        // Grab it 200 kHz above its centre and move 1 MHz down.
+        let a = run_with(drag(x(98.2e6), x(97.2e6)), false, Some((98e6, 1e6)));
+        let to: Vec<f64> = a.iter().filter_map(|a| if let Action::MoveChannel(h) = a { Some(*h) } else { None }).collect();
+        let last = *to.last().expect("move actions");
+        assert!((last - 97e6).abs() < 30e3, "{last}");
+        assert!(!a.iter().any(|a| matches!(a, Action::Bandwidth(_))));
+    }
+
+    #[test]
+    fn a_left_drag_on_the_empty_band_does_nothing() {
+        let a = run_with(drag(x(95e6), x(96e6)), false, Some((98e6, 1e6)));
+        assert!(a.iter().all(|a| matches!(a, Action::Zoom { .. })), "{} actions", a.len());
     }
 
     #[test]

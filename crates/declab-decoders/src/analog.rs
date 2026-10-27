@@ -23,19 +23,20 @@
 use std::f64::consts::TAU;
 
 use declab_api::{
-    Audio, Block, Command, Decoder, DecoderFactory, DecoderInfo, Family, InputSpec, Iq, Lock,
-    Service, Sink,
+    Audio, Block, Card, Command, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq,
+    Lock, Service, Sink,
 };
 
 use declab_dsp::{Fir, lowpass};
 
-use crate::analog_rds::RdsDecoder;
+use crate::analog_rds::{RdsDecoder, pty_name};
 
 /// The audio the decoder hands back, Hz.
 const PCM_RATE: u32 = 48_000;
 const EPS: f32 = 1e-9;
-/// Measurements and RDS text are reported this often, seconds.
-const REPORT_S: f64 = 0.25;
+/// Measurements, scopes and the card are reported this often, seconds: 60
+/// times a second, so the GUI's 60 fps has something new each frame.
+const REPORT_S: f64 = 1.0 / 60.0;
 /// The SSB/CW filter's length at 48 kHz: a transition about 650 Hz wide.
 const SSB_TAPS: usize = 401;
 
@@ -199,6 +200,12 @@ struct Analog {
     last_station: Option<String>,
     last_text: Option<String>,
     settings: Settings,
+    /// How much of the stereo difference is let through, 0..1.
+    blend: f32,
+    /// RDS groups and samples at the start of the rate's window.
+    rate_mark: (u64, u64),
+    samples: u64,
+    rds_rate: f64,
 }
 
 impl Analog {
@@ -237,6 +244,98 @@ impl Analog {
             last_station: None,
             last_text: None,
             settings: Settings::for_mode(mode),
+            blend: 0.0,
+            rate_mark: (0, 0),
+            samples: 0,
+            rds_rate: 0.0,
+        }
+    }
+
+    /// The card: for WFM everything RDS has said; for the others the level.
+    fn card(&self, level: f64) -> Card {
+        let name = match self.mode {
+            Mode::Am => "AM",
+            Mode::Dsb => "DSB",
+            Mode::Usb => "USB",
+            Mode::Lsb => "LSB",
+            Mode::Cw => "CW",
+            Mode::Nfm => "NFM",
+            Mode::Wfm => "WFM",
+        };
+        let kv = |k: &str, v: String| (k.to_string(), v);
+        if self.mode != Mode::Wfm {
+            let mut details = vec![kv("level", format!("{level:.1} dBFS"))];
+            if let Some(sq) = self.settings.squelch_dbfs {
+                details.push(kv("squelch", format!("{sq:.0} dBFS")));
+            }
+            if self.settings.deemph_us > 0.0 {
+                details.push(kv("de-emphasis", format!("{:.0} µs", self.settings.deemph_us)));
+            }
+            if self.mode == Mode::Cw {
+                details.push(kv("note", format!("{:.0} Hz", self.settings.pitch_hz)));
+            }
+            return Card {
+                title: name.into(),
+                headline: format!("{level:.1} dBFS"),
+                gauge: Some(Gauge {
+                    label: "level".into(),
+                    value_db: level as f32 + 100.0,
+                    need_db: self.settings.squelch_dbfs.map(|s| s as f32 + 100.0),
+                    need_label: "squelch".into(),
+                    range: (0.0, 100.0),
+                }),
+                details,
+                text: Vec::new(),
+            };
+        }
+        let r = &self.rds;
+        let stereo = self.blend > 0.5;
+        let mut details = vec![
+            kv("level", format!("{level:.1} dBFS")),
+            kv("stereo", format!("{:.0} %", self.blend * 100.0)),
+        ];
+        let mut text = Vec::new();
+        if let Some(pi) = r.pi() {
+            details.push(kv("PI", format!("{pi:04X}")));
+            details.push(kv("PTY", r.pty().map_or("–", pty_name).to_string()));
+            let (tp, ta) = r.tp_ta();
+            details.push(kv("TP / TA", format!("{} / {}", u8::from(tp), u8::from(ta))));
+            details.push(kv("content", if r.music() { "music" } else { "speech" }.to_string()));
+        }
+        details.push(kv("groups", format!("{}", r.groups())));
+        details.push(kv("groups/s", format!("{:.1}", self.rds_rate)));
+        if let Some(b) = r.bler() {
+            details.push(kv("block errors", format!("{:.1} %", b * 100.0)));
+        }
+        details.push(kv("RDS phase", format!("{:.0}°", r.phase_deg())));
+        if let Some(c) = r.clock() {
+            details.push(kv("clock", c));
+        }
+        if let Some(t) = r.radio_text() {
+            text.push(kv("RadioText", t));
+        }
+        let af = r.af_mhz();
+        if !af.is_empty() {
+            let list: Vec<String> = af.iter().map(|f| format!("{f:.1}")).collect();
+            text.push(kv("AF (MHz)", list.join(" ")));
+        }
+        let types = r.group_types();
+        if !types.is_empty() {
+            text.push(kv("group types", types));
+        }
+        Card {
+            title: format!("WFM · {}", if stereo { "stereo" } else { "mono" }),
+            headline: r.station().unwrap_or_else(|| "–".into()),
+            gauge: Some(Gauge {
+                label: "pilot".into(),
+                value_db: self.pilot_snr_db(),
+                // The blend is full at 6x the guard band's noise: 15.6 dB.
+                need_db: Some(15.6),
+                need_label: "full stereo".into(),
+                range: (0.0, 60.0),
+            }),
+            details,
+            text,
         }
     }
 
@@ -247,13 +346,22 @@ impl Analog {
 
     fn report(&mut self, rate: f64, out: &mut Sink) {
         let mean = self.energy / self.count.max(1) as f64;
-        out.measure("Level", 10.0 * mean.max(1e-20).log10(), "dBFS");
+        let level = 10.0 * mean.max(1e-20).log10();
+        out.measure("Level", level, "dBFS");
         out.lock = Lock::Locked;
+        self.samples += self.count;
+        // RDS groups a second, over windows of about a second.
+        if (self.samples - self.rate_mark.1) as f64 >= rate {
+            let dt = (self.samples - self.rate_mark.1) as f64 / rate;
+            self.rds_rate = (self.rds.groups() - self.rate_mark.0) as f64 / dt;
+            self.rate_mark = (self.rds.groups(), self.samples);
+        }
+        out.card = Some(self.card(level));
         if self.mode == Mode::Wfm && rate >= 120_000.0 {
             out.measure("Pilot", self.pilot_snr_db() as f64, "dB");
             out.measure("RDS groups", self.rds.groups() as f64, "");
             out.measure("RDS phase", self.rds.phase_deg() as f64, "°");
-            out.scopes.push(("RDS", self.rds.take_points()));
+            out.scopes.push(("RDS", self.rds.points()));
             let station = self.rds.station();
             if station != self.last_station {
                 out.services = Some(vec![Service {
@@ -387,6 +495,7 @@ impl Decoder for Analog {
                     // noise: none at 2x the guard band, full stereo at 6x.
                     let ratio = self.meas_level / self.guard_level.max(EPS);
                     let blend = if allow_stereo { ((ratio - 2.0) / 4.0).clamp(0.0, 1.0) } else { 0.0 };
+                    self.blend = blend;
                     left = mono + difference * blend;
                     right = mono - difference * blend;
                 } else {

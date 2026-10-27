@@ -14,8 +14,6 @@ pub const AMBER: Color32 = Color32::from_rgb(255, 176, 40);
 pub const RED: Color32 = Color32::from_rgb(255, 138, 128);
 const GREY: Color32 = Color32::from_gray(154);
 const BOX: Color32 = Color32::from_rgb(24, 24, 24);
-/// A reading tile's width, margins included.
-const TILE_W: f32 = 122.0;
 /// The scope's side, points.
 const SCOPE: f32 = 170.0;
 
@@ -66,16 +64,24 @@ pub fn boxed(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
         .inner_margin(10.0)
         .show(ui, |ui| {
             ui.set_min_height(ui.available_height() - 22.0);
+            ui.set_min_width(ui.available_width());
             add(ui)
         });
 }
 
-/// The constellation scope and the readings beside it.
+/// The constellation scope (with its choice of scopes above it) and the
+/// decoder's card beside it, in the style of DecDVB-T's and DecSAT's cards.
 ///
 /// `which` names the scope shown: "" for the channel IQ, else one of the
-/// decoder's own (`DecoderView::scopes`); a row of names picks it.
-pub fn scope_and_readings(ui: &mut Ui, view: &DecoderView, colour: Color32, which: &mut String) {
-    let total = ui.available_width();
+/// decoder's own (`DecoderView::scopes`).
+pub fn scope_and_card(
+    ui: &mut Ui,
+    view: &DecoderView,
+    colour: Color32,
+    which: &mut String,
+    name: &str,
+    freq_hz: f64,
+) {
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
@@ -87,62 +93,142 @@ pub fn scope_and_readings(ui: &mut Ui, view: &DecoderView, colour: Color32, whic
                     }
                 };
                 pick(ui, "", "channel IQ");
-                for (name, _) in &view.scopes {
-                    pick(ui, name, name);
+                for (n, _) in &view.scopes {
+                    pick(ui, n, n);
                 }
             });
-            let pts = view
-                .scopes
-                .iter()
-                .find(|(n, _)| *n == which.as_str())
-                .map_or(&view.constellation, |(_, p)| p);
+            let pts = view.scopes.iter().find(|(n, _)| *n == which.as_str()).map_or(&view.constellation, |(_, p)| p);
             scope(ui, pts, colour, SCOPE);
         });
-        ui.add_space(8.0);
+        ui.add_space(10.0);
         ui.vertical(|ui| {
-            // As many columns of tiles as fit beside the scope (measured from
-            // the box: inside a horizontal row egui offers the whole row).
-            let cols = ((total - SCOPE - 16.0 + 8.0) / (TILE_W + 8.0)).floor().max(1.0) as usize;
-            let cpu = format!("{:.0}", view.cpu_percent);
-            let tiles: Vec<(&str, String, &str)> = view
-                .measurements
-                .iter()
-                .map(|m| (m.name, value(m.value), m.unit))
-                .chain(std::iter::once(("decoder CPU", cpu, "%")))
-                .collect();
-            // A decoder with many readings scrolls rather than pushing the
-            // panel out of the window.
-            egui::ScrollArea::vertical().id_salt("readings").max_height(SCOPE + 22.0).show(ui, |ui| {
-                egui::Grid::new("readings").num_columns(cols).spacing([8.0, 8.0]).show(ui, |ui| {
-                    for (i, (name, v, unit)) in tiles.iter().enumerate() {
-                        tile(ui, name, v, unit);
-                        if i % cols == cols - 1 {
-                            ui.end_row();
-                        }
-                    }
-                });
+            let fallback;
+            let card = match &view.card {
+                Some(c) => c,
+                None => {
+                    fallback = card_from_measurements(name, view);
+                    &fallback
+                }
+            };
+            egui::ScrollArea::vertical().id_salt("card").max_height(ui.available_height()).show(ui, |ui| {
+                draw_card(ui, card, colour, freq_hz, view.cpu_percent);
             });
         });
     });
 }
 
-fn tile(ui: &mut Ui, name: &str, v: &str, unit: &str) {
-    egui::Frame::NONE
-        .fill(Color32::from_rgb(31, 31, 31))
-        .stroke(Stroke::new(1.0, Color32::from_gray(44)))
-        .corner_radius(CornerRadius::same(4))
-        .inner_margin(egui::Margin::symmetric(8, 6))
+/// A card for a decoder that sends none: its measurements as details.
+fn card_from_measurements(name: &str, view: &DecoderView) -> declab_api::Card {
+    declab_api::Card {
+        title: name.to_string(),
+        headline: match view.lock {
+            Lock::Locked => "locked",
+            Lock::Synced => "synced",
+            Lock::Searching => "searching",
+        }
+        .to_string(),
+        gauge: None,
+        details: view
+            .measurements
+            .iter()
+            .map(|m| (m.name.to_string(), format!("{} {}", value(m.value), m.unit)))
+            .collect(),
+        text: Vec::new(),
+    }
+}
+
+/// A margin's colour: red below 0 dB, amber within 1 dB, else green (as in
+/// DecDVB-T's card).
+fn health(margin: f32) -> Color32 {
+    if margin < 0.0 {
+        Color32::from_rgb(230, 110, 110)
+    } else if margin < 1.0 {
+        Color32::from_rgb(240, 200, 80)
+    } else {
+        Color32::from_rgb(110, 220, 110)
+    }
+}
+
+fn draw_card(ui: &mut Ui, c: &declab_api::Card, colour: Color32, freq_hz: f64, cpu: f32) {
+    let strong = Color32::WHITE;
+    // The title bar: what is received, and where.
+    let bar = egui::Frame::new()
+        .fill(colour.gamma_multiply(0.15))
+        .corner_radius(CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 })
+        .inner_margin(egui::Margin { left: 8, right: 8, top: 3, bottom: 3 })
         .show(ui, |ui| {
-            ui.set_min_width(TILE_W - 16.0);
-            ui.set_max_width(TILE_W - 16.0);
-            ui.vertical(|ui| {
-                ui.label(RichText::new(name).color(GREY).size(11.0));
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(v).size(17.0).color(Color32::WHITE));
-                    ui.label(RichText::new(unit).size(11.0).color(GREY));
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&c.title).size(14.0).strong().color(colour));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new("MHz").size(11.0).color(GREY));
+                    ui.label(RichText::new(format!("{:.3}", freq_hz / 1e6)).size(16.0).color(strong));
                 });
             });
+        })
+        .response;
+    ui.painter().hline(bar.rect.x_range(), bar.rect.bottom(), Stroke::new(2.0, colour));
+    ui.add_space(4.0);
+
+    // The headline and the margin beside it.
+    let margin = c.gauge.as_ref().and_then(|g| g.need_db.map(|n| ((g.value_db - n) * 10.0).round() / 10.0 + 0.0));
+    ui.horizontal(|ui| {
+        let empty = c.headline == "–" || c.headline.is_empty();
+        ui.label(RichText::new(if empty { "–" } else { &c.headline }).size(24.0).color(if empty { GREY } else { colour }));
+        if let Some(m) = margin {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(format!("{m:+5.1} dB")).size(17.0).color(health(m)));
+            });
+        }
+    });
+
+    // The gauge, ticked where the signal needs to be.
+    if let Some(g) = &c.gauge {
+        let (lo, hi) = g.range;
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
+        let x_of = |db: f32| rect.left() + rect.width() * ((db - lo) / (hi - lo)).clamp(0.0, 1.0);
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius::same(2), Color32::from_rgb(10, 10, 10));
+        let fill = margin.map_or(Color32::from_rgb(100, 170, 255).gamma_multiply(0.8), health);
+        p.rect_filled(egui::Rect::from_min_max(rect.min, pos2(x_of(g.value_db), rect.max.y)), CornerRadius::same(2), fill);
+        if let Some(n) = g.need_db {
+            let x = x_of(n);
+            p.rect_filled(
+                egui::Rect::from_min_max(pos2(x - 1.0, rect.top() - 3.0), pos2(x + 1.0, rect.bottom() + 3.0)),
+                CornerRadius::ZERO,
+                strong,
+            );
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{} {:.1} dB", g.label, g.value_db)).size(12.0).color(GREY));
+            if let Some(n) = g.need_db {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(format!("{} {n:.1} dB", g.need_label)).size(12.0).color(GREY));
+                });
+            }
         });
+    }
+
+    // The details, two pairs a row, the decoder's CPU last.
+    ui.add_space(4.0);
+    let mut details: Vec<(String, String)> = c.details.clone();
+    details.push(("CPU".into(), format!("{cpu:.0} %")));
+    egui::Grid::new("card_details").num_columns(4).spacing([10.0, 3.0]).show(ui, |ui| {
+        for pair in details.chunks(2) {
+            for (k, v) in pair {
+                ui.label(RichText::new(k).size(12.0).color(GREY));
+                ui.label(RichText::new(v).size(12.0).color(strong));
+            }
+            ui.end_row();
+        }
+    });
+
+    // The text, each line under its label.
+    for (k, v) in &c.text {
+        ui.add_space(4.0);
+        ui.label(RichText::new(k).size(11.0).color(GREY));
+        ui.add(egui::Label::new(RichText::new(v).size(13.0).color(strong)).wrap());
+    }
 }
 
 /// IQ points, scaled so their RMS sits at 45 % of the half-width.

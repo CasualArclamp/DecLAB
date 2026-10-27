@@ -27,8 +27,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use declab_api::{
-    Block, Command, Decoder, DecoderFactory, InputSpec, Lock, Measurement, Picture, Service, Sink,
-    Tuning,
+    Block, Card, Command, Decoder, DecoderFactory, InputSpec, Lock, Measurement, Picture, Service,
+    Sink, Tuning,
 };
 use declab_core::{Iq, SampleFormat};
 use declab_dsp::{Ddc, Resampler};
@@ -135,6 +135,8 @@ pub struct DecoderView {
     pub lock: Lock,
     /// The latest value of each measurement, in the order first seen.
     pub measurements: Vec<Measurement>,
+    /// The decoder's latest card.
+    pub card: Option<Card>,
     pub constellation: Vec<Iq>,
     /// The decoder's other scopes, the latest points of each.
     pub scopes: Vec<(&'static str, Vec<Iq>)>,
@@ -730,11 +732,22 @@ fn worker_thread(
                 decoder.command(c, &mut sink);
             }
             WorkerMsg::Channel { target: t, bandwidth_hz } => {
+                // A new bandwidth, or a move within half of it (a channel
+                // dragged), keeps the decoder going: resetting it at every
+                // step of a drag would mute it until the drag ended.
+                let jump = match (target, t) {
+                    (Target::At(a), Target::At(b)) | (Target::Offset(a), Target::Offset(b)) => {
+                        (a - b).abs() > bandwidth.min(bandwidth_hz) / 2.0
+                    }
+                    _ => true,
+                };
                 target = t;
                 bandwidth = bandwidth_hz;
                 chain = None;
-                decoder.reset();
-                first_sample = 0;
+                if jump {
+                    decoder.reset();
+                    first_sample = 0;
+                }
             }
             WorkerMsg::Block(buf, meta) => {
                 if generation != Some(meta.generation) {
@@ -817,6 +830,9 @@ fn worker_thread(
         }
         if !sink.constellation.is_empty() {
             std::mem::swap(&mut v.constellation, &mut sink.constellation);
+        }
+        if let Some(c) = sink.card.take() {
+            v.card = Some(c);
         }
         for (name, pts) in sink.scopes.drain(..) {
             if pts.is_empty() {

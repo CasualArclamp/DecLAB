@@ -147,6 +147,36 @@ pub struct Service {
     pub kind: String,
 }
 
+/// A bar like the margin bar of DecDVB-T's and DecSAT's cards: a reading on
+/// a fixed scale, ticked where the decoder needs it to be.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Gauge {
+    /// What is measured ("pilot", "MER"), shown under the bar.
+    pub label: String,
+    pub value_db: f32,
+    /// What the signal needs (the tick), and what it is needed for.
+    pub need_db: Option<f32>,
+    pub need_label: String,
+    /// The bar's scale, dB: fixed so the bar does not jump.
+    pub range: (f32, f32),
+}
+
+/// The decoder's card, drawn like DecDVB-T's: a title bar, a big headline
+/// with the margin beside it, the gauge, label/value details (two pairs a
+/// row) and lines of text (each with its label). Sent whole when it changes
+/// (every report is fine: the GUI only keeps the latest).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Card {
+    /// "WFM · stereo".
+    pub title: String,
+    /// The big line: a station's name, a mode ("64-QAM 3/4").
+    pub headline: String,
+    pub gauge: Option<Gauge>,
+    pub details: Vec<(String, String)>,
+    /// Longer text, one per line, labelled ("RadioText", "AF").
+    pub text: Vec<(String, String)>,
+}
+
 /// Decoded audio, interleaved f32 at `sample_rate`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Audio {
@@ -185,6 +215,9 @@ pub struct Sink {
     /// The services list, sent whole whenever it changes.
     pub services: Option<Vec<Service>>,
     pub measurements: Vec<Measurement>,
+    /// The card, when the decoder has one to show (else the GUI makes one
+    /// from the measurements).
+    pub card: Option<Card>,
     /// Equalised constellation points for the scope (a decimated handful,
     /// not every carrier).
     pub constellation: Vec<Iq>,
@@ -221,6 +254,7 @@ impl Sink {
         self.text.clear();
         self.services = None;
         self.measurements.clear();
+        self.card = None;
         self.constellation.clear();
         self.scopes.clear();
         self.log.clear();

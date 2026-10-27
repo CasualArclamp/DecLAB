@@ -1,7 +1,15 @@
 // made by CasualArclamp
 //! Waterfall history, colour map and GPU ring texture (from DecDVB-T's GUI,
-//! same author, plus [`History::push_at`], which slides the rows when the
-//! radio is retuned so the band can be dragged).
+//! same author, plus [`History::push_at`], which keeps the rows in one frame
+//! of reference while the radio is retuned, so a dragged band glides).
+//!
+//! **Anchoring.** The rows are held as if made at one centre, the anchor. A
+//! row made elsewhere (the radio retuned) is shifted by whole bins as it
+//! goes in, the edge it leaves filled with the floor, so it costs one row's
+//! work and the ring texture takes it like any other row. Only when the
+//! radio has moved more than a quarter of the span from the anchor is
+//! everything shifted and redrawn once, about the new centre. Dragging used
+//! to shift and redraw every row at every retune (eleven times a second).
 //!
 //! Adapted from DecSAT's `waterfall.rs` (same author), whose ring-texture
 //! technique is from DecDRM's `ring_image.rs` (same
@@ -72,8 +80,8 @@ pub struct History {
     pub track: bool,
     floor: Option<f32>,
     peak: Option<f32>,
-    /// Centre and rate of the newest row.
-    tuned: Option<(f64, f64)>,
+    /// The centre and rate the rows are held at (see the module notes).
+    anchor: Option<(f64, f64)>,
 }
 
 impl Default for History {
@@ -89,7 +97,7 @@ impl Default for History {
             track: true,
             floor: None,
             peak: None,
-            tuned: None,
+            anchor: None,
         }
     }
 }
@@ -149,42 +157,45 @@ impl History {
         self.pushed += 1;
     }
 
-    /// Push a row made at `center_hz`, `rate` wide. If the radio has been
-    /// retuned since the last row (same rate), the rows held slide sideways
-    /// by the retune so they stay under their frequencies, with the floor
-    /// filling the edge that moved into view. Returns true if they slid.
-    pub fn push_at(&mut self, row: Vec<f32>, center_hz: f64, rate: f64) -> bool {
-        let mut slid = false;
-        if let Some((c, r)) = self.tuned
-            && r == rate
-            && c != center_hz
-            && row.len() == self.width
-            && !self.rows.is_empty()
-        {
-            let bins = ((center_hz - c) / (rate / self.width as f64)).round() as i64;
-            let fill = self.floor.unwrap_or(-120.0) - 6.0;
-            let w = self.width as i64;
-            for old in self.rows.iter_mut() {
-                if bins.abs() >= w {
-                    old.fill(fill);
-                } else if bins > 0 {
-                    // Tuned up: what was at bin k is now at k - bins.
-                    old.rotate_left(bins as usize);
-                    let n = old.len();
-                    old[n - bins as usize..].fill(fill);
-                } else if bins < 0 {
-                    old.rotate_right((-bins) as usize);
-                    old[..(-bins) as usize].fill(fill);
-                }
-            }
-            // Every row changed: the texture is made again.
-            self.epoch += 1;
-            slid = true;
+    /// Push a row made at `center_hz`, `rate` wide, into the anchor's frame
+    /// (see the module notes). Returns true when the rows were re-anchored
+    /// (everything redrawn).
+    pub fn push_at(&mut self, mut row: Vec<f32>, center_hz: f64, rate: f64) -> bool {
+        let fill = self.floor.unwrap_or(-120.0) - 6.0;
+        let fresh = match self.anchor {
+            Some((_, r)) => r != rate || row.len() != self.width,
+            None => true,
+        };
+        if fresh {
+            self.push(row);
+            self.anchor = Some((center_hz, rate));
+            return false;
         }
-        // After the push: a first row resets the history, tuning and all.
+        let (anchor, _) = self.anchor.expect("checked above");
+        let bin = rate / self.width as f64;
+        let mut moved = false;
+        if (center_hz - anchor).abs() > rate / 4.0 {
+            // Re-anchor on the radio: shift what is held once.
+            let bins = ((center_hz - anchor) / bin).round() as i64;
+            for old in self.rows.iter_mut() {
+                shift(old, bins, fill);
+            }
+            self.anchor = Some((center_hz, rate));
+            self.epoch += 1;
+            moved = true;
+        } else {
+            // This row into the anchor's frame: what is at bin k of the row
+            // is at bin k + bins about the anchor.
+            let bins = ((center_hz - anchor) / bin).round() as i64;
+            shift(&mut row, -bins, fill);
+        }
         self.push(row);
-        self.tuned = Some((center_hz, rate));
-        slid
+        moved
+    }
+
+    /// The centre and rate the rows are drawn about.
+    pub fn anchor(&self) -> Option<(f64, f64)> {
+        self.anchor
     }
 
     /// Colour range, dB (low, high).
@@ -196,6 +207,21 @@ impl History {
             (Some(f), Some(p)) => (f - 3.0, (p + 3.0).max(f + MIN_RANGE_DB)),
             _ => self.manual,
         }
+    }
+}
+
+/// Move `row` by `bins` (positive: towards lower bins, as when the centre
+/// it is drawn about moves up), filling what comes into view with `fill`.
+fn shift(row: &mut [f32], bins: i64, fill: f32) {
+    let n = row.len() as i64;
+    if bins.abs() >= n {
+        row.fill(fill);
+    } else if bins > 0 {
+        row.rotate_left(bins as usize);
+        row[(n - bins) as usize..].fill(fill);
+    } else if bins < 0 {
+        row.rotate_right((-bins) as usize);
+        row[..(-bins) as usize].fill(fill);
     }
 }
 
@@ -332,18 +358,38 @@ mod tests {
     }
 
     #[test]
-    fn rows_slide_with_a_retune() {
-        // 100 bins over 1 MHz: a carrier at bin 60. Tuning up 100 kHz puts
-        // it 10 bins lower in the rows already held.
+    fn a_retuned_row_goes_in_shifted_and_the_rest_stay() {
+        // 100 bins over 1 MHz: a carrier at bin 60. A row made 100 kHz
+        // higher has it at bin 50; about the anchor it is still at 60.
         let mut h = History::default();
         let mut row = vec![-100.0f32; 100];
         row[60] = -40.0;
-        h.push_at(row.clone(), 100e6, 1e6);
-        assert!(h.push_at(row, 100.1e6, 1e6));
-        assert_eq!(h.rows[0][50], -40.0);
-        assert!(h.rows[0][60] < -90.0);
+        h.push_at(row, 100e6, 1e6);
+        let mut moved = vec![-100.0f32; 100];
+        moved[50] = -40.0;
+        assert!(!h.push_at(moved, 100.1e6, 1e6), "no redraw for a small move");
+        assert_eq!(h.anchor(), Some((100e6, 1e6)));
+        assert_eq!(h.rows[0][60], -40.0);
+        assert_eq!(h.rows[1][60], -40.0);
         // The edge that came into view holds no made-up signal.
-        assert!(h.rows[0][95] < -90.0);
+        assert!(h.rows[1][95] < -90.0);
+    }
+
+    #[test]
+    fn a_long_move_re_anchors_once() {
+        let mut h = History::default();
+        let mut row = vec![-100.0f32; 100];
+        row[60] = -40.0;
+        h.push_at(row, 100e6, 1e6);
+        let e = h.epoch;
+        // 300 kHz up: past a quarter of the span.
+        let mut moved = vec![-100.0f32; 100];
+        moved[30] = -40.0;
+        assert!(h.push_at(moved, 100.3e6, 1e6));
+        assert_eq!(h.anchor(), Some((100.3e6, 1e6)));
+        assert_ne!(h.epoch, e);
+        assert_eq!(h.rows[0][30], -40.0, "the old row moved with the anchor");
+        assert_eq!(h.rows[1][30], -40.0);
     }
 
     #[test]

@@ -206,3 +206,29 @@ DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
 - A 96-100 % decoder CPU reading seen once live at +3.1 MHz did not
   reproduce: both offsets decode the recording at the same speed (~6x
   real time).
+
+## 7. Dragging, the card, 60 fps (2026-10-27)
+
+- **Smooth band drags.** The engine's waterfall thread used to drop its
+  held rows and wait a new quarter-second lead at every retune; a drag
+  retunes every 90 ms, so the waterfall froze. Now a retune only drops the
+  half-made row. The GUI keeps its rows about one anchor centre: a retuned
+  row is shifted by whole bins as it goes in (one row's work), and only a
+  move past a quarter of the span re-anchors (one full redraw). A file's
+  band can be dragged until its edge reaches the middle of the view.
+- **Channel by mouse.** Left-drag an edge of the bracket: bandwidth (both
+  edges, centred). Left-drag inside: the channel moves (100 Hz steps, onto
+  the raster on release). A move within half the bandwidth, or a new
+  bandwidth, does not reset the decoder (it would mute during a drag).
+- **The card** (`declab_api::Card` + `Gauge`): DecDVB-T's layout (title bar
+  in the family colour with the frequency, a big headline with the margin
+  beside it, a bar ticked at what is needed, label/value pairs two a row,
+  labelled text). WFM's holds all of RDS: PS, PI, PTY name, TP/TA,
+  music/speech, groups, groups/s, block error rate, subcarrier phase, clock
+  time (4A), RadioText (A/B flag clears it), AF list, group-type counts; its
+  gauge is the pilot against the 15.6 dB of full stereo. A decoder without
+  a card gets one made from its measurements.
+- **60 fps.** Decoders report every 1/60 s. egui's repaint timer does not
+  keep the interval asked (a 16 ms request drew hundreds of frames: 65 %
+  of a core idle, 133 % running); the wait is steered from the frame gaps
+  seen (DecDVB-T's `pace`). 56-60 fps, whole app ~31-39 % on the FM file.
