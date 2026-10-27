@@ -167,10 +167,29 @@ struct BlockMeta {
     dropped_before: u64,
 }
 
+/// Where the decoder's channel sits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Target {
+    /// This far from the source's centre, wherever the source is tuned.
+    Offset(f64),
+    /// At this RF frequency: the offset follows the source's retunes, so a
+    /// station stays in the channel while the band is moved under it.
+    At(f64),
+}
+
+impl Target {
+    fn offset(self, center_hz: f64) -> f64 {
+        match self {
+            Target::Offset(o) => o,
+            Target::At(f) => f - center_hz,
+        }
+    }
+}
+
 enum WorkerMsg {
     Block(Arc<Vec<Iq>>, BlockMeta),
     Command(Command),
-    Channel { offset_hz: f64, bandwidth_hz: f64 },
+    Channel { target: Target, bandwidth_hz: f64 },
     Stop,
 }
 
@@ -280,7 +299,16 @@ impl Host {
     /// Move or resize the decoder's channel.
     pub fn set_channel(&self, offset_hz: f64, bandwidth_hz: f64) {
         if let Some(w) = &self.worker {
-            let _ = w.tx.send(WorkerMsg::Channel { offset_hz, bandwidth_hz });
+            let _ = w.tx.send(WorkerMsg::Channel { target: Target::Offset(offset_hz), bandwidth_hz });
+        }
+    }
+
+    /// Put the decoder's channel at RF frequency `hz` and keep it there
+    /// across retunes (the GUI's way: the channel stays on its station while
+    /// the band is dragged).
+    pub fn set_channel_at(&self, hz: f64, bandwidth_hz: f64) {
+        if let Some(w) = &self.worker {
+            let _ = w.tx.send(WorkerMsg::Channel { target: Target::At(hz), bandwidth_hz });
         }
     }
 
@@ -669,6 +697,8 @@ fn worker_thread(
     cmd: Sender<SourceCmd>,
 ) {
     let mut sink = Sink::default();
+    let mut target = Target::Offset(0.0);
+    // The offset the chain was built for.
     let mut offset = 0.0f64;
     let mut bandwidth = spec.bandwidth_hz;
     let mut chain: Option<(f64, Chain)> = None;
@@ -698,8 +728,8 @@ fn worker_thread(
                 }
                 decoder.command(c, &mut sink);
             }
-            WorkerMsg::Channel { offset_hz, bandwidth_hz } => {
-                offset = offset_hz;
+            WorkerMsg::Channel { target: t, bandwidth_hz } => {
+                target = t;
                 bandwidth = bandwidth_hz;
                 chain = None;
                 decoder.reset();
@@ -713,6 +743,11 @@ fn worker_thread(
                     }
                     generation = Some(meta.generation);
                     first_sample = 0;
+                }
+                let want = target.offset(meta.center_hz);
+                if want != offset {
+                    offset = want;
+                    chain = None;
                 }
                 if chain.as_ref().is_none_or(|(r, _)| *r != meta.sample_rate) {
                     let (c, note) = Chain::new(meta.sample_rate, &spec, offset, bandwidth);
@@ -744,11 +779,12 @@ fn worker_thread(
 
         // Empty the sink.
         if let Some(d) = sink.retune_by_hz.take() {
-            if offset == 0.0 {
-                let _ = cmd.send(SourceCmd::RetuneBy(d));
-            } else {
-                offset += d;
-                chain = None;
+            match target {
+                Target::Offset(0.0) => {
+                    let _ = cmd.send(SourceCmd::RetuneBy(d));
+                }
+                Target::Offset(o) => target = Target::Offset(o + d),
+                Target::At(f) => target = Target::At(f + d),
             }
         }
         if !sink.audio.is_empty() {

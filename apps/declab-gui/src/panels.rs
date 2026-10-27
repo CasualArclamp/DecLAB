@@ -1,0 +1,295 @@
+// made by CasualArclamp
+//! The parts of the window below the band: the decoder's card, its scope
+//! and readings, its own settings panel, its services and text, and the
+//! status bar.
+
+use declab_api::{Command, Iq, Lock, Panel};
+use declab_engine::{DecoderView, Stats};
+use eframe::egui::{
+    self, Align2, Color32, CornerRadius, FontId, RichText, Sense, Stroke, Ui, pos2, vec2,
+};
+
+pub const GREEN: Color32 = Color32::from_rgb(110, 230, 130);
+pub const AMBER: Color32 = Color32::from_rgb(255, 176, 40);
+pub const RED: Color32 = Color32::from_rgb(255, 138, 128);
+const GREY: Color32 = Color32::from_gray(154);
+const BOX: Color32 = Color32::from_rgb(24, 24, 24);
+/// A reading tile's width, margins included.
+const TILE_W: f32 = 126.0;
+
+/// Format a reading: few digits for big numbers, more for small ones.
+pub fn value(v: f64) -> String {
+    let a = v.abs();
+    if a >= 1000.0 || (a > 0.0 && a < 0.01) {
+        if a >= 1e6 || a < 0.01 { format!("{v:.2e}") } else { format!("{v:.0}") }
+    } else if a >= 100.0 || v.fract() == 0.0 {
+        format!("{v:.0}")
+    } else {
+        format!("{v:.1}")
+    }
+}
+
+/// The card: the decoder's name, its lock and a one-line summary.
+pub fn card(ui: &mut Ui, name: &str, colour: Color32, view: &DecoderView, running: bool) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(name).strong().color(colour));
+        let (state, c) = match (running, view.lock) {
+            (false, _) => ("stopped", GREY),
+            (true, Lock::Locked) => ("locked", GREEN),
+            (true, Lock::Synced) => ("synced", AMBER),
+            (true, Lock::Searching) => ("searching", RED),
+        };
+        ui.label(RichText::new(state).color(c));
+        let line: Vec<String> = view
+            .measurements
+            .iter()
+            .take(4)
+            .map(|m| format!("{} {}{}{}", m.name.to_lowercase(), value(m.value), if m.unit.is_empty() { "" } else { " " }, m.unit))
+            .collect();
+        if running && !line.is_empty() {
+            ui.label(RichText::new(line.join(" · ")).color(GREEN));
+        }
+        if let Some(s) = view.services.first().filter(|s| !s.name.is_empty()) {
+            ui.label(RichText::new(format!("· {}", s.name)).color(Color32::WHITE));
+        }
+    });
+}
+
+/// A titled box filling its share of the row.
+pub fn boxed(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    egui::Frame::NONE
+        .fill(BOX)
+        .stroke(Stroke::new(1.0, Color32::from_gray(42)))
+        .corner_radius(CornerRadius::same(4))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.set_min_height(ui.available_height() - 22.0);
+            add(ui)
+        });
+}
+
+/// The constellation scope and the readings beside it.
+pub fn scope_and_readings(ui: &mut Ui, view: &DecoderView, colour: Color32) {
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.label(RichText::new("channel IQ").color(GREY).size(11.0));
+            scope(ui, &view.constellation, colour, 180.0);
+        });
+        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            // As many columns of tiles as fit beside the scope.
+            let cols = ((ui.available_width() + 8.0) / (TILE_W + 8.0)).floor().max(1.0) as usize;
+            let cpu = format!("{:.0}", view.cpu_percent);
+            let tiles: Vec<(&str, String, &str)> = view
+                .measurements
+                .iter()
+                .map(|m| (m.name, value(m.value), m.unit))
+                .chain(std::iter::once(("decoder CPU", cpu, "%")))
+                .collect();
+            egui::Grid::new("readings").num_columns(cols).spacing([8.0, 8.0]).show(ui, |ui| {
+                for (i, (name, v, unit)) in tiles.iter().enumerate() {
+                    tile(ui, name, v, unit);
+                    if i % cols == cols - 1 {
+                        ui.end_row();
+                    }
+                }
+            });
+        });
+    });
+}
+
+fn tile(ui: &mut Ui, name: &str, v: &str, unit: &str) {
+    egui::Frame::NONE
+        .fill(Color32::from_rgb(31, 31, 31))
+        .stroke(Stroke::new(1.0, Color32::from_gray(44)))
+        .corner_radius(CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_min_width(TILE_W - 16.0);
+            ui.set_max_width(TILE_W - 16.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(name).color(GREY).size(11.0));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(v).size(17.0).color(Color32::WHITE));
+                    ui.label(RichText::new(unit).size(11.0).color(GREY));
+                });
+            });
+        });
+}
+
+/// IQ points, scaled so their RMS sits at 45 % of the half-width.
+fn scope(ui: &mut Ui, pts: &[Iq], colour: Color32, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(13, 13, 13));
+    let grid = Stroke::new(1.0, Color32::from_gray(42));
+    p.line_segment([rect.center_top(), rect.center_bottom()], grid);
+    p.line_segment([rect.left_center(), rect.right_center()], grid);
+    if pts.is_empty() {
+        return;
+    }
+    let rms = (pts.iter().map(|z| z.norm_sqr()).sum::<f32>() / pts.len() as f32).sqrt().max(1e-9);
+    let k = 0.45 * size / 2.0 / rms;
+    let c = rect.center();
+    let dot = colour.gamma_multiply(0.85);
+    for z in pts {
+        let q = pos2(c.x + z.re * k, c.y - z.im * k);
+        if rect.contains(q) {
+            p.circle_filled(q, 1.4, dot);
+        }
+    }
+}
+
+/// The decoder's own panel, then the host's channel width and the volume.
+/// Returns commands for the decoder, a new width and a new volume.
+pub fn decoder_settings(
+    ui: &mut Ui,
+    name: &str,
+    panel: Option<&mut Box<dyn Panel>>,
+    bandwidth_hz: &mut f64,
+    volume: &mut f32,
+) -> (Vec<Command>, bool, bool) {
+    let mut cmds = Vec::new();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("{name} settings")).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new("drawn by the decoder").size(11.0).color(GREY));
+        });
+    });
+    ui.add_space(4.0);
+    match panel {
+        Some(p) => p.ui(ui, &mut cmds),
+        None => {
+            ui.label(RichText::new("This decoder has no settings of its own.").color(GREY));
+        }
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    let mut bw_khz = *bandwidth_hz / 1e3;
+    let speed = bw_khz * 0.01;
+    let bw_changed = ui
+        .horizontal(|ui| {
+            ui.label("Bandwidth");
+            ui.add(
+                egui::DragValue::new(&mut bw_khz)
+                    .range(0.5..=10_000.0)
+                    .speed(speed)
+                    .suffix(" kHz")
+                    .max_decimals(1),
+            )
+            .changed()
+        })
+        .inner;
+    if bw_changed {
+        *bandwidth_hz = bw_khz * 1e3;
+    }
+    let vol_changed = ui
+        .horizontal(|ui| {
+            ui.label("Volume   ");
+            ui.add(egui::Slider::new(volume, 0.0..=1.0).show_value(false)).changed()
+        })
+        .inner;
+    (cmds, bw_changed, vol_changed)
+}
+
+/// Services (click one to decode it) and the decoder's text.
+pub fn services(ui: &mut Ui, view: &DecoderView, selected: Option<u32>) -> Option<u32> {
+    let mut pick = None;
+    ui.label(RichText::new("Services").strong());
+    if view.services.is_empty() {
+        ui.label(RichText::new("none announced").color(GREY));
+    }
+    egui::ScrollArea::vertical().id_salt("services").max_height(110.0).show(ui, |ui| {
+        for s in &view.services {
+            let name = if s.name.is_empty() { format!("[{}]", s.id) } else { s.name.clone() };
+            let on = selected == Some(s.id) || (selected.is_none() && view.services.len() == 1);
+            let text = format!("{name:<24} {}", s.kind);
+            if ui.selectable_label(on, RichText::new(text)).clicked() {
+                pick = Some(s.id);
+            }
+        }
+    });
+    if !view.text.is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new("text").size(11.0).color(GREY));
+        for t in view.text.values() {
+            ui.label(RichText::new(t).color(Color32::WHITE));
+        }
+    }
+    if let Some(last) = view.log.back() {
+        ui.add_space(6.0);
+        ui.label(RichText::new(format!("log: {last}")).size(11.0).color(GREY));
+    }
+    pick
+}
+
+/// The status bar.
+pub fn status(ui: &mut Ui, stats: &Stats, view: &DecoderView, running: bool, app_cpu: f32, error: Option<&str>) {
+    let kv = |ui: &mut Ui, k: &str, v: String| {
+        ui.label(RichText::new(k).color(GREY).size(12.0));
+        ui.label(RichText::new(v).size(12.0));
+        ui.add_space(14.0);
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        let state = if let Some(e) = error {
+            format!("error: {e}")
+        } else if running {
+            "running".into()
+        } else if stats.ended {
+            "ended".into()
+        } else {
+            "stopped".into()
+        };
+        kv(ui, "state", state);
+        if !stats.describe.is_empty() {
+            kv(ui, "source", stats.describe.clone());
+        }
+        let ch = view.channel;
+        if ch.out_rate > 0.0 {
+            let rs = ch.resample.map(|(u, d)| format!(" ×{u}/{d}")).unwrap_or_default();
+            kv(ui, "channel", format!("{:.0} kS/s (÷{}{rs})", ch.out_rate / 1e3, ch.decimation));
+        }
+        if stats.handoff_dropped > 0 {
+            kv(ui, "dropped", format!("{} blocks", stats.handoff_dropped));
+        }
+        if stats.clip_percent > 0.1 {
+            ui.label(RichText::new(format!("CLIPPING {:.1} %", stats.clip_percent)).color(RED).size(12.0));
+            ui.add_space(14.0);
+        }
+        if let Some(a) = &view.audio {
+            kv(ui, "sound", a.clone());
+        }
+        let p = stats.stages.percent;
+        kv(
+            ui,
+            "CPU",
+            format!(
+                "app {app_cpu:.0} % · source {:.0} · front end {:.0} · spectrum {:.0} · decoder {:.0}",
+                p[0] + p[1],
+                p[2],
+                p[3],
+                view.cpu_percent
+            ),
+        );
+    });
+}
+
+/// A level meter bar like the other Dec apps'.
+pub fn level_bar(ui: &mut Ui, dbfs: f32, live: bool) {
+    let (rect, _) = ui.allocate_exact_size(vec2(180.0, 20.0), Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, CornerRadius::same(10), Color32::from_rgb(38, 38, 38));
+    if live {
+        let f = ((dbfs + 60.0) / 60.0).clamp(0.0, 1.0);
+        let fill = egui::Rect::from_min_size(rect.min, vec2(rect.width() * f, rect.height()));
+        p.rect_filled(fill, CornerRadius::same(10), Color32::from_rgb(11, 93, 122));
+        p.text(
+            rect.left_center() + vec2(10.0, 0.0),
+            Align2::LEFT_CENTER,
+            format!("{dbfs:.1} dBFS"),
+            FontId::monospace(12.0),
+            Color32::WHITE,
+        );
+    }
+}

@@ -15,6 +15,8 @@ cargo check --workspace --all-targets
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --release -p declab-gui
+cargo run --release -p declab-gui -- out/sim_fm_98.000MHz_10Msps.cs8 --decoder wfm --chan 98.8M --screenshot out/x.png --after 4
+cargo run --release -p declab-gui -- --radio airspy --freq 98M --decoder wfm --wheel   # opens with the decoder wheel up
 cargo run --release -p declab-cli -- list
 cargo run --release -p declab-cli -- selftest level
 cargo run --release -p declab-cli -- run wfm --file x_98.000MHz_10Msps.cs8 --offset 1.2M --realtime
@@ -23,7 +25,11 @@ cargo run --release -p declab-cli -- run usb --radio hackrf --freq 14.2M --gain 
 ```
 
 Only an Airspy R2 is plugged in at the moment (the HackRF is not). Both
-drivers are pure Rust over nusb and need the WinUSB driver.
+drivers are pure Rust over nusb and need the WinUSB driver. The user's own
+DecDVB-T GUI may be holding the Airspy ("Access is denied"): never kill it.
+
+The GUI keeps its settings in `%APPDATA%\DecLAB\prefs.txt`; screenshot runs
+neither read nor write it.
 
 ## Adding a decoder
 

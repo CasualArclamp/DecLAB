@@ -1,7 +1,7 @@
 # made by CasualArclamp
 [package]
 name = "declab-gui"
-description = "DecLAB desktop GUI (egui): DVB-T/T2, DVB-S/S2/S2X, DVB-RCS2 and DAB/DAB+ in one receiver"
+description = "DecLAB desktop GUI (egui): DVB, DAB and analog receivers as plug-in decoders"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,13 +12,25 @@ rust-version.workspace = true
 name = "declab-gui"
 path = "src/main.rs"
 
+[features]
+# Both radio drivers are pure Rust over nusb (no SDKs, no DLLs), so both are on.
+default = ["hackrf", "airspy"]
+hackrf = ["declab-engine/hackrf"]
+airspy = ["declab-engine/airspy"]
+
 [dependencies]
 declab-api = { path = "../../crates/declab-api" }
 declab-decoders = { path = "../../crates/declab-decoders" }
+declab-engine = { path = "../../crates/declab-engine" }
+declab-io = { path = "../../crates/declab-io" }
 anyhow.workspace = true
 # The glow (OpenGL) renderer instead of eframe's default wgpu, as in the
 # other Dec apps. "x11"/"wayland" only matter on Linux.
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+# Native file dialogs (Win32 on Windows, XDG desktop portal on Linux).
+rfd = "0.17.2"
+# PNG output for --screenshot (documentation and smoke tests).
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 # With eframe's defaults off, re-enable winit's (Linux only) so building needs
 # no X11/Wayland dev packages.

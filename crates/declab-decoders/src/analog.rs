@@ -23,7 +23,8 @@
 use std::f64::consts::TAU;
 
 use declab_api::{
-    Audio, Block, Decoder, DecoderFactory, DecoderInfo, Family, InputSpec, Iq, Lock, Service, Sink,
+    Audio, Block, Command, Decoder, DecoderFactory, DecoderInfo, Family, InputSpec, Iq, Lock,
+    Service, Sink,
 };
 
 use declab_dsp::{Fir, lowpass};
@@ -81,6 +82,53 @@ impl DecoderFactory for Factory {
 
     fn create(&self) -> Box<dyn Decoder> {
         Box::new(Analog::new(self.0))
+    }
+
+    #[cfg(feature = "ui")]
+    fn panel(&self) -> Option<Box<dyn declab_api::Panel>> {
+        panel::for_mode(self.0)
+    }
+}
+
+/// The settings a panel can change, as [`Command::Set`] keys and values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Settings {
+    /// De-emphasis time constant, µs (0: none). `"deemph"`.
+    deemph_us: f64,
+    /// Broadcast FM: stereo when the pilot allows, or always mono. `"stereo"`
+    /// = `"auto"` | `"mono"`.
+    stereo: bool,
+    /// Mute the audio while the channel is weaker than this, dBFS. `"squelch"`
+    /// = a number or `"off"`.
+    squelch_dbfs: Option<f64>,
+    /// CW: the note a carrier on the dial makes, Hz. `"pitch"`.
+    pitch_hz: f64,
+}
+
+impl Settings {
+    fn for_mode(mode: Mode) -> Self {
+        Settings {
+            deemph_us: match mode {
+                Mode::Wfm => 50.0,
+                Mode::Nfm => 300.0,
+                _ => 0.0,
+            },
+            stereo: true,
+            squelch_dbfs: None,
+            pitch_hz: 800.0,
+        }
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let num = || value.parse::<f64>().map_err(|_| format!("{key}: {value:?} is not a number"));
+        match key {
+            "deemph" => self.deemph_us = num()?.clamp(0.0, 2000.0),
+            "stereo" => self.stereo = value != "mono",
+            "squelch" => self.squelch_dbfs = if value == "off" { None } else { Some(num()?) },
+            "pitch" => self.pitch_hz = num()?.clamp(200.0, 2000.0),
+            _ => return Err(format!("no setting {key:?}")),
+        }
+        Ok(())
     }
 }
 
@@ -150,6 +198,7 @@ struct Analog {
     pcm: Vec<f32>,
     last_station: Option<String>,
     last_text: Option<String>,
+    settings: Settings,
 }
 
 impl Analog {
@@ -187,6 +236,7 @@ impl Analog {
             pcm: Vec::new(),
             last_station: None,
             last_text: None,
+            settings: Settings::for_mode(mode),
         }
     }
 
@@ -251,10 +301,15 @@ impl Decoder for Analog {
             Mode::Lsb => -1_700.0,
             _ => 0.0,
         };
-        let pitch = if mode == Mode::Cw { 800.0 } else { 0.0 };
+        let pitch = if mode == Mode::Cw { self.settings.pitch_hz } else { 0.0 };
         let diff_k = coeff(15_000.0, rate);
         // 50 µs broadcast FM de-emphasis (Europe); 300 µs for NFM voice.
-        let de_k = coeff(if mode == Mode::Wfm { 3183.1 } else { 530.5 }, rate);
+        // De-emphasis: a pole at 1/(2πτ) (50 µs: 3183 Hz); τ = 0 leaves it out.
+        let tau = self.settings.deemph_us * 1e-6;
+        let de_k = if tau > 0.0 { coeff(1.0 / (TAU * tau), rate) } else { 1.0 };
+        let block_energy: f64 = iq.iter().map(|x| x.norm_sqr() as f64).sum();
+        let block_db = 10.0 * (block_energy / iq.len() as f64).max(1e-20).log10();
+        let muted = self.settings.squelch_dbfs.is_some_and(|sq| block_db < sq);
         let dc_k = coeff(15.0, rate);
         let agc_k = coeff(12.0, rate);
         let pilot_k = coeff(500.0, rate);
@@ -263,6 +318,7 @@ impl Decoder for Analog {
         let guard_step = TAU * 17_500.0 / rate;
         let meas_k = coeff(200.0, rate);
         let stereo = mode == Mode::Wfm && rate >= 120_000.0;
+        let allow_stereo = self.settings.stereo;
         let weaver = matches!(mode, Mode::Usb | Mode::Lsb | Mode::Cw);
         if weaver {
             // Down by `shift` and through the low-pass, the whole block at
@@ -328,7 +384,7 @@ impl Decoder for Analog {
                     // Fade to mono when the pilot is not clearly above the
                     // noise: none at 2x the guard band, full stereo at 6x.
                     let ratio = self.meas_level / self.guard_level.max(EPS);
-                    let blend = ((ratio - 2.0) / 4.0).clamp(0.0, 1.0);
+                    let blend = if allow_stereo { ((ratio - 2.0) / 4.0).clamp(0.0, 1.0) } else { 0.0 };
                     left = mono + difference * blend;
                     right = mono - difference * blend;
                 } else {
@@ -372,6 +428,9 @@ impl Decoder for Analog {
             }
         }
         self.count += iq.len() as u64;
+        if muted {
+            self.pcm.fill(0.0);
+        }
         if !self.pcm.is_empty() {
             out.audio.push(Audio {
                 service: 0,
@@ -388,10 +447,119 @@ impl Decoder for Analog {
         }
     }
 
+    fn command(&mut self, cmd: Command, out: &mut Sink) {
+        if let Command::Set { key, value } = cmd
+            && let Err(e) = self.settings.set(&key, &value)
+        {
+            out.log(e);
+        }
+    }
+
     fn reset(&mut self) {
+        // A retune forgets the signal, not what the panel set.
+        let settings = self.settings;
         *self = Analog::new(self.mode);
+        self.settings = settings;
     }
 }
+
+/// The settings panels, drawn by the decoder (see `declab_api::Panel`).
+#[cfg(feature = "ui")]
+mod panel {
+    use declab_api::{Command, Panel};
+    use egui::Ui;
+
+    use super::{Mode, Settings};
+
+    pub fn for_mode(mode: Mode) -> Option<Box<dyn Panel>> {
+        matches!(mode, Mode::Wfm | Mode::Nfm | Mode::Cw)
+            .then(|| Box::new(AnalogPanel { mode, s: Settings::for_mode(mode) }) as Box<dyn Panel>)
+    }
+
+    struct AnalogPanel {
+        mode: Mode,
+        /// What has been sent, so the controls show it.
+        s: Settings,
+    }
+
+    fn set(commands: &mut Vec<Command>, key: &str, value: String) {
+        commands.push(Command::Set { key: key.into(), value });
+    }
+
+    fn deemph_label(us: f64) -> String {
+        if us == 0.0 { "off".into() } else { format!("{us:.0} µs") }
+    }
+
+    impl Panel for AnalogPanel {
+        fn ui(&mut self, ui: &mut Ui, commands: &mut Vec<Command>) {
+            egui::Grid::new("analog_panel").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+                if matches!(self.mode, Mode::Wfm | Mode::Nfm) {
+                    let choices: &[f64] =
+                        if self.mode == Mode::Wfm { &[50.0, 75.0, 0.0] } else { &[300.0, 750.0, 0.0] };
+                    ui.label("De-emphasis");
+                    egui::ComboBox::from_id_salt("deemph")
+                        .selected_text(deemph_label(self.s.deemph_us))
+                        .show_ui(ui, |ui| {
+                            for &us in choices {
+                                if ui.selectable_label(self.s.deemph_us == us, deemph_label(us)).clicked() {
+                                    self.s.deemph_us = us;
+                                    set(commands, "deemph", us.to_string());
+                                }
+                            }
+                        });
+                    ui.end_row();
+                }
+                if self.mode == Mode::Wfm {
+                    ui.label("Stereo");
+                    egui::ComboBox::from_id_salt("stereo")
+                        .selected_text(if self.s.stereo { "auto" } else { "mono" })
+                        .show_ui(ui, |ui| {
+                            for (on, name) in [(true, "auto"), (false, "mono")] {
+                                if ui.selectable_label(self.s.stereo == on, name).clicked() {
+                                    self.s.stereo = on;
+                                    set(commands, "stereo", name.into());
+                                }
+                            }
+                        });
+                    ui.end_row();
+                }
+                if self.mode == Mode::Nfm {
+                    ui.label("Squelch");
+                    let mut on = self.s.squelch_dbfs.is_some();
+                    let mut level = self.s.squelch_dbfs.unwrap_or(-60.0);
+                    ui.horizontal(|ui| {
+                        let a = ui.checkbox(&mut on, "").changed();
+                        let b = ui
+                            .add_enabled(
+                                on,
+                                egui::Slider::new(&mut level, -100.0..=-20.0).suffix(" dBFS").integer(),
+                            )
+                            .changed();
+                        if a || b {
+                            self.s.squelch_dbfs = on.then_some(level);
+                            let v = if on { format!("{level:.0}") } else { "off".into() };
+                            set(commands, "squelch", v);
+                        }
+                    });
+                    ui.end_row();
+                }
+                if self.mode == Mode::Cw {
+                    ui.label("Note");
+                    let mut p = self.s.pitch_hz;
+                    if ui
+                        .add(egui::Slider::new(&mut p, 300.0..=1200.0).suffix(" Hz").step_by(50.0))
+                        .changed()
+                    {
+                        self.s.pitch_hz = p;
+                        set(commands, "pitch", format!("{p:.0}"));
+                    }
+                    ui.end_row();
+                }
+            });
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
