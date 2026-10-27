@@ -26,12 +26,17 @@
 //! now and then, so a PS or RadioText segment is shown only once the same
 //! value has come twice in a row (the usual receiver practice).
 //!
-//! One point per symbol, derotated, goes to the "RDS" constellation scope.
+//! One point per symbol, derotated, goes to the "RDS" constellation scope,
+//! and the filtered subcarrier's spectrum (128-point FFTs, three averaged
+//! a row, about 31 rows a second) to the "RDS" waterfall.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
+use std::sync::Arc;
+
 use declab_dsp::Ddc;
 use num_complex::Complex32;
+use rustfft::{Fft, FftPlanner};
 
 const POLY:u16=0x5B9;
 /// Offset words A, B, C, D, C′ (EN 62106 annex A).
@@ -40,6 +45,11 @@ const OFFSETS:[u16;5]=[0x0FC,0x198,0x168,0x1B4,0x350];
 const SYMBOL_RATE:f64=1187.5;
 /// The subcarrier's band after filtering, Hz (±2.4 kHz, 3.1.2).
 const BAND_HZ:f64=4800.0;
+/// The waterfall's FFT size and the FFTs averaged into a row.
+const WF_FFT: usize = 128;
+const WF_AVG: usize = 3;
+/// Rows kept for a caller that has not taken them.
+const WF_KEEP: usize = 64;
 /// Symbols kept for the scope.
 const SCOPE_POINTS: usize = 400;
 /// Blocks remembered for the flywheel, and how many may fail before sync
@@ -103,6 +113,15 @@ pub struct RdsDecoder {
     base:Vec<Complex32>,
     /// Samples per symbol at the baseband rate.
     sps:f64,
+    /// The baseband rate, Hz (0 before the first samples).
+    base_rate:f64,
+    // ---- the waterfall
+    wf_fft:Option<Arc<dyn Fft<f32>>>,
+    wf_win:Vec<f32>,
+    wf_buf:Vec<Complex32>,
+    wf_acc:Vec<f32>,
+    wf_n:usize,
+    wf_rows:VecDeque<Vec<f32>>,
     // ---- symbols
     /// The matched filter's taps and the baseband samples it spans.
     taps:Vec<f32>,
@@ -168,6 +187,13 @@ impl Default for RdsDecoder {
             mixed: Vec::with_capacity(4096),
             base: Vec::new(),
             sps: 0.0,
+            base_rate: 0.0,
+            wf_fft: None,
+            wf_win: Vec::new(),
+            wf_buf: Vec::with_capacity(WF_FFT),
+            wf_acc: vec![0.0; WF_FFT],
+            wf_n: 0,
+            wf_rows: VecDeque::new(),
             taps: Vec::new(),
             hist: VecDeque::new(),
             mf: VecDeque::new(),
@@ -290,6 +316,7 @@ impl RdsDecoder {
         let ddc=self.ddc.get_or_insert_with(|| Ddc::new(rate, 0.0, BAND_HZ));
         if self.sps==0.0 {
             let out=ddc.out_rate();
+            self.base_rate=out;
             self.sps=out/SYMBOL_RATE;
             // The biphase symbol: +1 for its first half, −1 for its second.
             let len=self.sps.round() as usize;
@@ -303,7 +330,52 @@ impl RdsDecoder {
         for &x in &base {
             self.sample(x);
         }
+        self.spectrum(&base);
         self.base=base;
+    }
+
+    /// The span of the waterfall's rows, Hz: the middle half of the
+    /// baseband (±3 kHz at 12 kS/s), where RDS is; outside it is the
+    /// filter's stopband, which would set the colours instead.
+    pub fn row_span_hz(&self)->f64 { self.base_rate/2.0 }
+
+    /// Waterfall rows made since the last call, dB, most negative frequency
+    /// first, over `row_span_hz`.
+    pub fn take_rows(&mut self)->Vec<Vec<f32>> {
+        self.wf_rows.drain(..).map(|r| r[WF_FFT/4..3*WF_FFT/4].to_vec()).collect()
+    }
+
+    /// Hann-windowed FFTs of the baseband, power averaged into rows.
+    fn spectrum(&mut self, base:&[Complex32]) {
+        let fft=self.wf_fft.get_or_insert_with(|| FftPlanner::new().plan_fft_forward(WF_FFT)).clone();
+        if self.wf_win.is_empty() {
+            self.wf_win=(0..WF_FFT).map(|k| {
+                let a=std::f32::consts::TAU*k as f32/WF_FFT as f32;
+                0.5-0.5*a.cos()
+            }).collect();
+        }
+        for &x in base {
+            self.wf_buf.push(x);
+            if self.wf_buf.len()<WF_FFT { continue; }
+            for (z,w) in self.wf_buf.iter_mut().zip(&self.wf_win) { *z*=*w; }
+            fft.process(&mut self.wf_buf);
+            for (a,z) in self.wf_acc.iter_mut().zip(&self.wf_buf) { *a+=z.norm_sqr(); }
+            self.wf_buf.clear();
+            self.wf_n+=1;
+            if self.wf_n==WF_AVG {
+                // FFT order is 0..+fs/2 then −fs/2..0: rotate so the most
+                // negative frequency comes first.
+                let half=WF_FFT/2;
+                let row:Vec<f32>=(0..WF_FFT).map(|k| {
+                    let p=self.wf_acc[(k+half)%WF_FFT]/(WF_AVG*WF_FFT) as f32;
+                    10.0*p.max(1e-20).log10()
+                }).collect();
+                if self.wf_rows.len()==WF_KEEP { self.wf_rows.pop_front(); }
+                self.wf_rows.push_back(row);
+                self.wf_acc.iter_mut().for_each(|a| *a=0.0);
+                self.wf_n=0;
+            }
+        }
     }
 
     /// One baseband sample: the matched filter, and a symbol when one is due.
@@ -612,6 +684,21 @@ mod tests {
                 d.snr_db()
             );
         }
+    }
+
+    #[test]
+    fn the_waterfall_shows_the_two_sidebands_and_the_null_between() {
+        let mut d = decode(0.3, 3.0);
+        let rows = d.take_rows();
+        // ~31 rows a second (93 in 3 s), but only the last WF_KEEP are kept.
+        assert_eq!(rows.len(), WF_KEEP);
+        let n = rows[0].len();
+        let mean = |k: usize| rows.iter().map(|r| r[k]).sum::<f32>() / rows.len() as f32;
+        let hz = |k: usize| (k as f64 - n as f64 / 2.0) * d.row_span_hz() / n as f64;
+        // Biphase puts its power about ±1 kHz and nothing at 0 Hz.
+        let centre = mean(n / 2);
+        let k_side = (0..n).filter(|&k| (hz(k) - 1000.0).abs() < 200.0).max_by(|&a, &b| mean(a).total_cmp(&mean(b))).unwrap();
+        assert!(mean(k_side) > centre + 10.0, "side {} dB, centre {centre} dB", mean(k_side));
     }
 
     #[test]

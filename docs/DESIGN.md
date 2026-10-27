@@ -257,3 +257,12 @@ recording `out/fm_99.200MHz_10Msps.cs8`, 101.1 MHz went from no groups to
 ~149 (PS, PI, PTY, TP/TA, RadioText filling in), symbol SNR ~5 dB, BLER
 ~36 % with ~270 blocks corrected; 97.3 MHz (symbol SNR 1-2 dB) still gives
 none. The card shows RDS sync, RDS SNR and corrected blocks.
+
+- **RDS carrier waterfall** (later the same day): `Sink::waterfalls` carries
+  rows for a decoder's own small waterfalls (`WaterfallRow`: dB over a span
+  about the decoder's 0 Hz); the host queues them, the GUI draws the one
+  named like the scope shown, under it (ring texture, ~3 s). The RDS
+  decoder makes 128-point Hann FFTs of the filtered subcarrier, three a
+  row (~31 rows/s), cropped to ±3 kHz so the colours follow the band and
+  not the filter's stopband: the two biphase sidebands about ±1 kHz and
+  the null at 0 Hz show on a clean signal.

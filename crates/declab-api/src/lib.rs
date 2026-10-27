@@ -177,6 +177,15 @@ pub struct Card {
     pub text: Vec<(String, String)>,
 }
 
+/// One row of a decoder's own small waterfall (WFM's RDS subcarrier):
+/// power in dB across `span_hz` about the decoder's own 0 Hz, the most
+/// negative frequency first.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WaterfallRow {
+    pub span_hz: f32,
+    pub db: Vec<f32>,
+}
+
 /// Decoded audio, interleaved f32 at `sample_rate`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Audio {
@@ -224,6 +233,9 @@ pub struct Sink {
     /// More scopes, by name (WFM's "RDS" symbols): the GUI offers each
     /// beside the constellation. Points as for `constellation`.
     pub scopes: Vec<(&'static str, Vec<Iq>)>,
+    /// Rows for the decoder's small waterfalls, by name (the GUI draws one
+    /// under the scope of the same name). Every row made is sent.
+    pub waterfalls: Vec<(&'static str, WaterfallRow)>,
     /// One line for the log panel.
     pub log: Vec<String>,
     /// A frequency correction for the host's tuner, Hz (an OFDM receiver's
@@ -257,6 +269,7 @@ impl Sink {
         self.card = None;
         self.constellation.clear();
         self.scopes.clear();
+        self.waterfalls.clear();
         self.log.clear();
         self.retune_by_hz = None;
         self.custom.clear();

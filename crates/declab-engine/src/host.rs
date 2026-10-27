@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use declab_api::{
     Block, Card, Command, Decoder, DecoderFactory, InputSpec, Lock, Measurement, Picture, Service,
-    Sink, Tuning,
+    Sink, Tuning, WaterfallRow,
 };
 use declab_core::{Iq, SampleFormat};
 use declab_dsp::{Ddc, Resampler};
@@ -43,6 +43,8 @@ use crate::waterfall::Waterfall;
 const WORKER_QUEUE: usize = 16;
 /// Log lines kept for the GUI.
 const MAX_LOG: usize = 300;
+/// Small-waterfall rows kept for a GUI that has not collected them.
+const MAX_MINI_ROWS: usize = 256;
 /// Panel messages kept for a GUI that has not collected them.
 const MAX_CUSTOM: usize = 64;
 
@@ -203,6 +205,8 @@ struct Shared {
     stats: Mutex<Stats>,
     view: Mutex<DecoderView>,
     custom: Mutex<VecDeque<Box<dyn std::any::Any + Send>>>,
+    /// Rows of the decoder's small waterfalls not yet taken by the GUI.
+    mini_rows: Mutex<VecDeque<(&'static str, WaterfallRow)>>,
     /// The running worker's queue, if a decoder is running.
     worker_tx: Mutex<Option<SyncSender<WorkerMsg>>>,
     /// Blocks dropped because the worker's queue was full.
@@ -238,6 +242,7 @@ impl Host {
             stats: Mutex::new(Stats::default()),
             view: Mutex::new(DecoderView::default()),
             custom: Mutex::new(VecDeque::new()),
+            mini_rows: Mutex::new(VecDeque::new()),
             worker_tx: Mutex::new(None),
             handoff_dropped: Mutex::new(0),
             volume: AtomicU32::new(0.8f32.to_bits()),
@@ -279,6 +284,7 @@ impl Host {
         }
         *self.shared.view.lock().unwrap() = DecoderView::default();
         self.shared.custom.lock().unwrap().clear();
+        self.shared.mini_rows.lock().unwrap().clear();
         let Some(factory) = factory else { return };
 
         let info = factory.info();
@@ -354,6 +360,11 @@ impl Host {
     }
 
     /// Messages the decoder sent for its panel ([`Sink::custom`]).
+    /// Rows of the decoder's small waterfalls since the last call, by name.
+    pub fn take_waterfall_rows(&self) -> Vec<(&'static str, WaterfallRow)> {
+        self.shared.mini_rows.lock().unwrap().drain(..).collect()
+    }
+
     pub fn take_custom(&self) -> Vec<Box<dyn std::any::Any + Send>> {
         self.shared.custom.lock().unwrap().drain(..).collect()
     }
@@ -810,6 +821,14 @@ fn worker_thread(
             }
         }
         let audio_status = audio.as_ref().and_then(AudioOut::status);
+        if !sink.waterfalls.is_empty() {
+            let mut q = sh.mini_rows.lock().unwrap();
+            q.extend(sink.waterfalls.drain(..));
+            // A GUI that is not collecting (minimised) keeps a few seconds.
+            while q.len() > MAX_MINI_ROWS {
+                q.pop_front();
+            }
+        }
         if !sink.custom.is_empty() {
             let mut q = sh.custom.lock().unwrap();
             q.extend(sink.custom.drain(..));

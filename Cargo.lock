@@ -513,6 +513,7 @@ dependencies = [
  "declab-dsp",
  "egui",
  "num-complex",
+ "rustfft",
 ]
 
 [[package]]

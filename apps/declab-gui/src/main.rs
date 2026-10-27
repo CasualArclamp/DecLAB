@@ -214,6 +214,8 @@ struct App {
 
     history: History,
     ring: RingImage,
+    /// The decoder's small waterfalls, by name, and their span (Hz).
+    minis: Vec<(&'static str, History, RingImage, f32)>,
     smooth: Vec<f32>,
     row_center: f64,
     row_rate: f64,
@@ -280,6 +282,7 @@ impl App {
             wheel: None,
             history: History::default(),
             ring: RingImage::default(),
+            minis: Vec::new(),
             smooth: Vec::new(),
             row_center: 0.0,
             row_rate: 0.0,
@@ -411,6 +414,7 @@ impl App {
         self.bandwidth_hz = f.input(self.rate()).bandwidth_hz;
         self.selected_service = None;
         self.view = DecoderView::default();
+        self.minis.clear();
         if let Some(h) = &mut self.host {
             h.set_decoder(Some(f));
             h.set_channel_at(self.chan_hz, self.bandwidth_hz);
@@ -495,6 +499,20 @@ impl App {
     /// Take what the host has made since the last frame.
     fn poll(&mut self) {
         let Some(h) = &self.host else { return };
+        for (name, row) in h.take_waterfall_rows() {
+            let i = match self.minis.iter().position(|m| m.0 == name) {
+                Some(i) => i,
+                None => {
+                    let mut hist = History::default();
+                    // Three seconds or so at the decoder's ~31 rows a second.
+                    hist.set_capacity(96);
+                    self.minis.push((name, hist, RingImage::default(), row.span_hz));
+                    self.minis.len() - 1
+                }
+            };
+            self.minis[i].3 = row.span_hz;
+            self.minis[i].1.push(row.db);
+        }
         for row in h.take_rows() {
             if row.sample_rate != self.row_rate || row.center_hz != self.row_center {
                 self.smooth.clear();
@@ -811,7 +829,15 @@ impl eframe::App for App {
                 let chan = self.chan_hz;
                 ui.allocate_ui_with_layout(egui::vec2(widths[0], h), egui::Layout::top_down(egui::Align::Min), |ui| {
                     panels::boxed(ui, |ui| {
-                        panels::scope_and_card(ui, &self.view, colour, &mut self.scope, info.name, chan)
+                        let ctx = ui.ctx().clone();
+                        let minis: Vec<panels::Mini> = self
+                            .minis
+                            .iter_mut()
+                            .filter_map(|(name, hist, ring, span)| {
+                                ring.update(&ctx, hist).map(|(tex, uv)| panels::Mini { name, tex, uv, span_hz: *span })
+                            })
+                            .collect();
+                        panels::scope_and_card(ui, &self.view, colour, &mut self.scope, info.name, chan, &minis)
                     })
                 });
                 ui.allocate_ui_with_layout(egui::vec2(widths[1], h), egui::Layout::top_down(egui::Align::Min), |ui| panels::boxed(ui, |ui| {

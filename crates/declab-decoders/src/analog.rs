@@ -24,7 +24,7 @@ use std::f64::consts::TAU;
 
 use declab_api::{
     Audio, Block, Card, Command, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq,
-    Lock, Service, Sink,
+    Lock, Service, Sink, WaterfallRow,
 };
 
 use declab_dsp::{Fir, lowpass};
@@ -366,6 +366,10 @@ impl Analog {
             out.measure("RDS phase", self.rds.phase_deg() as f64, "°");
             out.measure("RDS SNR", self.rds.snr_db() as f64, "dB");
             out.scopes.push(("RDS", self.rds.points()));
+            let span_hz = self.rds.row_span_hz() as f32;
+            for db in self.rds.take_rows() {
+                out.waterfalls.push(("RDS", WaterfallRow { span_hz, db }));
+            }
             let station = self.rds.station();
             if station != self.last_station {
                 out.services = Some(vec![Service {

@@ -15,7 +15,7 @@ pub const RED: Color32 = Color32::from_rgb(255, 138, 128);
 const GREY: Color32 = Color32::from_gray(154);
 const BOX: Color32 = Color32::from_rgb(24, 24, 24);
 /// The scope's side, points.
-const SCOPE: f32 = 170.0;
+const SCOPE: f32 = 150.0;
 
 /// Format a reading: few digits for big numbers, more for small ones.
 pub fn value(v: f64) -> String {
@@ -69,6 +69,18 @@ pub fn boxed(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
         });
 }
 
+/// A decoder's small waterfall, ready to draw: its texture and the texture
+/// coordinates that put the newest row on top.
+pub struct Mini<'a> {
+    pub name: &'a str,
+    pub tex: egui::TextureId,
+    pub uv: egui::Rect,
+    pub span_hz: f32,
+}
+
+/// The height of a small waterfall under the scope, points.
+const MINI_H: f32 = 64.0;
+
 /// The constellation scope (with its choice of scopes above it) and the
 /// decoder's card beside it, in the style of DecDVB-T's and DecSAT's cards.
 ///
@@ -81,6 +93,7 @@ pub fn scope_and_card(
     which: &mut String,
     name: &str,
     freq_hz: f64,
+    minis: &[Mini],
 ) {
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
@@ -99,6 +112,12 @@ pub fn scope_and_card(
             });
             let pts = view.scopes.iter().find(|(n, _)| *n == which.as_str()).map_or(&view.constellation, |(_, p)| p);
             scope(ui, pts, colour, SCOPE);
+            // The waterfall of the scope shown, if the decoder makes one
+            // (RDS: the subcarrier at baseband, its two sidebands about a
+            // null at 0 Hz).
+            if let Some(m) = minis.iter().find(|m| m.name == which.as_str()) {
+                mini_waterfall(ui, m);
+            }
         });
         ui.add_space(10.0);
         ui.vertical(|ui| {
@@ -229,6 +248,34 @@ fn draw_card(ui: &mut Ui, c: &declab_api::Card, colour: Color32, freq_hz: f64, c
         ui.label(RichText::new(k).size(11.0).color(GREY));
         ui.add(egui::Label::new(RichText::new(v).size(13.0).color(strong)).wrap());
     }
+}
+
+fn mini_waterfall(ui: &mut Ui, m: &Mini) {
+    ui.add_space(4.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(SCOPE, MINI_H), Sense::hover());
+    let p = ui.painter_at(rect);
+    p.image(m.tex, rect, m.uv, Color32::WHITE);
+    // 0 Hz, and the edges of the ±2.4 kHz band RDS is filtered to.
+    let x_of = |hz: f32| rect.center().x + hz / m.span_hz.max(1.0) * rect.width();
+    p.line_segment([pos2(x_of(0.0), rect.top()), pos2(x_of(0.0), rect.bottom())], Stroke::new(1.0, Color32::from_white_alpha(40)));
+    for hz in [-2400.0, 2400.0] {
+        let x = x_of(hz);
+        if rect.x_range().contains(x) {
+            p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0, Color32::from_white_alpha(25)));
+        }
+    }
+    let half = m.span_hz / 2e3;
+    ui.horizontal(|ui| {
+        ui.set_width(SCOPE);
+        ui.label(RichText::new(format!("−{half:.0}")).size(10.0).color(GREY));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(format!("+{half:.0} kHz")).size(10.0).color(GREY));
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add_space((SCOPE / 2.0 - 60.0).max(0.0));
+                ui.label(RichText::new(format!("{} carrier", m.name)).size(10.0).color(GREY));
+            });
+        });
+    });
 }
 
 /// IQ points, scaled so their RMS sits at 45 % of the half-width.
