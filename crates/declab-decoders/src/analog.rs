@@ -302,10 +302,13 @@ impl Analog {
             details.push(kv("TP / TA", format!("{} / {}", u8::from(tp), u8::from(ta))));
             details.push(kv("content", if r.music() { "music" } else { "speech" }.to_string()));
         }
+        details.push(kv("RDS sync", if r.synced() { "held" } else { "searching" }.to_string()));
+        details.push(kv("RDS SNR", format!("{:.1} dB", r.snr_db())));
         details.push(kv("groups", format!("{}", r.groups())));
         details.push(kv("groups/s", format!("{:.1}", self.rds_rate)));
         if let Some(b) = r.bler() {
             details.push(kv("block errors", format!("{:.1} %", b * 100.0)));
+            details.push(kv("corrected", format!("{}", r.corrected())));
         }
         details.push(kv("RDS phase", format!("{:.0}°", r.phase_deg())));
         if let Some(c) = r.clock() {
@@ -361,6 +364,7 @@ impl Analog {
             out.measure("Pilot", self.pilot_snr_db() as f64, "dB");
             out.measure("RDS groups", self.rds.groups() as f64, "");
             out.measure("RDS phase", self.rds.phase_deg() as f64, "°");
+            out.measure("RDS SNR", self.rds.snr_db() as f64, "dB");
             out.scopes.push(("RDS", self.rds.points()));
             let station = self.rds.station();
             if station != self.last_station {

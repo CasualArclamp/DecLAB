@@ -232,3 +232,28 @@ DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
   keep the interval asked (a 16 ms request drew hundreds of frames: 65 %
   of a core idle, 133 % running); the wait is steered from the frame gaps
   seen (DecDVB-T's `pace`). 56-60 fps, whole app ~31-39 % on the FM file.
+
+## 8. RDS for weak signals (2026-10-27)
+
+The demodulator was rewritten (`analog_rds.rs`): the subcarrier to ±2.4 kHz
+at ~12 kS/s by the shared `Ddc` (it had a single-pole filter), a biphase
+matched filter, Gardner timing, BPSK phase from the squared symbols, soft
+differential decisions; block sync on two good blocks in order, held until
+30 of the last 50 fail (it was lost on any bad chip pair); bursts of one or
+two bit errors corrected; partial groups used; PS and RadioText segments
+shown only when the same value came twice.
+
+| band SNR (±2.4 kHz) | old: groups of ~68 in 6 s | new | new BLER |
+|---|---|---|---|
+| +7.0 dB | 67 | 68 | 0 % |
+| +1.0 dB | 0 | 68 | 0 % |
+| −1.0 dB | 0 | 64 | 2.6 % |
+| −2.6 dB | 0 | 50 | 17 % |
+| −3.9 dB | 0 | 34 | 42 % |
+| −5.1 dB | 0 | 3 | 65 % |
+
+(`cargo test -p declab-decoders noise_sweep -- --nocapture`.) On the 20 s
+recording `out/fm_99.200MHz_10Msps.cs8`, 101.1 MHz went from no groups to
+~149 (PS, PI, PTY, TP/TA, RadioText filling in), symbol SNR ~5 dB, BLER
+~36 % with ~270 blocks corrected; 97.3 MHz (symbol SNR 1-2 dB) still gives
+none. The card shows RDS sync, RDS SNR and corrected blocks.
