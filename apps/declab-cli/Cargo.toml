@@ -1,7 +1,7 @@
 # made by CasualArclamp
 [package]
 name = "declab-cli"
-description = "DecLAB command line: list the decoders, run one over IQ"
+description = "DecLAB command line: list the decoders, run one on a capture or a radio"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,15 @@ rust-version.workspace = true
 name = "declab"
 path = "src/main.rs"
 
+[features]
+# Both radio drivers are pure Rust over nusb (no SDKs, no DLLs), so both are on.
+default = ["hackrf", "airspy"]
+hackrf = ["declab-engine/hackrf"]
+airspy = ["declab-engine/airspy"]
+
 [dependencies]
 declab-api = { path = "../../crates/declab-api", default-features = false }
 declab-decoders = { path = "../../crates/declab-decoders", default-features = false }
+declab-engine = { path = "../../crates/declab-engine" }
+declab-io = { path = "../../crates/declab-io" }
 anyhow.workspace = true

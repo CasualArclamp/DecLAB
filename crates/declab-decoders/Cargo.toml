@@ -14,3 +14,4 @@ ui = ["declab-api/ui"]
 
 [dependencies]
 declab-api = { path = "../declab-api", default-features = false }
+declab-dsp = { path = "../declab-dsp" }

@@ -42,18 +42,22 @@ pub enum Family {
     Satellite,
     /// DAB, DAB+.
     Radio,
+    /// AM, FM, SSB, CW.
+    Analog,
     /// Anything else: tools, examples, third-party decoders.
     Other,
 }
 
 impl Family {
-    pub const ALL: [Family; 4] = [Family::Terrestrial, Family::Satellite, Family::Radio, Family::Other];
+    pub const ALL: [Family; 5] =
+        [Family::Terrestrial, Family::Satellite, Family::Radio, Family::Analog, Family::Other];
 
     pub fn label(self) -> &'static str {
         match self {
             Family::Terrestrial => "Terrestrial TV",
             Family::Satellite => "Satellite",
             Family::Radio => "Digital radio",
+            Family::Analog => "Analog",
             Family::Other => "Other",
         }
     }

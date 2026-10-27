@@ -17,7 +17,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run --release -p declab-gui
 cargo run --release -p declab-cli -- list
 cargo run --release -p declab-cli -- selftest level
+cargo run --release -p declab-cli -- run wfm --file x_98.000MHz_10Msps.cs8 --offset 1.2M --realtime
+cargo run --release -p declab-cli -- run nfm --radio airspy --freq 446.05M --offset 0
+cargo run --release -p declab-cli -- run usb --radio hackrf --freq 14.2M --gain 1,32,20
 ```
+
+Only an Airspy R2 is plugged in at the moment (the HackRF is not). Both
+drivers are pure Rust over nusb and need the WinUSB driver.
 
 ## Adding a decoder
 

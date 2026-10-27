@@ -1,0 +1,32 @@
+# made by CasualArclamp
+[package]
+name = "declab-io"
+description = "DecLAB I/O: IQ file replay/record and the HackRF One and Airspy R2 front ends"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# Live HackRF One front end, in pure Rust over USB (nusb): no libhackrf, no
+# libusb, no DLLs — the portable exe stays a single file. On Windows the HackRF
+# must use the WinUSB driver (Zadig, or the in-box winusb.inf).
+hackrf = ["dep:seify-hackrfone"]
+# Live Airspy R2 front end, in pure Rust over nusb as well (no libairspy, no
+# libusb, no DLLs). The radio must use the WinUSB driver on Windows.
+airspy = ["dep:nusb", "dep:futures-lite"]
+
+[dependencies]
+declab-core = { path = "../declab-core" }
+num-complex.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+seify-hackrfone = { version = "0.2.2", optional = true }
+# The versions seify-hackrfone already uses, so the exe carries one copy.
+nusb = { version = "0.1.14", optional = true }
+futures-lite = { version = "2", optional = true }
+
+[dev-dependencies]
+rustfft.workspace = true

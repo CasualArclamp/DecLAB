@@ -1,0 +1,26 @@
+# made by CasualArclamp
+[package]
+name = "declab-engine"
+description = "DecLAB decoder host: the source thread, waterfall, down-converter, decoder workers and sound out"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+hackrf = ["declab-io/hackrf"]
+airspy = ["declab-io/airspy"]
+
+[dependencies]
+declab-api = { path = "../declab-api", default-features = false }
+declab-core = { path = "../declab-core" }
+declab-io = { path = "../declab-io" }
+declab-dsp = { path = "../declab-dsp" }
+rustfft.workspace = true
+# Sound output: WASAPI on Windows, ALSA on Linux (needs libasound2-dev to build).
+cpal = "0.18.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
