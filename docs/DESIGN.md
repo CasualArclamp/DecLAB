@@ -285,3 +285,16 @@ none. The card shows RDS sync, RDS SNR and corrected blocks.
 - Clock time (4A) only from blocks that passed their check uncorrected,
   with a year 2000-2099 and an offset within ±13 h (a wrong correction had
   shown 1888-11-24 UTC−11:30).
+
+## 10. Settings window (2026-10-27)
+
+- The decoder-settings box under the band is gone: a **Settings** button
+  in the top bar opens one window with General (volume, the running
+  decoder's bandwidth) and every decoder's own panel, listed by family,
+  the running one marked. The FM multiplex waterfall takes the freed half
+  beside the card.
+- `Panel` gained `settings()` (its settings as `Command::Set`s) and
+  `restore(key, value)`. The GUI keeps a panel for every decoder, sends a
+  new decoder its panel's settings when it starts, and keeps them between
+  runs as `set.<id>.<key>=<value>` in prefs.txt. So a mode can be set up
+  before it runs.

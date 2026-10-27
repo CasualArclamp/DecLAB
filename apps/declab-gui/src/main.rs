@@ -21,6 +21,7 @@ mod band;
 mod freq_display;
 mod panels;
 mod prefs;
+mod settings;
 #[cfg(test)]
 mod sim;
 mod waterfall;
@@ -56,6 +57,8 @@ struct Options {
     wheel: bool,
     /// `--scope NAME`: show this decoder scope (for screenshots).
     scope: Option<String>,
+    /// `--settings`: open with the Settings window up (for screenshots).
+    settings: bool,
     screenshot: Option<PathBuf>,
     after: f64,
 }
@@ -92,6 +95,7 @@ impl Options {
                 }
                 "--wheel" => o.wheel = true,
                 "--scope" => o.scope = Some(value("a scope name")?),
+                "--settings" => o.settings = true,
                 "--screenshot" => o.screenshot = Some(value("a .png path")?.into()),
                 "--after" => o.after = value("seconds")?.parse().map_err(|_| "--after: seconds")?,
                 "-h" | "--help" => {
@@ -207,7 +211,12 @@ struct App {
 
     /// Index into `declab_decoders::ALL`.
     dec: usize,
-    panel: Option<Box<dyn Panel>>,
+    /// Every decoder's settings panel (None: it has none), by index into
+    /// `declab_decoders::ALL`; the Settings window shows them.
+    panels: Vec<Option<Box<dyn Panel>>>,
+    settings_open: bool,
+    /// The settings window's page: None for General, else a decoder.
+    settings_page: Option<usize>,
     chan_hz: f64,
     bandwidth_hz: f64,
     selected_service: Option<u32>,
@@ -279,7 +288,24 @@ impl App {
             source_rate: 0.0,
             error: None,
             dec,
-            panel: None,
+            panels: declab_decoders::ALL
+                .iter()
+                .map(|f| {
+                    let mut panel = f.panel();
+                    // Settings kept from earlier runs: "set.<id>.<key>".
+                    if let Some(pn) = &mut panel {
+                        let pre = format!("set.{}.", f.info().id);
+                        for (k, v) in &p {
+                            if let Some(key) = k.strip_prefix(&pre) {
+                                pn.restore(key, v);
+                            }
+                        }
+                    }
+                    panel
+                })
+                .collect(),
+            settings_open: opts.settings,
+            settings_page: None,
             chan_hz,
             bandwidth_hz: 0.0,
             selected_service: None,
@@ -400,6 +426,7 @@ impl App {
                 host.set_decoder(Some(self.factory()));
                 host.set_channel_at(self.chan_hz, self.bandwidth_hz);
                 self.host = Some(host);
+                self.send_settings();
                 self.history.reset();
                 self.smooth.clear();
                 self.row_rate = 0.0;
@@ -420,7 +447,6 @@ impl App {
     fn choose_decoder(&mut self, i: usize) {
         self.dec = i.min(declab_decoders::ALL.len() - 1);
         let f = self.factory();
-        self.panel = f.panel();
         self.bandwidth_hz = f.input(self.rate()).bandwidth_hz;
         self.selected_service = None;
         self.view = DecoderView::default();
@@ -429,7 +455,36 @@ impl App {
             h.set_decoder(Some(f));
             h.set_channel_at(self.chan_hz, self.bandwidth_hz);
         }
+        self.send_settings();
         self.save_prefs();
+    }
+
+    /// The running decoder starts as its settings panel shows.
+    fn send_settings(&self) {
+        if let (Some(h), Some(Some(p))) = (&self.host, self.panels.get(self.dec)) {
+            for c in p.settings() {
+                h.command(c);
+            }
+        }
+    }
+
+    /// Keep decoder `i`'s settings for the next run.
+    fn save_settings(&self, i: usize) {
+        if !self.saving {
+            return;
+        }
+        let Some(Some(p)) = self.panels.get(i) else { return };
+        let id = declab_decoders::ALL[i].info().id;
+        let pairs: Vec<(String, String)> = p
+            .settings()
+            .into_iter()
+            .filter_map(|c| match c {
+                declab_api::Command::Set { key, value } => Some((format!("set.{id}.{key}"), value)),
+                _ => None,
+            })
+            .collect();
+        let refs: Vec<(&str, String)> = pairs.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        prefs::set_many(&refs);
     }
 
     fn tune_channel(&mut self, hz: f64) {
@@ -546,7 +601,7 @@ impl App {
         self.stats = h.stats();
         self.view = h.view();
         let msgs = h.take_custom();
-        if let Some(p) = &mut self.panel {
+        if let Some(Some(p)) = self.panels.get_mut(self.dec) {
             for m in &msgs {
                 p.receive(m.as_ref());
             }
@@ -698,6 +753,11 @@ impl App {
                         self.wheel = Some(Wheel::new(c, self.dec, ui.ctx().cumulative_frame_nr()));
                     }
                     ui.label(RichText::new("or middle-click the band").size(12.0).color(Color32::GRAY));
+                    ui.add_space(12.0);
+                    if ui.button("Settings").clicked() {
+                        self.settings_open = !self.settings_open;
+                        self.settings_page = self.settings_page.or(Some(self.dec));
+                    }
                 });
             });
         });
@@ -834,12 +894,13 @@ impl eframe::App for App {
             ui.add_space(6.0);
             panels::card(ui, info.name, colour, &self.view, running);
             ui.add_space(6.0);
-            // The scope and the card take half the width, the decoder's
-            // settings and its services a quarter each.
+            // The scope and the card on the left; the decoder's large
+            // waterfall (WFM: its multiplex) takes the rest. Settings are in
+            // the Settings window.
             let w = ui.available_width();
             let h = ui.available_height();
             let gap = ui.spacing().item_spacing.x;
-            let widths = [w * 0.5 - gap, w * 0.25 - gap, w * 0.25 - gap];
+            let widths = [w * 0.5 - gap, w * 0.5 - gap];
             // The decoder's waterfalls, their textures brought up to date.
             let minis: Vec<panels::Mini> = self
                 .minis
@@ -875,30 +936,7 @@ impl eframe::App for App {
                         }
                     })
                 });
-                ui.allocate_ui_with_layout(egui::vec2(widths[1], h), egui::Layout::top_down(egui::Align::Min), |ui| panels::boxed(ui, |ui| {
-                    let (cmds, bw, vol) = panels::decoder_settings(
-                        ui,
-                        info.name,
-                        self.panel.as_mut(),
-                        &mut self.bandwidth_hz,
-                        &mut self.volume,
-                    );
-                    if let Some(h) = &self.host {
-                        for c in cmds {
-                            h.command(c);
-                        }
-                        if bw {
-                            h.set_channel_at(self.chan_hz, self.bandwidth_hz);
-                        }
-                        if vol {
-                            h.set_volume(self.volume);
-                        }
-                    }
-                    if vol {
-                        self.save_prefs();
-                    }
-                }));
-                ui.allocate_ui_with_layout(egui::vec2(widths[2], h), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.allocate_ui_with_layout(egui::vec2(widths[1], h), egui::Layout::top_down(egui::Align::Min), |ui| {
                     panels::boxed(ui, |ui| {
                         // A decoder's large waterfall (WFM: its multiplex), else
                         // the services on their own.
@@ -920,6 +958,52 @@ impl eframe::App for App {
                 }
             }
         });
+
+        // The Settings window.
+        if self.settings_open {
+            let mut open = true;
+            let mut page = self.settings_page;
+            let ch = settings::show(
+                &ctx,
+                &mut open,
+                &mut page,
+                settings::View {
+                    decoders: declab_decoders::ALL,
+                    panels: &mut self.panels,
+                    current: self.dec,
+                    bandwidth_hz: &mut self.bandwidth_hz,
+                    volume: &mut self.volume,
+                },
+            );
+            self.settings_open = open;
+            self.settings_page = page;
+            let mut touched = Vec::new();
+            for (i, c) in ch.commands {
+                // Only the running decoder hears them; the panel keeps them
+                // for the others, which start with them.
+                if i == self.dec
+                    && let Some(h) = &self.host
+                {
+                    h.command(c);
+                }
+                touched.push(i);
+            }
+            touched.dedup();
+            for i in touched {
+                self.save_settings(i);
+            }
+            if let Some(h) = &self.host {
+                if ch.bandwidth {
+                    h.set_channel_at(self.chan_hz, self.bandwidth_hz);
+                }
+                if ch.volume {
+                    h.set_volume(self.volume);
+                }
+            }
+            if ch.volume {
+                self.save_prefs();
+            }
+        }
 
         let mut actions = Vec::new();
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {

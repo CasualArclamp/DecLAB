@@ -323,6 +323,17 @@ pub trait Panel {
 
     /// Draw the panel; push any commands for the decoder into `commands`.
     fn ui(&mut self, ui: &mut egui::Ui, commands: &mut Vec<Command>);
+
+    /// The settings as they stand, as `Command::Set`s: sent to a new
+    /// decoder of this kind so it starts as the panel shows, and kept by
+    /// the app between runs.
+    fn settings(&self) -> Vec<Command> {
+        Vec::new()
+    }
+
+    /// Put back a setting kept from an earlier run (a `Command::Set`'s key
+    /// and value).
+    fn restore(&mut self, _key: &str, _value: &str) {}
 }
 
 /// Describes a decoder and builds it. One `static` of a type implementing

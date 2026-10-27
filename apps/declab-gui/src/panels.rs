@@ -3,7 +3,7 @@
 //! and readings, its own settings panel, its services and text, and the
 //! status bar.
 
-use declab_api::{Command, Iq, Lock, Panel};
+use declab_api::{Iq, Lock};
 use declab_engine::{DecoderView, Stats};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, RichText, Sense, Stroke, Ui, pos2, vec2,
@@ -361,58 +361,6 @@ fn scope(ui: &mut Ui, pts: &[Iq], colour: Color32, size: f32) {
             p.circle_filled(q, 1.4, dot);
         }
     }
-}
-
-/// The decoder's own panel, then the host's channel width and the volume.
-/// Returns commands for the decoder, a new width and a new volume.
-pub fn decoder_settings(
-    ui: &mut Ui,
-    name: &str,
-    panel: Option<&mut Box<dyn Panel>>,
-    bandwidth_hz: &mut f64,
-    volume: &mut f32,
-) -> (Vec<Command>, bool, bool) {
-    let mut cmds = Vec::new();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("{name} settings")).strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new("drawn by the decoder").size(11.0).color(GREY));
-        });
-    });
-    ui.add_space(4.0);
-    match panel {
-        Some(p) => p.ui(ui, &mut cmds),
-        None => {
-            ui.label(RichText::new("This decoder has no settings of its own.").color(GREY));
-        }
-    }
-    ui.add_space(8.0);
-    ui.separator();
-    let mut bw_khz = *bandwidth_hz / 1e3;
-    let speed = bw_khz * 0.01;
-    let bw_changed = ui
-        .horizontal(|ui| {
-            ui.label("Bandwidth");
-            ui.add(
-                egui::DragValue::new(&mut bw_khz)
-                    .range(0.5..=10_000.0)
-                    .speed(speed)
-                    .suffix(" kHz")
-                    .max_decimals(1),
-            )
-            .changed()
-        })
-        .inner;
-    if bw_changed {
-        *bandwidth_hz = bw_khz * 1e3;
-    }
-    let vol_changed = ui
-        .horizontal(|ui| {
-            ui.label("Volume   ");
-            ui.add(egui::Slider::new(volume, 0.0..=1.0).show_value(false)).changed()
-        })
-        .inner;
-    (cmds, bw_changed, vol_changed)
 }
 
 /// Services (click one to decode it) and the decoder's text.

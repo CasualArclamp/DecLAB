@@ -703,6 +703,28 @@ mod panel {
     }
 
     impl Panel for AnalogPanel {
+        fn settings(&self) -> Vec<Command> {
+            let mut v = Vec::new();
+            let mut put = |k: &str, val: String| v.push(Command::Set { key: k.into(), value: val });
+            if matches!(self.mode, Mode::Wfm | Mode::Nfm) {
+                put("deemph", self.s.deemph_us.to_string());
+            }
+            if self.mode == Mode::Wfm {
+                put("stereo", if self.s.stereo { "auto" } else { "mono" }.into());
+            }
+            if self.mode == Mode::Nfm {
+                put("squelch", self.s.squelch_dbfs.map_or("off".into(), |q| format!("{q:.0}")));
+            }
+            if self.mode == Mode::Cw {
+                put("pitch", format!("{:.0}", self.s.pitch_hz));
+            }
+            v
+        }
+
+        fn restore(&mut self, key: &str, value: &str) {
+            let _ = self.s.set(key, value);
+        }
+
         fn ui(&mut self, ui: &mut Ui, commands: &mut Vec<Command>) {
             egui::Grid::new("analog_panel").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
                 if matches!(self.mode, Mode::Wfm | Mode::Nfm) {
@@ -801,6 +823,29 @@ mod tests {
             s += *v as f64 * p.sin();
         }
         (c * c + s * s).sqrt() / x.len() as f64
+    }
+
+    #[cfg(feature = "ui")]
+    #[test]
+    fn a_panel_s_settings_survive_a_restore() {
+        let mut p = Factory(Mode::Nfm).panel().expect("NFM has a panel");
+        p.restore("squelch", "-55");
+        p.restore("deemph", "750");
+        let got: Vec<(String, String)> = p
+            .settings()
+            .into_iter()
+            .filter_map(|c| if let Command::Set { key, value } = c { Some((key, value)) } else { None })
+            .collect();
+        assert!(got.contains(&("squelch".into(), "-55".into())), "{got:?}");
+        assert!(got.contains(&("deemph".into(), "750".into())), "{got:?}");
+        // And a decoder given them takes them.
+        let mut d = Analog::new(Mode::Nfm);
+        let mut sink = Sink::default();
+        for (key, value) in got {
+            d.command(Command::Set { key, value }, &mut sink);
+        }
+        assert_eq!(d.settings.squelch_dbfs, Some(-55.0));
+        assert_eq!(d.settings.deemph_us, 750.0);
     }
 
     #[test]
