@@ -122,6 +122,11 @@ impl History {
         };
     }
 
+    /// Rows kept.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Keep this many rows (starting afresh if it is a change).
     pub fn set_capacity(&mut self, rows: usize) {
         let rows = rows.clamp(64, 4096);

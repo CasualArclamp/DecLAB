@@ -30,6 +30,19 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 3
 
+# The DVB-T/T2 receiver (crates/decdvbt-*, from DecDVB-T): its FEC, OFDM,
+# receiver and modulator are DSP that tests can only run optimised.
+[profile.dev.package.decdvbt-fec]
+opt-level = 3
+[profile.dev.package.decdvbt-ofdm]
+opt-level = 3
+[profile.dev.package.decdvbt-rx]
+opt-level = 3
+[profile.dev.package.decdvbt-mod]
+opt-level = 3
+[profile.dev.package.declab-dsp]
+opt-level = 3
+
 [profile.release]
 debug = "line-tables-only"
 lto = "thin"

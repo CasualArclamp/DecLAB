@@ -37,10 +37,12 @@ const EPS: f32 = 1e-9;
 /// Measurements, scopes and the card are reported this often, seconds: 60
 /// times a second, so the GUI's 60 fps has something new each frame.
 const REPORT_S: f64 = 1.0 / 60.0;
-/// The multiplex waterfall's FFT size (375 Hz bins at 384 kS/s) and the
-/// FFTs averaged into a row.
-const MPX_FFT: usize = 1024;
-const MPX_AVG: usize = 12;
+/// The multiplex waterfall's FFT size (94 Hz bins at 384 kS/s: over a
+/// thousand across its 100 kHz, finer than the box is wide) and the FFTs
+/// averaged into a row (~31 rows a second). It was 1024: 266 bins
+/// stretched over ~700 pixels.
+const MPX_FFT: usize = 4096;
+const MPX_AVG: usize = 3;
 /// The SSB/CW filter's length at 48 kHz: a transition about 650 Hz wide.
 const SSB_TAPS: usize = 401;
 
@@ -809,6 +811,7 @@ mod tests {
             tuning: Tuning { center_hz: 0.0, sample_rate: rate, generation: 0 },
             first_sample: 0,
             dropped_before: 0,
+            live: false,
         };
         d.process(&block, &mut sink);
         sink.audio.iter().flat_map(|a| a.samples.iter().step_by(2).copied()).collect()
@@ -912,6 +915,7 @@ mod tests {
             tuning: Tuning { center_hz: 0.0, sample_rate: 384_000.0, generation: 0 },
             first_sample: 0,
             dropped_before: 0,
+            live: false,
         };
         d.process(&block, &mut sink);
         d.pilot_snr_db() as f64

@@ -235,6 +235,8 @@ struct App {
     ring: RingImage,
     /// The decoder's own waterfalls, by name.
     minis: Vec<MiniState>,
+    /// The large one's height, physical pixels (its rows).
+    big_rows: usize,
     smooth: Vec<f32>,
     row_center: f64,
     row_rate: f64,
@@ -319,6 +321,7 @@ impl App {
             history: History::default(),
             ring: RingImage::default(),
             minis: Vec::new(),
+            big_rows: 240,
             smooth: Vec::new(),
             row_center: 0.0,
             row_rate: 0.0,
@@ -568,11 +571,8 @@ impl App {
             let i = match self.minis.iter().position(|m| m.name == name) {
                 Some(i) => i,
                 None => {
-                    let mut hist = History::default();
-                    // A small one: three seconds or so at ~31 rows a second;
-                    // a large one about as many rows as it is tall.
-                    let small = self.view.scopes.iter().any(|(n, _)| *n == name);
-                    hist.set_capacity(if small { 96 } else { 240 });
+                    // Its rows are set each frame to its height in pixels.
+                    let hist = History::default();
                     self.minis.push(MiniState { name, hist, ring: RingImage::default(), low_hz: 0.0, span_hz: 0.0, marks: Vec::new() });
                     self.minis.len() - 1
                 }
@@ -901,12 +901,20 @@ impl eframe::App for App {
             let h = ui.available_height();
             let gap = ui.spacing().item_spacing.x;
             let widths = [w * 0.5 - gap, w * 0.5 - gap];
-            // The decoder's waterfalls, their textures brought up to date.
+            // The decoder's waterfalls, a row to a physical pixel (the small
+            // one's height is fixed, the large one's the room it reported),
+            // their textures brought up to date.
+            let ppp = ctx.pixels_per_point();
+            let scopes: Vec<&str> = self.view.scopes.iter().map(|(n, _)| *n).collect();
+            let big_rows = self.big_rows;
             let minis: Vec<panels::Mini> = self
                 .minis
                 .iter_mut()
                 .filter_map(|m| {
+                    let small = scopes.contains(&m.name);
+                    m.hist.set_capacity(if small { (panels::MINI_H * ppp).round() as usize } else { big_rows });
                     m.ring.update(&ctx, &m.hist).map(|(tex, uv)| panels::Mini {
+                        rows: m.hist.capacity(),
                         name: m.name,
                         tex,
                         uv,
@@ -916,6 +924,7 @@ impl eframe::App for App {
                     })
                 })
                 .collect();
+            let has_big = minis.iter().any(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name));
             let mut picked = None;
             ui.horizontal_top(|ui| {
                 let chan = self.chan_hz;
@@ -930,6 +939,9 @@ impl eframe::App for App {
                             chan,
                             &minis,
                             self.selected_service,
+                            // The services go under the card when the right
+                            // column holds a waterfall; else they have it.
+                            has_big,
                         );
                         if let Some(id) = pick {
                             picked = Some(id);
@@ -941,7 +953,7 @@ impl eframe::App for App {
                         // A decoder's large waterfall (WFM: its multiplex), else
                         // the services on their own.
                         match minis.iter().find(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name)) {
-                            Some(m) => panels::big_waterfall(ui, m),
+                            Some(m) => self.big_rows = panels::big_waterfall(ui, m).max(64),
                             None => {
                                 if let Some(id) = panels::services(ui, &self.view, self.selected_service) {
                                     picked = Some(id);

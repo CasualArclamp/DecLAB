@@ -113,6 +113,11 @@ pub struct Block<'a> {
     /// Samples the source dropped just before this block (the radio's USB
     /// fell behind): the decoder's timing has a hole there.
     pub dropped_before: u64,
+    /// The samples come from a radio, which will not wait: a decoder that
+    /// falls behind should drop work rather than hold the stream (DVB-T2's
+    /// FEC gives up a frame). From a file, nothing need be dropped: the
+    /// file waits for the decoder.
+    pub live: bool,
 }
 
 /// How a decoder reports its own state on the card at the top of the app.

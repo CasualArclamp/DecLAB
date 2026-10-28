@@ -8,6 +8,7 @@
 //!                      [--bandwidth HZ] [--seconds S] [--realtime]
 //! declab run <decoder> --radio hackrf|airspy --freq HZ [--rate HZ] [--offset HZ]
 //!                      [--gain AMP,LNA,VGA] [--seconds S] [--record OUT.cs8]
+//!                      [--ts OUT.ts] [--card]
 //! ```
 //!
 //! `run` prints the decoder's lock and measurements once a second and plays
@@ -90,6 +91,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     };
 
     let live = source.is_live();
+    let verbose = o.flag("--card");
     println!("{}  {:.3} MS/s", source.describe(), source.sample_rate() / 1e6);
     let mut host = Host::start(
         source,
@@ -101,6 +103,10 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         },
     );
     host.set_decoder(Some(factory));
+    if let Some(path) = o.get("--ts") {
+        // The decoder's transport stream (DVB-T/T2).
+        host.write_ts(Some(PathBuf::from(path)))?;
+    }
     if let Some(path) = o.get("--record") {
         // The raw samples, as they come from the source (format from the extension).
         host.record(Some(PathBuf::from(path)));
@@ -127,7 +133,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             .map(|m| format!("{} {:.2}{}{}", m.name, m.value, if m.unit.is_empty() { "" } else { " " }, m.unit))
             .collect();
         println!(
-            "{:6.1} s  in {:5.1} dBFS{}  ch {:.0} kS/s (/{}{})  {:?}  {}  cpu {:.0}%",
+            "{:6.1} s  in {:5.1} dBFS{}  ch {:.0} kS/s (/{}{})  {:?}  {}  cpu {:.0}%{}",
             s.samples as f64 / s.sample_rate.max(1.0),
             s.rms_dbfs,
             if s.clip_percent > 0.1 { format!(" CLIP {:.1}%", s.clip_percent) } else { String::new() },
@@ -137,7 +143,13 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             v.lock,
             meas.join(", "),
             v.cpu_percent,
+            if v.ts_packets > 0 { format!("  TS {} packets", v.ts_packets) } else { String::new() },
         );
+        if let Some(c) = &v.card
+            && verbose
+        {
+            println!("    card: {} | {} | {}", c.title, c.headline, c.details.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "));
+        }
         // Rust note: `skip` on a VecDeque's iterator resumes where the last
         // print stopped (the log only grows until it is trimmed at 300).
         for line in v.log.iter().skip(printed_log) {
@@ -248,7 +260,7 @@ fn selftest(id: &str) -> anyhow::Result<()> {
         for s in iq.iter_mut() {
             *s = Iq::new(noise() * scale, noise() * scale);
         }
-        let block = Block { iq: &iq, tuning, first_sample: first, dropped_before: 0 };
+        let block = Block { iq: &iq, tuning, first_sample: first, dropped_before: 0, live: false };
         sink.clear();
         dec.process(&block, &mut sink);
         for m in &sink.measurements {

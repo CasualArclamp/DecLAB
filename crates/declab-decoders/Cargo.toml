@@ -17,4 +17,8 @@ declab-api = { path = "../declab-api", default-features = false }
 declab-dsp = { path = "../declab-dsp" }
 num-complex.workspace = true
 rustfft.workspace = true
+# DVB-T/T2: DecDVB-T's receiver and TS tables (crates/decdvbt-*).
+decdvbt-core = { path = "../decdvbt-core" }
+decdvbt-rx = { path = "../decdvbt-rx" }
+decdvbt-ts = { path = "../decdvbt-ts" }
 egui = { workspace = true, optional = true }

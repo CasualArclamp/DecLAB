@@ -153,6 +153,8 @@ pub struct DecoderView {
     pub cpu_percent: f32,
     /// Sound output in use, or why there is none.
     pub audio: Option<String>,
+    /// Transport-stream packets the decoder has made (`Sink::ts`).
+    pub ts_packets: u64,
 }
 
 /// What the source thread is asked to do.
@@ -171,6 +173,7 @@ struct BlockMeta {
     sample_rate: f64,
     generation: u32,
     dropped_before: u64,
+    live: bool,
 }
 
 /// Where the decoder's channel sits.
@@ -212,6 +215,8 @@ struct Shared {
     /// Blocks dropped because the worker's queue was full.
     handoff_dropped: Mutex<u64>,
     volume: AtomicU32,
+    /// Where the decoder's transport stream is written, if anywhere.
+    ts_file: Mutex<Option<std::io::BufWriter<std::fs::File>>>,
     running: AtomicBool,
     /// Blocks handed to the worker and not yet decoded.
     in_flight: AtomicUsize,
@@ -246,6 +251,7 @@ impl Host {
             worker_tx: Mutex::new(None),
             handoff_dropped: Mutex::new(0),
             volume: AtomicU32::new(0.8f32.to_bits()),
+            ts_file: Mutex::new(None),
             running: AtomicBool::new(true),
             in_flight: AtomicUsize::new(0),
         });
@@ -341,6 +347,19 @@ impl Host {
 
     pub fn set_front_end(&self, s: FrontEndSettings) {
         let _ = self.cmd.send(SourceCmd::FrontEnd(s));
+    }
+
+    /// Write the decoder's transport stream to `path` (a `.ts`), or stop.
+    pub fn write_ts(&self, path: Option<PathBuf>) -> std::io::Result<()> {
+        let mut f = self.shared.ts_file.lock().unwrap();
+        if let Some(mut old) = f.take() {
+            use std::io::Write;
+            old.flush()?;
+        }
+        if let Some(p) = path {
+            *f = Some(std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(p)?));
+        }
+        Ok(())
     }
 
     pub fn set_volume(&self, v: f32) {
@@ -550,7 +569,7 @@ fn source_thread(
         }
 
         // Hand over. A radio never waits; a file does.
-        let meta = BlockMeta { center_hz: center, sample_rate: rate, generation, dropped_before };
+        let meta = BlockMeta { center_hz: center, sample_rate: rate, generation, dropped_before, live };
         let tx = sh.worker_tx.lock().unwrap().clone();
         if let Some(tx) = tx {
             meter.time(Stage::Handoff, || {
@@ -653,10 +672,13 @@ impl Chain {
         let bw = bandwidth_hz.clamp(1.0, in_rate);
         let mut note = None;
         let want = spec.sample_rate;
-        // Untouched: the decoder takes the source's own samples.
-        let passthrough = want.is_none_or(|r| (r - in_rate).abs() < 1e-6 * in_rate)
-            && offset_hz == 0.0
-            && bw >= 0.8 * in_rate;
+        // Untouched: a decoder that asks for the source's own rate
+        // (`sample_rate: None`) with its channel centred gets the samples as
+        // they are (DVB-T's FFT runs on them directly: a full-rate filter
+        // cost it 30 % more time and did nothing); one that names the source's
+        // rate gets them untouched when its channel is most of the band.
+        let passthrough = offset_hz == 0.0
+            && (want.is_none() || want.is_some_and(|r| (r - in_rate).abs() < 1e-6 * in_rate) && bw >= 0.8 * in_rate);
         let ddc = (!passthrough).then(|| Ddc::new(in_rate, offset_hz, bw));
         let mid_rate = ddc.as_ref().map_or(in_rate, |d| d.out_rate());
         let rs = match want {
@@ -794,6 +816,7 @@ fn worker_thread(
                     },
                     first_sample,
                     dropped_before: (meta.dropped_before as f64 * out_rate / meta.sample_rate) as u64,
+                    live: meta.live,
                 };
                 first_sample += iq.len() as u64;
                 decoder.process(&block, &mut sink);
@@ -849,6 +872,15 @@ fn worker_thread(
         }
         if !sink.constellation.is_empty() {
             std::mem::swap(&mut v.constellation, &mut sink.constellation);
+        }
+        if !sink.ts.is_empty() {
+            v.ts_packets += sink.ts.len() as u64;
+            if let Some(f) = sh.ts_file.lock().unwrap().as_mut() {
+                use std::io::Write;
+                for p in &sink.ts {
+                    let _ = f.write_all(p);
+                }
+            }
         }
         if let Some(c) = sink.card.take() {
             v.card = Some(c);

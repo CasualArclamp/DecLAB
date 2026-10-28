@@ -73,6 +73,8 @@ pub fn boxed(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 /// coordinates that put the newest row on top.
 pub struct Mini {
     pub name: &'static str,
+    /// Rows the texture holds: drawn one to a physical pixel.
+    pub rows: usize,
     pub tex: egui::TextureId,
     pub uv: egui::Rect,
     pub low_hz: f32,
@@ -81,7 +83,7 @@ pub struct Mini {
 }
 
 /// The height of a small waterfall under the scope, points.
-const MINI_H: f32 = 64.0;
+pub const MINI_H: f32 = 64.0;
 
 /// The constellation scope (with its choice of scopes above it) and the
 /// decoder's card beside it, in the style of DecDVB-T's and DecSAT's cards.
@@ -99,6 +101,7 @@ pub fn scope_and_card(
     freq_hz: f64,
     minis: &[Mini],
     selected: Option<u32>,
+    services_here: bool,
 ) -> Option<u32> {
     let mut pick = None;
     ui.horizontal_top(|ui| {
@@ -139,7 +142,7 @@ pub fn scope_and_card(
                 draw_card(ui, card, colour, freq_hz, view.cpu_percent);
                 // The services under the card, a row each; the decoder's text
                 // too when its card does not carry it.
-                if !view.services.is_empty() {
+                if services_here && !view.services.is_empty() {
                     ui.add_space(6.0);
                     ui.label(RichText::new("services").size(11.0).color(GREY));
                     for s in &view.services {
@@ -151,7 +154,7 @@ pub fn scope_and_card(
                         }
                     }
                 }
-                if view.card.as_ref().is_none_or(|c| c.text.is_empty()) {
+                if services_here && view.card.as_ref().is_none_or(|c| c.text.is_empty()) {
                     for t in view.text.values() {
                         ui.add_space(4.0);
                         ui.add(egui::Label::new(RichText::new(t).size(13.0).color(Color32::WHITE)).wrap());
@@ -278,8 +281,17 @@ fn draw_card(ui: &mut Ui, c: &declab_api::Card, colour: Color32, freq_hz: f64, c
 }
 
 /// A decoder waterfall's image with its marks (lines, labels along the top).
-fn waterfall_image(ui: &mut Ui, m: &Mini, size: egui::Vec2, labels: bool) -> egui::Rect {
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+///
+/// Drawn as the main waterfall is (DecDVB-T's way): its rows one to a
+/// physical pixel, on a whole pixel. Spreading 96 rows over 64 points left
+/// each row two thirds of a pixel, and the scroll shimmered as rows slid
+/// across pixel boundaries.
+fn waterfall_image(ui: &mut Ui, m: &Mini, width: f32, labels: bool) -> egui::Rect {
+    let ppp = ui.ctx().pixels_per_point();
+    let h = m.rows as f32 / ppp;
+    let (got, _) = ui.allocate_exact_size(vec2(width, h + 1.0 / ppp), Sense::hover());
+    let top = (got.top() * ppp).round() / ppp;
+    let rect = egui::Rect::from_min_size(pos2(got.left(), top), vec2(width, h));
     let p = ui.painter_at(rect);
     p.image(m.tex, rect, m.uv, Color32::WHITE);
     let x_of = |hz: f32| rect.left() + (hz - m.low_hz) / m.span_hz.max(1.0) * rect.width();
@@ -298,7 +310,7 @@ fn waterfall_image(ui: &mut Ui, m: &Mini, size: egui::Vec2, labels: bool) -> egu
 
 fn mini_waterfall(ui: &mut Ui, m: &Mini) {
     ui.add_space(4.0);
-    waterfall_image(ui, m, vec2(SCOPE, MINI_H), false);
+    waterfall_image(ui, m, SCOPE, false);
     let (lo, hi) = (m.low_hz / 1e3, (m.low_hz + m.span_hz) / 1e3);
     ui.horizontal(|ui| {
         ui.set_width(SCOPE);
@@ -313,8 +325,9 @@ fn mini_waterfall(ui: &mut Ui, m: &Mini) {
     });
 }
 
-/// A decoder's large waterfall (WFM's multiplex), filling its box.
-pub fn big_waterfall(ui: &mut Ui, m: &Mini) {
+/// A decoder's large waterfall (WFM's multiplex), filling its box. Returns
+/// the rows (physical pixels) it has room for, for the next frame.
+pub fn big_waterfall(ui: &mut Ui, m: &Mini) -> usize {
     ui.horizontal(|ui| {
         ui.label(RichText::new(m.name).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -322,8 +335,8 @@ pub fn big_waterfall(ui: &mut Ui, m: &Mini) {
         });
     });
     let w = ui.available_width();
-    let h = (ui.available_height() - 24.0).max(40.0);
-    let rect = waterfall_image(ui, m, vec2(w, h), true);
+    let room = ((ui.available_height() - 26.0).max(40.0) * ui.ctx().pixels_per_point()).floor() as usize;
+    let rect = waterfall_image(ui, m, w, true);
     // A kHz scale: every 10 kHz, labelled every 20.
     let p = ui.painter();
     let x_of = |hz: f32| rect.left() + (hz - m.low_hz) / m.span_hz.max(1.0) * rect.width();
@@ -338,6 +351,7 @@ pub fn big_waterfall(ui: &mut Ui, m: &Mini) {
         k += 10e3;
     }
     p.text(pos2(rect.right(), rect.bottom() + 5.0), Align2::RIGHT_TOP, "kHz", FontId::monospace(10.0), GREY);
+    room
 }
 
 /// IQ points, scaled so their RMS sits at 45 % of the half-width.
@@ -364,33 +378,38 @@ fn scope(ui: &mut Ui, pts: &[Iq], colour: Color32, size: f32) {
 }
 
 /// Services (click one to decode it) and the decoder's text.
+/// The service a text belongs to when none is picked: the first listed.
+fn shown_service(view: &DecoderView, selected: Option<u32>) -> Option<u32> {
+    selected.or(view.services.first().map(|s| s.id))
+}
+
 pub fn services(ui: &mut Ui, view: &DecoderView, selected: Option<u32>) -> Option<u32> {
     let mut pick = None;
-    ui.label(RichText::new("Services").strong());
-    if view.services.is_empty() {
-        ui.label(RichText::new("none announced").color(GREY));
-    }
-    egui::ScrollArea::vertical().id_salt("services").max_height(110.0).show(ui, |ui| {
+    // Everything scrolls: a multiplex has a dozen services or more, and
+    // the box must not grow out of the panel.
+    egui::ScrollArea::vertical().id_salt("services").max_height(ui.available_height()).show(ui, |ui| {
+        let shown = shown_service(view, selected);
+        // The picked (or first) service's text first: its now/next.
+        if let Some(t) = shown.and_then(|id| view.text.get(&id)).or(view.text.values().next()) {
+            ui.add(egui::Label::new(RichText::new(t).color(Color32::WHITE)).wrap());
+            ui.add_space(6.0);
+        }
+        ui.label(RichText::new("Services").strong());
+        if view.services.is_empty() {
+            ui.label(RichText::new("none announced").color(GREY));
+        }
         for s in &view.services {
             let name = if s.name.is_empty() { format!("[{}]", s.id) } else { s.name.clone() };
-            let on = selected == Some(s.id) || (selected.is_none() && view.services.len() == 1);
             let text = format!("{name:<24} {}", s.kind);
-            if ui.selectable_label(on, RichText::new(text)).clicked() {
+            if ui.selectable_label(shown == Some(s.id), RichText::new(text)).clicked() {
                 pick = Some(s.id);
             }
         }
-    });
-    if !view.text.is_empty() {
-        ui.add_space(6.0);
-        ui.label(RichText::new("text").size(11.0).color(GREY));
-        for t in view.text.values() {
-            ui.label(RichText::new(t).color(Color32::WHITE));
+        if let Some(last) = view.log.back() {
+            ui.add_space(6.0);
+            ui.label(RichText::new(format!("log: {last}")).size(11.0).color(GREY));
         }
-    }
-    if let Some(last) = view.log.back() {
-        ui.add_space(6.0);
-        ui.label(RichText::new(format!("log: {last}")).size(11.0).color(GREY));
-    }
+    });
     pick
 }
 

@@ -88,7 +88,7 @@ Shared crates are merged once; standard-specific DSP is copied in with a
 | `declab-ts` | DecDVB-T's `decdvbt-ts` (PSI/SI, EPG with Huffman) — DecSAT's `decsat-ts` compared and merged |
 | `declab-mheg` | DecDVB-T's Red Button engine |
 | `declab-audio`, `declab-video` | DecDVB-T's player side; DAB audio decoders from DecDAB |
-| `declab-dvbt` | `decdvbt-ofdm`, `-rx`, `-fec` (Viterbi/RS, T2 LDPC/BCH) |
+| `decdvbt-core`, `-fec`, `-ofdm`, `-rx`, `-ts`, `-mod` | copied from DecDVB-T (`5e9b249`) under their own names (see §11); `decdvbt-dsp` is `declab-dsp` (identical) |
 | `declab-dvbs` | `decsat-dsp`/`-frame`/`-fec`/`-modem` DVB parts, `decsat-gse`, `decsat-ip` |
 | `declab-dab` | `decdab-ofdm`, `-fic`, `-msc`, `-fec`, `-codecs`, `-data`, `decdab-fdk-sys` |
 | `apps/declab-gui`, `apps/declab-cli` | new, built from the three GUIs' parts |
@@ -104,7 +104,8 @@ DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
 | M0 | Workspace, `declab-api`, decoder list, example decoder, CLI `list`/`selftest`, GUI mode picker | ✅ 2026-10-27 |
 | M1a | Shared front end and host: `declab-core`/`-io`/`-dsp`/`-engine`, DDC + resampler + worker per decoder, waterfall rows, sound out, analog decoders, CLI `run` on files and radios | ✅ 2026-10-27 |
 | M1b | GUI from the mockups: source controls, spectrum/waterfall (middle-drag moves the band, scroll zooms), decoder wheel with icons, card, scope, decoder panels, services, status bar, prefs | ✅ 2026-10-27 on files; live in the GUI not yet tried (the Airspy was in use) |
-| M2 | DVB-T/T2 as a plug-in: TS hub, services, player, EPG, Red Button | C30 and C23 captures decode as in DecDVB-T at the same CPU |
+| M2a | DVB-T/T2 as a plug-in: decode, card, constellation, services, now/next, `.ts` out | ✅ 2026-10-28: C23 and C30 decode to DecDVB-T's very bytes at its speed |
+| M2b | TS hub, player (video, audio, subtitles), EPG, Red Button, PLP choice, HTTP/UDP out | |
 | M3 | DAB/DAB+ as a plug-in: audio, DLS, slideshow, SPI; libxaac question | 11D/12B captures play |
 | M4 | DVB-S and DVB-S2/S2X TS + GSE/IP (PCAP) | DecSAT's test captures decode |
 | M5 | DVB-RCS2/TDMA return burst analyser | DecSAT's inroute captures decode |
@@ -298,3 +299,31 @@ none. The card shows RDS sync, RDS SNR and corrected blocks.
   new decoder its panel's settings when it starts, and keeps them between
   runs as `set.<id>.<key>=<value>` in prefs.txt. So a mode can be set up
   before it runs.
+
+## 11. M2a: DVB-T/T2 (2026-10-28)
+
+- **The receiver came over as it is.** DecDVB-T's `decdvbt-core`, `-fec`,
+  `-ofdm`, `-rx`, `-ts` and `-mod` (≈40 000 lines, at DecDVB-T `5e9b249`)
+  are copied under their own names rather than renamed `declab-*`: no
+  churn in 40 000 lines, and a fix can be compared with DecDVB-T directly.
+  Their DSP dependency is `declab-dsp` under the old name (the files are
+  identical bar names). DecDVB-T's own tests run here and pass.
+- **The plug-in** (`declab-decoders/src/dvbt.rs`) wraps `AutoReceiver`:
+  one wheel entry, DVB-T or T2 found blind; the radio's own samples
+  (`sample_rate: None`); TS to `Sink::ts` and a `TsAnalyser` for services
+  and now/next; DecDVB-T's card (mode, effective SNR against the mode's
+  QEF C/N, details); the equalised cells on the scope.
+- **Same bytes, same speed.** C23 (DVB-T 64-QAM 2/3): 62 370 packets, byte
+  for byte DecDVB-T's, 1.31 s against its 1.38 s for 4 s of signal. C30
+  (T2 256-QAM 2/3 rotated): DecDVB-T's whole stream is an exact prefix of
+  DecLAB's (its CLI stops before the FEC drains), no continuity jumps,
+  ~56 000 packets/s against its ~58 000.
+- **Two host fixes found on the way.** A decoder asking for the source's
+  own rate with its channel centred now gets the samples untouched (a
+  pointless full-rate filter had cost DVB-T 30 %). `Block::live` says
+  whether the samples come from a radio: the T2 FEC drops a frame when
+  behind only then (from a file, running flat out, it had been dropping).
+- `declab run … --ts OUT.ts --card`; the host's `write_ts`.
+- The decoder waterfalls are drawn a row to a physical pixel on a whole
+  pixel (the RDS one shimmered: 96 rows in 64 points); the multiplex
+  waterfall uses 4096-point FFTs (94 Hz bins).

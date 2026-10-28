@@ -8,6 +8,7 @@
 use declab_api::DecoderFactory;
 
 mod analog;
+mod dvbt;
 mod analog_rds;
 mod level;
 
@@ -15,6 +16,7 @@ use analog::Mode;
 
 /// The mode picker's list, in the order it shows them within a family.
 pub static ALL: &[&dyn DecoderFactory] = &[
+    &dvbt::Factory,
     &analog::Factory(Mode::Wfm),
     &analog::Factory(Mode::Nfm),
     &analog::Factory(Mode::Am),
