@@ -1,0 +1,13 @@
+# made by CasualArclamp
+[package]
+name = "declab-pagers"
+description = "Pagers, from DecPagers: POCSAG and FLEX decoders and encoders, FSK slicer, channel receiver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+declab-core = { path = "../declab-core" }
+num-complex.workspace = true

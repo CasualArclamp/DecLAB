@@ -142,10 +142,6 @@ impl Options {
     }
 }
 
-fn opts_scope(o: &Options) -> String {
-    o.scope.clone().unwrap_or_default()
-}
-
 fn main() -> eframe::Result {
     let opts = match Options::from_args() {
         Ok(o) => o,
@@ -383,7 +379,7 @@ impl App {
             selected_service: None,
             volume: prefs::num(&p, "volume").unwrap_or(0.8),
             muted: false,
-            scope: opts_scope(&opts),
+            scope: opts.scope.clone().unwrap_or_else(|| declab_decoders::ALL[dec].default_scope().to_string()),
             view_hz: center_hz,
             zoom: opts.zoom.or(prefs::num(&p, "zoom")).unwrap_or(1.0),
             dragging: false,
@@ -548,9 +544,14 @@ impl App {
 
     /// Run decoder `i` (on the running host too).
     fn choose_decoder(&mut self, i: usize) {
+        let changed = self.dec != i.min(declab_decoders::ALL.len() - 1);
         self.dec = i.min(declab_decoders::ALL.len() - 1);
         let f = self.factory();
         self.bandwidth_hz = f.input(self.rate()).bandwidth_hz;
+        // A new decoder opens on its own scope (`--scope` still wins at start).
+        if changed && !f.default_scope().is_empty() {
+            self.scope = f.default_scope().to_string();
+        }
         self.selected_service = None;
         self.view = DecoderView::default();
         self.minis.clear();

@@ -31,6 +31,13 @@ scope and milestones; update it when a decision changes.
   DecDAB's Airspy branch has a variant that goes straight to DAB's rate; the
   host's down-converter makes that unnecessary here.
 - (2026-10-27) **Analog modes** too: AM, DSB, USB, LSB, CW, NFM, WFM.
+- (2026-10-28) **Pagers**: POCSAG 512/1200/2400 and FLEX 1600–6400 from
+  DecPagers (`..\DecPagers`), as the `pagers` plug-in
+  (`declab-decoders/src/pagers.rs`) over a copy of its protocol crate
+  (`crates/declab-pagers`). Its scopes are "Symbols" (soft symbols in time
+  order: 2 or 4 bands) and "Eye"; the GUI opens on "Symbols"
+  (`DecoderFactory::default_scope`, new). Low-SNR receiver: tone
+  correlators, per-tone AFC, Chase BCH (see DecPagers' DESIGN §3a).
 - (2026-10-27) **GUI interactions** asked for: middle-drag pans the spectrum
   and waterfall; a middle click (no drag) opens a radial decoder picker like
   a game's weapon wheel — scroll to step round it, or point at a slice, and

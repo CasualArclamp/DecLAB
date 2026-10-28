@@ -354,6 +354,13 @@ pub trait DecoderFactory: Sync {
 
     fn create(&self) -> Box<dyn Decoder>;
 
+    /// The scope (one of the decoder's [`Sink::scopes`] names) the GUI shows
+    /// when this decoder is chosen; "" keeps the channel IQ or whatever was
+    /// shown before.
+    fn default_scope(&self) -> &'static str {
+        ""
+    }
+
     /// The decoder's own panel, if it has settings beyond the services list.
     #[cfg(feature = "ui")]
     fn panel(&self) -> Option<Box<dyn Panel>> {

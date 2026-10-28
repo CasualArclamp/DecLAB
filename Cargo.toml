@@ -42,6 +42,8 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.declab-dsp]
 opt-level = 3
+[profile.dev.package.declab-pagers]
+opt-level = 3
 
 [profile.release]
 debug = "line-tables-only"

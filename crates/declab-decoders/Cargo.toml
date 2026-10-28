@@ -22,4 +22,6 @@ decdvbt-core = { path = "../decdvbt-core" }
 decdvbt-rx = { path = "../decdvbt-rx" }
 decdvbt-ofdm = { path = "../decdvbt-ofdm" }
 decdvbt-ts = { path = "../decdvbt-ts" }
+# POCSAG and FLEX (crates/declab-pagers, from DecPagers).
+declab-pagers = { path = "../declab-pagers" }
 egui = { workspace = true, optional = true }

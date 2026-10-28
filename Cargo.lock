@@ -600,6 +600,7 @@ dependencies = [
  "decdvbt-ts",
  "declab-api",
  "declab-dsp",
+ "declab-pagers",
  "egui",
  "num-complex",
  "rustfft",
@@ -660,6 +661,14 @@ dependencies = [
  "seify-hackrfone",
  "thiserror 2.0.21",
  "tracing",
+]
+
+[[package]]
+name = "declab-pagers"
+version = "0.0.1"
+dependencies = [
+ "declab-core",
+ "num-complex",
 ]
 
 [[package]]

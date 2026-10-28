@@ -11,6 +11,7 @@ mod analog;
 mod dvbt;
 mod analog_rds;
 mod level;
+mod pagers;
 
 use analog::Mode;
 
@@ -24,6 +25,7 @@ pub static ALL: &[&dyn DecoderFactory] = &[
     &analog::Factory(Mode::Lsb),
     &analog::Factory(Mode::Dsb),
     &analog::Factory(Mode::Cw),
+    &pagers::Factory,
     &level::Factory,
 ];
 
