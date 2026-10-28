@@ -125,6 +125,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     }
 
     let t0 = Instant::now();
+    let cpu0 = declab_engine::meter::process_cpu_seconds();
     let mut printed_log = 0usize;
     let mut last_text = String::new();
     let mut audio_said = false;
@@ -186,7 +187,17 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             break;
         }
     }
+    let cpu = declab_engine::meter::process_cpu_seconds() - cpu0;
+    let st = host.stats();
+    let v = host.view();
+    let p = st.stages.percent;
+    println!(
+        "source thread (% of wall): read {:.1}, record {:.1}, front end {:.1}, spectrum {:.1}, hand-off {:.1}; decoder worker {:.0} %",
+        p[0], p[1], p[2], p[3], p[4], v.cpu_percent
+    );
+    let wall = t0.elapsed().as_secs_f64();
     drop(host);
+    println!("process CPU {:.0} % of one core on average over {wall:.1} s", 100.0 * cpu / wall.max(1e-3));
     Ok(())
 }
 

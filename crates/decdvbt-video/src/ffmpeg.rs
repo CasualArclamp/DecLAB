@@ -78,14 +78,21 @@ pub enum Deinterlace {
     /// One picture per frame (yadif `send_frame`): half the rate, more
     /// vertical detail on still scenes.
     Frame,
+    /// One field of each frame, no deinterlacer (DecLAB): for a picture
+    /// shown at half its height or less (1080i in the 960×540 frame), where
+    /// a field is all the lines that are shown anyway. On BBC One HD it cut
+    /// ffmpeg from 52 % of a core to 38 % (yadif at full height was most of
+    /// the filtering). Not for SD: a 576i field is 288 lines.
+    Field,
 }
 
 impl Deinterlace {
-    /// yadif's `mode` for this.
-    fn yadif_mode(self) -> &'static str {
+    /// The filter that makes the pictures progressive.
+    fn filter(self) -> &'static str {
         match self {
-            Deinterlace::Bob => "send_field",
-            Deinterlace::Frame => "send_frame",
+            Deinterlace::Bob => "yadif=mode=send_field:deint=interlaced",
+            Deinterlace::Frame => "yadif=mode=send_frame:deint=interlaced",
+            Deinterlace::Field => "field=top",
         }
     }
 }
@@ -147,10 +154,10 @@ pub fn args(
         a.extend([
             "-filter_complex".to_string(),
             format!(
-                "[0:i:{v}]yadif=mode={}:deint=interlaced,{fit},setsar=1,pad={w}:{h}:-1:-1[v];\
+                "[0:i:{v}]{},{fit},setsar=1,pad={w}:{h}:-1:-1[v];\
                  [0:i:{s}]scale={w}:{h},format=rgba[s];\
                  [v][s]overlay=0:0:eof_action=pass[o]",
-                deint.yadif_mode()
+                deint.filter()
             ),
             "-map".into(),
             "[o]".into(),
@@ -173,8 +180,8 @@ pub fn args(
         a.extend([
             "-vf".to_string(),
             format!(
-                "yadif=mode={}:deint=interlaced,{fit},setsar=1,pad={w}:{h}:-1:-1",
-                deint.yadif_mode()
+                "{},{fit},setsar=1,pad={w}:{h}:-1:-1",
+                deint.filter()
             ),
             "-c:v".into(),
             "rawvideo".into(),
@@ -336,6 +343,7 @@ mod tests {
         assert!(vf(Deinterlace::Bob).starts_with("yadif=mode=send_field:deint=interlaced,"));
         assert!(vf(Deinterlace::Frame).starts_with("yadif=mode=send_frame:deint=interlaced,"));
         assert_eq!(Deinterlace::default(), Deinterlace::Bob);
+        assert!(vf(Deinterlace::Field).starts_with("field=top,"));
     }
 
     #[test]
