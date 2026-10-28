@@ -706,42 +706,72 @@ impl App {
         self.save_prefs();
     }
 
-    fn set_air_gains(&mut self, g: gain_opt::Gains) {
-        (self.air_lna, self.air_mix, self.air_vga) = (g.lna, g.mixer, g.vga);
+    /// Set the radio's gains to what the optimiser says.
+    fn set_opt_gains(&mut self, g: gain_opt::Gains) {
+        match g {
+            gain_opt::Gains::Air(g) => (self.air_lna, self.air_mix, self.air_vga) = (g.lna, g.mixer, g.vga),
+            gain_opt::Gains::Hack(g) => (self.hack_amp, self.hack_lna, self.hack_vga) = (g.amp, g.lna, g.vga),
+        }
         self.apply_gains();
     }
 
-    /// Start the Airspy gain optimiser on the signal being received (see
-    /// `gain_opt.rs`). It climbs libairspy's sensitivity ladder in steps of
-    /// two rungs, then steps each stage about the best.
+    /// Start the gain optimiser on the signal being received (see
+    /// `gain_opt.rs`): DecDVB-T's search for the HackRF; for the Airspy, the
+    /// sensitivity ladder in steps of two rungs, then each stage stepped
+    /// about the best.
     fn start_optimise(&mut self) {
-        #[cfg(feature = "airspy")]
-        if matches!(self.control, Control::Airspy(_)) && self.opt.is_none() {
-            let as_gains = |a: declab_io::AirspyGains| gain_opt::Gains {
-                lna: a.lna,
-                mixer: a.mixer,
-                vga: a.vga,
-            };
-            let mut ladder: Vec<gain_opt::Gains> = (0..=20u8)
-                .step_by(2)
-                .chain(std::iter::once(21))
-                .map(|n| as_gains(declab_io::AirspyGains::sensitivity(n)))
-                .collect();
-            ladder.dedup();
-            let original = gain_opt::Gains {
-                lna: self.air_lna,
-                mixer: self.air_mix,
-                vga: self.air_vga,
-            };
-            self.opt = Some(gain_opt::Optimiser::new(original, ladder));
-            self.opt_note = None;
+        if self.opt.is_some() {
+            return;
         }
+        match &self.control {
+            #[cfg(feature = "hackrf")]
+            Control::HackRf(_) => {
+                let original = gain_opt::HackGains { amp: self.hack_amp, lna: self.hack_lna, vga: self.hack_vga };
+                self.opt = Some(gain_opt::Optimiser::hackrf(original));
+                self.opt_note = None;
+            }
+            #[cfg(feature = "airspy")]
+            Control::Airspy(_) => {
+                let as_gains = |a: declab_io::AirspyGains| gain_opt::AirGains { lna: a.lna, mixer: a.mixer, vga: a.vga };
+                let mut ladder: Vec<gain_opt::AirGains> = (0..=20u8)
+                    .step_by(2)
+                    .chain(std::iter::once(21))
+                    .map(|n| as_gains(declab_io::AirspyGains::sensitivity(n)))
+                    .collect();
+                ladder.dedup();
+                let original = gain_opt::AirGains { lna: self.air_lna, mixer: self.air_mix, vga: self.air_vga };
+                self.opt = Some(gain_opt::Optimiser::airspy(original, ladder));
+                self.opt_note = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// The optimiser's part of a gain menu: its button (or progress and
+    /// Cancel) and what the last run found. Returns (start, cancel).
+    fn optimiser_menu(&self, ui: &mut egui::Ui) -> (bool, bool) {
+        let (mut start, mut cancel) = (false, false);
+        ui.separator();
+        if let Some(o) = &self.opt {
+            ui.label(format!("optimising… {} settings tried", o.done()));
+            cancel = ui.button("Cancel").clicked();
+        } else {
+            let can = self.host.is_some() && self.live;
+            start = ui
+                .add_enabled(can, egui::Button::new("Optimise gain"))
+                .on_hover_text("Tries gain settings on the tuned channel and keeps the one with the best MER (or C/N)")
+                .clicked();
+            if let Some(n) = &self.opt_note {
+                ui.label(RichText::new(n).size(12.0).color(Color32::GRAY));
+            }
+        }
+        (start, cancel)
     }
 
     /// Stop the optimiser and put the gains back as they were.
     fn cancel_optimise(&mut self) {
         if let Some(o) = self.opt.take() {
-            self.set_air_gains(o.original);
+            self.set_opt_gains(o.original);
             self.opt_note = Some("cancelled: the old gains are back".into());
         }
     }
@@ -791,10 +821,8 @@ impl App {
             && let Some(p) = o.points.last()
         {
             eprintln!(
-                "optimise gain: LNA {:2} MIX {:2} VGA {:2}  MER {}  C/N {}  {:.1} dBFS{}",
-                p.gains.lna,
-                p.gains.mixer,
-                p.gains.vga,
+                "optimise gain: {:<28} MER {}  C/N {}  {:.1} dBFS{}",
+                p.gains.to_string(),
                 p.mer.map_or("  -  ".into(), |m| format!("{m:5.1}")),
                 p.cn.map_or("  -  ".into(), |c| format!("{c:5.1}")),
                 p.rms_dbfs,
@@ -804,27 +832,24 @@ impl App {
         match action {
             gain_opt::Action::Wait => self.opt = Some(o),
             gain_opt::Action::Apply(g) => {
-                self.set_air_gains(g);
+                self.set_opt_gains(g);
                 self.opt = Some(o);
             }
             gain_opt::Action::Finish(found) => {
                 let note = match (found, o.best()) {
                     (Some(g), Some(p)) => {
-                        self.set_air_gains(g);
+                        self.set_opt_gains(g);
                         let figure = o.figure(&p).map_or(String::new(), |f| {
                             format!("{} {f:.1} dB at ", if o.uses_mer() { "MER" } else { "C/N" })
                         });
                         format!(
-                            "LNA {} · MIX {} · VGA {}: {figure}{:.0} dBFS, {} settings tried",
-                            g.lna,
-                            g.mixer,
-                            g.vga,
+                            "{g}: {figure}{:.0} dBFS, {} settings tried",
                             p.rms_dbfs,
                             o.done()
                         )
                     }
                     _ => {
-                        self.set_air_gains(o.original);
+                        self.set_opt_gains(o.original);
                         "no usable signal in the channel (C/N under 3 dB, or clipping at every setting): the old gains are back".into()
                     }
                 };
@@ -1009,17 +1034,29 @@ impl App {
                             if self.hack_rate != before && running {
                                 self.start();
                             }
+                            let (mut start_opt, mut cancel_opt) = (false, false);
                             ui.menu_button(
                                 format!("{}LNA {} · VGA {}", if self.hack_amp { "AMP · " } else { "" }, self.hack_lna, self.hack_vga),
                                 |ui| {
-                                    let mut ch = ui.checkbox(&mut self.hack_amp, "RF amp (+14 dB)").changed();
-                                    ch |= ui.add(egui::Slider::new(&mut self.hack_lna, 0..=40).step_by(8.0).text("LNA dB")).changed();
-                                    ch |= ui.add(egui::Slider::new(&mut self.hack_vga, 0..=62).step_by(2.0).text("VGA dB")).changed();
+                                    // The optimiser is moving the gains: not the sliders too.
+                                    let mut ch = false;
+                                    ui.add_enabled_ui(self.opt.is_none(), |ui| {
+                                        ch |= ui.checkbox(&mut self.hack_amp, "RF amp (+14 dB)").changed();
+                                        ch |= ui.add(egui::Slider::new(&mut self.hack_lna, 0..=40).step_by(8.0).text("LNA dB")).changed();
+                                        ch |= ui.add(egui::Slider::new(&mut self.hack_vga, 0..=62).step_by(2.0).text("VGA dB")).changed();
+                                    });
                                     if ch {
                                         self.apply_gains();
                                     }
+                                    (start_opt, cancel_opt) = self.optimiser_menu(ui);
                                 },
                             );
+                            if start_opt {
+                                self.start_optimise();
+                            }
+                            if cancel_opt {
+                                self.cancel_optimise();
+                            }
                         }
                         SourceKind::Airspy => {
                             ui.label(RichText::new("rate").color(Color32::GRAY));
@@ -1037,20 +1074,7 @@ impl App {
                                 if ch {
                                     self.apply_gains();
                                 }
-                                ui.separator();
-                                if let Some(o) = &self.opt {
-                                    ui.label(format!("optimising… {} settings tried", o.done()));
-                                    cancel_opt = ui.button("Cancel").clicked();
-                                } else {
-                                    let can = running && self.live;
-                                    let b = ui
-                                        .add_enabled(can, egui::Button::new("Optimise gain"))
-                                        .on_hover_text("Tries gain settings on the tuned channel and keeps the one with the best MER (or C/N)");
-                                    start_opt = b.clicked();
-                                    if let Some(n) = &self.opt_note {
-                                        ui.label(RichText::new(n).size(12.0).color(Color32::GRAY));
-                                    }
-                                }
+                                (start_opt, cancel_opt) = self.optimiser_menu(ui);
                             });
                             if start_opt {
                                 self.start_optimise();

@@ -1,28 +1,40 @@
 // made by CasualArclamp
-//! The Airspy's gain optimiser, after DecDVB-T's and DecDAB's for the HackRF
-//! (`sdr.rs` there): try gain settings on the signal the radio is tuned to,
-//! read how good each is, and keep the best.
+//! The gain optimiser, one for both radios: DecDVB-T's and DecDAB's HackRF
+//! optimiser (`sdr.rs` there) with the search made a plug-in, so the Airspy
+//! has one too. Try gain settings on the signal the radio is tuned to, read
+//! how good each is, and keep the best.
 //!
-//! The Airspy R2 has three gain stages with the AGCs off (LNA 0-14, mixer
-//! 0-15, IF/VGA 0-15), so a plain sweep of one number cannot reach them all.
-//! The sweep therefore climbs libairspy's "sensitivity" ladder (one knob that
-//! moves the three together, tuned by Airspy for noise figure), then a few
-//! rounds of hill climbing step each stage on its own around the best rung.
+//! What is shared is DecDVB-T's: the settle/measure timing, the figure of
+//! merit, the clipping and headroom limits, "two points 3 dB under the best
+//! means past the peak", and "of the points within 0.3 dB of the best, the
+//! coolest". The search differs by radio ([`Plan`]):
+//!
+//! - **HackRF**, DecDVB-T's exactly: total gain (LNA + VGA) in 4 dB steps from
+//!   20 dB under the present setting (the LNA first, to 40 dB, the VGA for the
+//!   rest), up to 90 dB or 24 points; then the LNA/VGA splits (16, 24, 32, 40)
+//!   of the best total.
+//! - **Airspy R2**: three stages with the AGCs off (LNA 0-14, mixer 0-15,
+//!   IF/VGA 0-15), so one number cannot reach them all. It climbs libairspy's
+//!   "sensitivity" ladder (one knob that moves the three together, tuned by
+//!   Airspy for noise figure), then up to three rounds of hill climbing step
+//!   each stage on its own around the best rung.
 //!
 //! The figure of merit is the decoder's MER while it is locked (DVB-T), else
 //! the channel's C/N read off the spectrum ([`channel_cn`]), which every
 //! decoder has, FM included. A setting is out if it clips or runs hotter than
 //! [`TOO_HOT_DBFS`]: too much gain lifts the intermodulation floor, and the
 //! C/N then falls by itself, but a fade would clip a setting chosen at the
-//! edge.
+//! edge. If the best C/N of the sweep is under [`MIN_CN_DB`] there is no
+//! signal and nothing is changed (DecDVB-T's would pick on noise).
 
+use std::fmt;
 use std::time::{Duration, Instant};
 
 /// Time given to a setting to take hold (the radio's buffers, the level
 /// meter's second, the spectrum's averaging) and then to measure it.
 const SETTLE: Duration = Duration::from_millis(800);
 const MEASURE: Duration = Duration::from_millis(1300);
-/// A rung this far under the best so far, twice running, is past the peak.
+/// A point this far under the best so far, twice running, is past the peak.
 const PAST_PEAK_DB: f32 = 3.0;
 /// Clipping over this share of samples, or a level over this, spoils a point.
 /// An OFDM signal's peaks are about 10 dB over its rms: at -12 dBFS they stay
@@ -32,42 +44,79 @@ const TOO_HOT_DBFS: f32 = -12.0;
 /// Points this close to the best figure are as good as it (the reading
 /// wanders by about this much); of them the coolest is chosen.
 const NEAR_BEST_DB: f32 = 0.3;
-/// How far one stage moves in a hill-climbing step, and the rounds made.
-const REFINE_STEP: u8 = 2;
-const REFINE_ROUNDS: usize = 3;
-const MAX_POINTS: usize = 40;
-/// Under this C/N at the best rung of the sweep there is no signal to tune to.
+/// Under this C/N at the best point of the sweep there is no signal to tune to.
 const MIN_CN_DB: f32 = 3.0;
+/// The most points in all, so a hill climb ends.
+const MAX_POINTS: usize = 40;
 
-/// The Airspy's three gain indices (`declab_io::AirspyGains` without the
-/// dependency, so this module builds and tests without the driver).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Gains {
-    pub lna: u8,
-    pub mixer: u8,
-    pub vga: u8,
-}
+// HackRF (DecDVB-T's numbers): total gain, its step, the most sweep points.
+const HACK_MAX_TOTAL: u16 = 90;
+const HACK_STEP: u16 = 4;
+const HACK_MAX_SWEEP_POINTS: usize = 24;
+const HACK_SPLITS: [u16; 4] = [16, 24, 32, 40];
 
+// Airspy: how far one stage moves in a hill-climbing step, and the rounds.
+const AIR_STEP: u8 = 2;
+const AIR_ROUNDS: usize = 3;
 /// The top of each stage's range (`airspy/proto.rs`: `LNA_MAX` etc.).
-const TOP: Gains = Gains {
+const AIR_TOP: AirGains = AirGains {
     lna: 14,
     mixer: 15,
     vga: 15,
 };
 
-impl Gains {
+/// The Airspy's three gain indices (`declab_io::AirspyGains` without the
+/// dependency, so this module builds and tests without the drivers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AirGains {
+    pub lna: u8,
+    pub mixer: u8,
+    pub vga: u8,
+}
+
+/// The HackRF's gains (`declab_io::HackRfGains`): the RF amp, LNA and VGA in dB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HackGains {
+    pub amp: bool,
+    pub lna: u16,
+    pub vga: u16,
+}
+
+/// A setting of whichever radio is being optimised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gains {
+    Air(AirGains),
+    Hack(HackGains),
+}
+
+impl fmt::Display for Gains {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Gains::Air(g) => write!(f, "LNA {} · MIX {} · VGA {}", g.lna, g.mixer, g.vga),
+            Gains::Hack(g) => write!(
+                f,
+                "{}LNA {} · VGA {}",
+                if g.amp { "AMP · " } else { "" },
+                g.lna,
+                g.vga
+            ),
+        }
+    }
+}
+
+impl AirGains {
     /// The settings one step from this on a single stage, in range.
-    fn neighbours(self) -> Vec<Gains> {
+    fn neighbours(self) -> Vec<AirGains> {
         let mut out = Vec::with_capacity(6);
         for stage in 0..3 {
             let (value, top) = match stage {
-                0 => (self.lna, TOP.lna),
-                1 => (self.mixer, TOP.mixer),
-                _ => (self.vga, TOP.vga),
+                0 => (self.lna, AIR_TOP.lna),
+                1 => (self.mixer, AIR_TOP.mixer),
+                _ => (self.vga, AIR_TOP.vga),
             };
             for v in [
-                value.checked_sub(REFINE_STEP),
-                Some(value + REFINE_STEP).filter(|v| *v <= top),
+                value.checked_sub(AIR_STEP),
+                Some(value + AIR_STEP).filter(|v| *v <= top),
             ]
             .into_iter()
             .flatten()
@@ -82,6 +131,17 @@ impl Gains {
             }
         }
         out
+    }
+}
+
+/// The HackRF's total gain split the DecDVB-T way: the LNA first (to 40 dB),
+/// the VGA for the rest.
+fn hack_split(amp: bool, total: u16) -> HackGains {
+    let lna = (total / 8 * 8).min(40);
+    HackGains {
+        amp,
+        lna,
+        vga: (total - lna).min(62) / 2 * 2,
     }
 }
 
@@ -110,9 +170,9 @@ pub struct Point {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
-    /// Up the ladder of presets.
+    /// Up through the gains.
     Sweep,
-    /// Single stages stepped about the best setting.
+    /// Around the best of the sweep.
     Refine,
 }
 
@@ -125,14 +185,79 @@ pub enum Action {
     Finish(Option<Gains>),
 }
 
+/// How a radio's gains are searched (see the module comment).
+enum Plan {
+    Ladder { ladder: Vec<AirGains>, next: usize },
+    Totals { amp: bool, next_total: u16 },
+}
+
+impl Plan {
+    /// The most points the sweep may make.
+    fn max_sweep(&self) -> usize {
+        match self {
+            Plan::Ladder { .. } => MAX_POINTS,
+            Plan::Totals { .. } => HACK_MAX_SWEEP_POINTS,
+        }
+    }
+
+    /// The next setting up the sweep, or `None` at its end.
+    fn sweep_next(&mut self) -> Option<Gains> {
+        match self {
+            Plan::Ladder { ladder, next } => {
+                let g = ladder.get(*next).copied()?;
+                *next += 1;
+                Some(Gains::Air(g))
+            }
+            Plan::Totals { amp, next_total } => {
+                if *next_total + HACK_STEP > HACK_MAX_TOTAL {
+                    return None;
+                }
+                *next_total += HACK_STEP;
+                Some(Gains::Hack(hack_split(*amp, *next_total)))
+            }
+        }
+    }
+
+    /// How many rounds of refinement follow the sweep.
+    fn rounds(&self) -> usize {
+        match self {
+            Plan::Ladder { .. } => AIR_ROUNDS,
+            Plan::Totals { .. } => 1,
+        }
+    }
+
+    /// The settings to try about the best one.
+    fn refine(&self, best: Gains) -> Vec<Gains> {
+        match best {
+            Gains::Air(g) => g.neighbours().into_iter().map(Gains::Air).collect(),
+            // Other splits of the best total between the LNA (a better noise
+            // figure, but it overloads sooner) and the VGA (adds noise as well
+            // as gain).
+            Gains::Hack(g) => {
+                let total = g.lna + g.vga;
+                HACK_SPLITS
+                    .into_iter()
+                    .filter(|&lna| lna != g.lna && lna <= total && total - lna <= 62)
+                    .map(|lna| {
+                        Gains::Hack(HackGains {
+                            amp: g.amp,
+                            lna,
+                            vga: (total - lna) / 2 * 2,
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
 pub struct Optimiser {
     pub original: Gains,
     pub points: Vec<Point>,
     pub current: Gains,
-    ladder: Vec<Gains>,
-    next_rung: usize,
+    plan: Plan,
     stage: Stage,
-    /// The setting being stepped about, and the round.
+    /// The setting being refined about, and the round.
     centre: Option<Gains>,
     round: usize,
     queue: Vec<Gains>,
@@ -145,23 +270,53 @@ pub struct Optimiser {
 }
 
 impl Optimiser {
-    /// `ladder`: the settings to sweep, least gain first.
-    pub fn new(original: Gains, ladder: Vec<Gains>) -> Optimiser {
-        Optimiser::with_times(original, ladder, SETTLE, MEASURE)
+    /// The Airspy's: `ladder` is the settings to sweep, least gain first.
+    pub fn airspy(original: AirGains, ladder: Vec<AirGains>) -> Optimiser {
+        let first = ladder.first().copied().unwrap_or(original);
+        Optimiser::with_plan(
+            Gains::Air(original),
+            Gains::Air(first),
+            Plan::Ladder { ladder, next: 1 },
+            SETTLE,
+            MEASURE,
+        )
     }
 
-    fn with_times(
+    /// The HackRF's, as DecDVB-T's: from 20 dB under the present total gain.
+    pub fn hackrf(original: HackGains) -> Optimiser {
+        Optimiser::hackrf_with_times(original, SETTLE, MEASURE)
+    }
+
+    fn hackrf_with_times(original: HackGains, settle: Duration, measure: Duration) -> Optimiser {
+        let start = (original.lna + original.vga)
+            .saturating_sub(20)
+            .clamp(8, 70)
+            / HACK_STEP
+            * HACK_STEP;
+        Optimiser::with_plan(
+            Gains::Hack(original),
+            Gains::Hack(hack_split(original.amp, start)),
+            Plan::Totals {
+                amp: original.amp,
+                next_total: start,
+            },
+            settle,
+            measure,
+        )
+    }
+
+    fn with_plan(
         original: Gains,
-        ladder: Vec<Gains>,
+        first: Gains,
+        plan: Plan,
         settle: Duration,
         measure: Duration,
     ) -> Optimiser {
         Optimiser {
             original,
             points: Vec::new(),
-            current: ladder.first().copied().unwrap_or(original),
-            ladder,
-            next_rung: 1,
+            current: first,
+            plan,
             stage: Stage::Sweep,
             centre: None,
             round: 0,
@@ -197,7 +352,7 @@ impl Optimiser {
             .map(|(_, p)| p)
     }
 
-    /// The figure a point is judged by, and its name for display.
+    /// The figure a point is judged by.
     pub fn figure(&self, p: &Point) -> Option<f32> {
         if p.spoiled {
             None
@@ -263,13 +418,9 @@ impl Optimiser {
                         _ => false,
                     }
                 };
-                let done = last.spoiled
-                    || past_peak
-                    || self.next_rung >= self.ladder.len()
-                    || self.points.len() >= MAX_POINTS;
-                if !done {
-                    self.current = self.ladder[self.next_rung];
-                    self.next_rung += 1;
+                let stop = last.spoiled || past_peak || self.points.len() >= self.plan.max_sweep();
+                if !stop && let Some(g) = self.plan.sweep_next() {
+                    self.current = g;
                     return Action::Wait;
                 }
                 let Some(best) = self.best() else {
@@ -282,18 +433,19 @@ impl Optimiser {
                 }
                 self.stage = Stage::Refine;
                 self.round = 1;
-                self.step_about(best.gains);
+                self.refine_about(best.gains);
                 self.next_refine()
             }
             Stage::Refine => self.next_refine(),
         }
     }
 
-    /// Queue the untried settings one step from `g`.
-    fn step_about(&mut self, g: Gains) {
+    /// Queue the untried settings about `g`.
+    fn refine_about(&mut self, g: Gains) {
         self.centre = Some(g);
-        self.queue = g
-            .neighbours()
+        self.queue = self
+            .plan
+            .refine(g)
             .into_iter()
             .filter(|n| !self.points.iter().any(|p| p.gains == *n))
             .collect();
@@ -308,12 +460,12 @@ impl Optimiser {
         let Some(best) = self.best() else {
             return Action::Finish(None);
         };
-        if self.round < REFINE_ROUNDS
+        if self.round < self.plan.rounds()
             && Some(best.gains) != self.centre
             && self.points.len() < MAX_POINTS
         {
             self.round += 1;
-            self.step_about(best.gains);
+            self.refine_about(best.gains);
             if !self.queue.is_empty() {
                 return self.next_refine();
             }
@@ -368,50 +520,63 @@ pub fn channel_cn(
 mod tests {
     use super::*;
 
+    fn air(lna: u8, mixer: u8, vga: u8) -> AirGains {
+        AirGains { lna, mixer, vga }
+    }
+
     /// libairspy's sensitivity ladder for the tests: (lna, mixer, vga) at
     /// rungs 0, 2 .. 20, 21 (the first and last few of `AirspyGains`).
-    fn ladder() -> Vec<Gains> {
-        let v = |lna, mixer, vga| Gains { lna, mixer, vga };
+    fn ladder() -> Vec<AirGains> {
         vec![
-            v(0, 0, 4),
-            v(1, 0, 4),
-            v(3, 0, 4),
-            v(6, 2, 4),
-            v(8, 3, 4),
-            v(9, 4, 5),
-            v(12, 7, 5),
-            v(13, 9, 5),
-            v(14, 10, 6),
-            v(14, 12, 9),
-            v(14, 12, 11),
-            v(14, 12, 13),
+            air(0, 0, 4),
+            air(1, 0, 4),
+            air(3, 0, 4),
+            air(6, 2, 4),
+            air(8, 3, 4),
+            air(9, 4, 5),
+            air(12, 7, 5),
+            air(13, 9, 5),
+            air(14, 10, 6),
+            air(14, 12, 9),
+            air(14, 12, 11),
+            air(14, 12, 13),
         ]
     }
 
-    /// A made-up front end: the gain is the sum of the stages' indices, the
-    /// C/N rises with it until the intermodulation takes over, the level
-    /// follows it and clips at the top.
-    fn radio(g: Gains) -> (f32, f32, f32) {
-        let total = (g.lna + g.mixer + g.vga) as f32;
+    /// A made-up front end, as (C/N, rms dBFS) from the total gain: the C/N
+    /// rises with it until `knee`, where the intermodulation takes over, and
+    /// the level follows it.
+    fn curve(total: f32, floor: f32, knee: f32, offset: f32) -> (f32, f32) {
         let cn = 30.0
-            - 10.0 * (1.0 + 10f32.powf((15.0 - total) / 10.0)).log10()
-            - (total - 30.0).max(0.0) * 2.0;
-        let rms = -60.0 + total;
-        (cn, rms, if rms > -12.0 { 1.0 } else { 0.0 })
+            - 10.0 * (1.0 + 10f32.powf((floor - total) / 10.0)).log10()
+            - (total - knee).max(0.0) * 2.0;
+        (cn, offset + total)
     }
 
-    /// Run the optimiser against `radio`, 100 ms a tick.
-    fn run(mut o: Optimiser) -> (Option<Gains>, Optimiser) {
+    fn radio(g: Gains) -> (f32, f32) {
+        match g {
+            Gains::Air(g) => curve((g.lna + g.mixer + g.vga) as f32, 15.0, 30.0, -60.0),
+            Gains::Hack(g) => curve((g.lna + g.vga) as f32, 30.0, 52.0, -90.0),
+        }
+    }
+
+    /// Run `o` against `measure`, 100 ms a tick; `clip_over` is the level
+    /// over which the converter clips.
+    fn run(
+        mut o: Optimiser,
+        mut measure: impl FnMut(Gains) -> (Option<f32>, Option<f32>, f32),
+        clip_over: f32,
+    ) -> (Option<Gains>, Optimiser) {
         let t0 = Instant::now();
         let mut applied = o.original;
         for i in 0..100_000u32 {
-            let (cn, rms_dbfs, clip_percent) = radio(applied);
+            let (mer, cn, rms_dbfs) = measure(applied);
             let r = Reading {
                 now: t0 + Duration::from_millis(100 * i as u64),
-                mer: None,
-                cn: Some(cn),
+                mer,
+                cn,
                 rms_dbfs,
-                clip_percent,
+                clip_percent: if rms_dbfs > clip_over { 1.0 } else { 0.0 },
             };
             match o.tick(&r) {
                 Action::Wait => {}
@@ -422,119 +587,115 @@ mod tests {
         panic!("never finished");
     }
 
+    fn by_cn(g: Gains) -> (Option<f32>, Option<f32>, f32) {
+        let (cn, rms) = radio(g);
+        (None, Some(cn), rms)
+    }
+
     #[test]
-    fn it_finds_the_top_of_the_cn_curve() {
-        let (best, o) = run(Optimiser::new(
-            Gains {
-                lna: 8,
-                mixer: 8,
-                vga: 8,
-            },
-            ladder(),
-        ));
+    fn the_airspy_finds_the_top_of_the_cn_curve() {
+        let (best, o) = run(Optimiser::airspy(air(8, 8, 8), ladder()), by_cn, 0.0);
         let g = best.expect("a result");
-        let (cn, _, _) = radio(g);
+        let cn = radio(g).0;
         // The curve peaks at a total of about 30 with 30 - 0.4 dB.
         let peak = (0..=14u8)
-            .flat_map(|l| {
-                (0..=15u8).flat_map(move |m| {
-                    (0..=15u8).map(move |v| Gains {
-                        lna: l,
-                        mixer: m,
-                        vga: v,
-                    })
-                })
-            })
-            .map(|g| radio(g).0)
+            .flat_map(|l| (0..=15u8).flat_map(move |m| (0..=15u8).map(move |v| air(l, m, v))))
+            .map(|g| radio(Gains::Air(g)).0)
             .fold(f32::MIN, f32::max);
-        assert!(
-            cn > peak - 0.5,
-            "{g:?} gives {cn} dB against the best {peak}"
-        );
+        assert!(cn > peak - 0.5, "{g} gives {cn} dB against the best {peak}");
         assert!(radio(g).1 <= TOO_HOT_DBFS);
         assert!(o.done() < MAX_POINTS);
     }
 
     #[test]
+    fn the_hackrf_sweeps_the_total_then_splits_it_as_decdvbt_does() {
+        let original = HackGains {
+            amp: true,
+            lna: 32,
+            vga: 8,
+        };
+        let (best, o) = run(Optimiser::hackrf(original), by_cn, 0.0);
+        let Some(Gains::Hack(g)) = best else {
+            panic!("no result")
+        };
+        // The curve is flat to within 0.3 dB from a total of 44 to its knee at
+        // 52: the cooler end is as good, and chosen. Past the knee it falls.
+        assert!((44..=52).contains(&(g.lna + g.vga)), "{g:?}");
+        assert!(radio(Gains::Hack(g)).0 > 29.5);
+        assert!(g.amp && radio(Gains::Hack(g)).1 <= TOO_HOT_DBFS);
+        // It began 20 dB under the present 40 (36 -> 20, in 4 dB steps).
+        let totals: Vec<u16> = o
+            .points
+            .iter()
+            .map(|p| match p.gains {
+                Gains::Hack(g) => g.lna + g.vga,
+                Gains::Air(_) => unreachable!(),
+            })
+            .collect();
+        assert_eq!(&totals[..3], &[20, 24, 28]);
+        // And after the sweep it tried other LNA/VGA splits of the best total.
+        let best_total = g.lna + g.vga;
+        let splits = o
+            .points
+            .iter()
+            .filter(|p| matches!(p.gains, Gains::Hack(h) if h.lna + h.vga == best_total))
+            .count();
+        assert!(splits >= 2, "{splits} points at total {best_total}");
+    }
+
+    #[test]
     fn a_setting_that_clips_is_never_chosen() {
-        // Same radio, but the clip limit is reached early: -45 dBFS is hot.
-        let mut o = Optimiser::new(
-            Gains {
-                lna: 8,
-                mixer: 8,
-                vga: 8,
-            },
-            ladder(),
-        );
-        let t0 = Instant::now();
-        let mut applied = o.original;
-        let mut result = None;
-        for i in 0..100_000u32 {
-            let (cn, rms, _) = radio(applied);
-            let r = Reading {
-                now: t0 + Duration::from_millis(100 * i as u64),
-                mer: None,
-                cn: Some(cn),
-                rms_dbfs: rms,
-                clip_percent: if rms > -40.0 { 1.0 } else { 0.0 },
-            };
-            match o.tick(&r) {
-                Action::Wait => {}
-                Action::Apply(g) => applied = g,
-                Action::Finish(g) => {
-                    result = g;
-                    break;
-                }
-            }
-        }
-        let g = result.expect("a result");
-        assert!(radio(g).1 <= -40.0, "{g:?} at {} dBFS", radio(g).1);
+        // The Airspy radio, but the converter clips above -40 dBFS.
+        let (best, _) = run(Optimiser::airspy(air(8, 8, 8), ladder()), by_cn, -40.0);
+        let g = best.expect("a result");
+        assert!(radio(g).1 <= -40.0, "{g} at {} dBFS", radio(g).1);
+        // The same for the HackRF.
+        let h = HackGains {
+            amp: false,
+            lna: 24,
+            vga: 20,
+        };
+        let (best, _) = run(Optimiser::hackrf(h), by_cn, -50.0);
+        let g = best.expect("a result");
+        assert!(radio(g).1 <= -50.0, "{g} at {} dBFS", radio(g).1);
     }
 
     #[test]
     fn nothing_measurable_gives_back_none() {
-        let mut o = Optimiser::new(
-            Gains {
-                lna: 8,
-                mixer: 8,
-                vga: 8,
-            },
-            ladder(),
-        );
-        let t0 = Instant::now();
-        let mut out = None;
-        for i in 0..1000u32 {
-            let r = Reading {
-                now: t0 + Duration::from_millis(100 * i as u64),
-                mer: None,
-                cn: None,
-                rms_dbfs: -40.0,
-                clip_percent: 0.0,
-            };
-            if let Action::Finish(g) = o.tick(&r) {
-                out = Some(g);
-                break;
-            }
+        let hack = HackGains {
+            amp: false,
+            lna: 8,
+            vga: 8,
+        };
+        for o in [
+            Optimiser::airspy(air(8, 8, 8), ladder()),
+            Optimiser::hackrf(hack),
+        ] {
+            let (g, _) = run(o, |_| (None, None, -40.0), 0.0);
+            assert_eq!(g, None);
         }
-        assert_eq!(out, Some(None));
+    }
+
+    #[test]
+    fn a_channel_with_no_signal_keeps_the_old_gains() {
+        // C/N wanders around 1 dB at every setting: noise reading noise.
+        let mut i = 0;
+        let (g, _) = run(
+            Optimiser::airspy(air(8, 8, 8), ladder()),
+            move |_| {
+                i += 1;
+                (None, Some(1.0 + (i % 7) as f32 * 0.05), -40.0)
+            },
+            0.0,
+        );
+        assert_eq!(g, None);
     }
 
     #[test]
     fn mer_wins_over_cn_and_ties_go_to_the_cooler_setting() {
-        let mut o = Optimiser::new(
-            Gains {
-                lna: 0,
-                mixer: 0,
-                vga: 0,
-            },
-            ladder(),
-        );
+        let mut o = Optimiser::airspy(air(0, 0, 0), ladder());
         let p = |lna, mer, rms| Point {
-            gains: Gains {
-                lna,
-                mixer: 0,
-                vga: 0,
-            },
+            gains: Gains::Air(air(lna, 0, 0)),
             mer: Some(mer),
             cn: Some(50.0 - mer),
             rms_dbfs: rms,
@@ -549,53 +710,29 @@ mod tests {
         // The -10 dBFS point is the best figure but is hot (spoiled below).
         o.points[3].spoiled = true;
         // 24.0 and 23.9 are within 0.3 dB: the cooler, 3, is chosen.
-        assert_eq!(o.best().unwrap().gains.lna, 3);
-    }
-
-    #[test]
-    fn a_channel_with_no_signal_keeps_the_old_gains() {
-        // C/N wanders around 1 dB at every setting: noise reading noise.
-        let mut o = Optimiser::new(
-            Gains {
-                lna: 8,
-                mixer: 8,
-                vga: 8,
-            },
-            ladder(),
-        );
-        let t0 = Instant::now();
-        let mut out = None;
-        for i in 0..10_000u32 {
-            let cn = 1.0 + (i % 7) as f32 * 0.05;
-            let r = Reading {
-                now: t0 + Duration::from_millis(100 * i as u64),
-                mer: None,
-                cn: Some(cn),
-                rms_dbfs: -40.0,
-                clip_percent: 0.0,
-            };
-            if let Action::Finish(g) = o.tick(&r) {
-                out = Some(g);
-                break;
-            }
-        }
-        assert_eq!(out, Some(None));
+        let Gains::Air(best) = o.best().unwrap().gains else {
+            unreachable!()
+        };
+        assert_eq!(best.lna, 3);
     }
 
     #[test]
     fn neighbours_stay_in_range() {
-        let n = Gains {
-            lna: 0,
-            mixer: 15,
-            vga: 1,
-        }
-        .neighbours();
+        let n = air(0, 15, 1).neighbours();
         assert!(
             n.iter()
                 .all(|g| g.lna <= 14 && g.mixer <= 15 && g.vga <= 15)
         );
         // lna can only go up, mixer only down, vga only up (1 - 2 underflows).
         assert_eq!(n.len(), 3);
+    }
+
+    #[test]
+    fn the_hackrf_split_is_the_lna_first() {
+        let g = hack_split(true, 52);
+        assert_eq!((g.lna, g.vga), (40, 12));
+        let g = hack_split(false, 20);
+        assert_eq!((g.lna, g.vga), (16, 4));
     }
 
     #[test]

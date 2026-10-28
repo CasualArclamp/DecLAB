@@ -376,10 +376,21 @@ none. The card shows RDS sync, RDS SNR and corrected blocks.
   within 0.3 dB go to the coolest. If the best C/N of the sweep is under
   3 dB (no signal in the channel) or nothing could be measured, the old
   gains are put back. Cancelling puts them back too.
-- GUI: "Optimise gain" in the Airspy gain menu (sliders locked while it
+- GUI: "Optimise gain" in the gain menu (sliders locked while it
   runs); `--optimise` starts it 3 s after the radio is up and logs every
-  setting to stderr. The HackRF has no optimiser here yet.
-- Tested on a synthetic front end (unit tests). Live on 2026-10-28 the
-  Airspy saw no FM or UHF signal (flat noise at 96.1 MHz and C30), so the
-  sweep ran (level -59 to -25 dBFS) and the no-signal guard kept the old
-  gains; **not yet tried on a real signal**.
+  setting to stderr.
+- **One optimiser, two searches** (`Plan` in `gain_opt.rs`): the timing,
+  figure, limits, past-peak test and "coolest within 0.3 dB" are DecDVB-T's
+  HackRF optimiser's; the **HackRF uses its search as it is** (total gain in
+  4 dB steps from 20 dB under the present one, LNA first, up to 90 dB or 24
+  points, then the LNA/VGA splits 16/24/32/40 of the best total), the Airspy
+  the ladder and hill climb. Both have a button in their gain menu. Not in
+  DecDVB-T's: the no-signal guard (best C/N under 3 dB: nothing changes).
+  The HackRF side is tested on a synthetic front end only (not plugged in).
+- Tested on a synthetic front end (unit tests), then live on the Airspy
+  (2026-10-28, a different site from the earlier captures: C39, C42 and C45
+  are the strong muxes, C32/34/35 weaker). On C42 the default gains (LNA 12 /
+  mixer 10 / VGA 8) ran at about -10 dBFS and the sweep found MER rising
+  1.5 -> 30.4 dB from the lowest rung, clipping at LNA 14 / MIX 10 / VGA 8
+  (MER 17), and chose **LNA 13 / MIX 8 / VGA 5: MER 30.3 dB at -20 dBFS** in
+  14 settings (about 35 s), the cooler of two settings within 0.3 dB.
