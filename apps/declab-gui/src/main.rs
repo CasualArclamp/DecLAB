@@ -156,6 +156,19 @@ fn air_preset(_: bool, _: u8) -> (u8, u8, u8) {
     (0, 0, 0)
 }
 
+/// The window's icon, from the PNG built in (drawn by `examples/make_icon.rs`).
+/// Rust note: `include_bytes!` puts the file in the exe at compile time.
+fn window_icon() -> egui::IconData {
+    let rgba = image::load_from_memory(include_bytes!("../assets/icon-256.png"))
+        .map(|i| i.to_rgba8())
+        .unwrap_or_default();
+    egui::IconData {
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
+    }
+}
+
 fn main() -> eframe::Result {
     let opts = match Options::from_args() {
         Ok(o) => o,
@@ -168,7 +181,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("DecLAB")
             .with_inner_size([1440.0, 940.0])
-            .with_min_inner_size([960.0, 640.0]),
+            .with_min_inner_size([960.0, 640.0])
+            .with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native(

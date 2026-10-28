@@ -31,6 +31,10 @@ scope and milestones; update it when a decision changes.
   DecDAB's Airspy branch has a variant that goes straight to DAB's rate; the
   host's down-converter makes that unnecessary here.
 - (2026-10-27) **Analog modes** too: AM, DSB, USB, LSB, CW, NFM, WFM.
+- (2026-10-28) **Icon** (user chose from three mockups): a spectrum with a
+  TV multiplex (blue), a DAB block (green) and an FM carrier (orange), in
+  the Dec apps' dark rounded square; drawn by `declab-gui`'s `make_icon`
+  example, in the exe (build.rs, winresource) and the window.
 - (2026-10-28) **Airspy gain is one slider** (user): step 0-21 on libairspy's
   Sensitivity or Linearity table, chosen in the gain menu (prefs
   `airspy_mode`, `airspy_step`); the menu shows the LNA/mixer/VGA indices it
