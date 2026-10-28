@@ -38,7 +38,7 @@ mod wheel;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use declab_api::{DecoderFactory, Panel};
+use declab_api::{DecoderFactory, Family, Panel};
 use declab_engine::meter::CpuGauge;
 use declab_engine::{DecoderView, Host, HostOptions, Stats};
 use declab_io::{IqFileReader, IqSource, format_from_path, name_hint};
@@ -257,6 +257,8 @@ struct App {
     bandwidth_hz: f64,
     selected_service: Option<u32>,
     volume: f32,
+    /// The top bar's mute: the volume is kept, the sound is off.
+    muted: bool,
     /// The scope shown: "" for the channel IQ, else a decoder scope's name.
     scope: String,
 
@@ -380,6 +382,7 @@ impl App {
             bandwidth_hz: 0.0,
             selected_service: None,
             volume: prefs::num(&p, "volume").unwrap_or(0.8),
+            muted: false,
             scope: opts_scope(&opts),
             view_hz: center_hz,
             zoom: opts.zoom.or(prefs::num(&p, "zoom")).unwrap_or(1.0),
@@ -520,7 +523,7 @@ impl App {
                 };
                 let mut host = Host::start(src, opts);
                 // Screenshot (test) runs are silent.
-                host.set_volume(if self.saving { self.volume } else { 0.0 });
+                host.set_volume(self.effective_volume());
                 host.set_decoder(Some(self.factory()));
                 host.set_channel_at(self.chan_hz, self.bandwidth_hz);
                 self.host = Some(host);
@@ -558,6 +561,46 @@ impl App {
         }
         self.send_settings();
         self.save_prefs();
+    }
+
+    /// The volume the sound card gets: none when muted, and none in a
+    /// screenshot (test) run.
+    fn effective_volume(&self) -> f32 {
+        if self.muted || !self.saving { 0.0 } else { self.volume }
+    }
+
+    /// The decoder makes its own sound (the analog modes, digital radio): the
+    /// top bar shows the volume. TV sound has the player window's slider.
+    fn makes_sound(&self) -> bool {
+        matches!(self.factory().info().family, Family::Analog | Family::Radio)
+    }
+
+    /// The volume slider and mute button.
+    fn volume_ui(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        let mute_text = if self.muted { "Unmute" } else { "Mute" };
+        if ui.selectable_label(self.muted, mute_text).clicked() {
+            self.muted = !self.muted;
+            changed = true;
+        }
+        ui.spacing_mut().slider_width = 120.0;
+        let r = ui.add_enabled(!self.muted, egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false));
+        if r.changed() {
+            changed = true;
+        }
+        ui.label(RichText::new(format!("{:.0} %", self.volume * 100.0)).size(12.0).color(Color32::GRAY));
+        if changed {
+            if let Some(h) = &self.host {
+                h.set_volume(self.effective_volume());
+            }
+            // Saved when the drag ends, not at every step of it.
+            if !r.dragged() {
+                self.save_prefs();
+            }
+        }
+        if r.drag_stopped() {
+            self.save_prefs();
+        }
     }
 
     /// The running decoder starts as its settings panel shows.
@@ -1063,6 +1106,11 @@ impl App {
                         self.settings_open = !self.settings_open;
                         self.settings_page = self.settings_page.or(Some(self.dec));
                     }
+                    if self.makes_sound() {
+                        ui.add_space(16.0);
+                        ui.label(RichText::new("volume").color(Color32::GRAY));
+                        self.volume_ui(ui);
+                    }
                 });
             });
         });
@@ -1395,7 +1443,7 @@ impl eframe::App for App {
                     h.set_channel_at(self.chan_hz, self.bandwidth_hz);
                 }
                 if ch.volume {
-                    h.set_volume(self.volume);
+                    h.set_volume(self.effective_volume());
                 }
             }
             if ch.volume {
