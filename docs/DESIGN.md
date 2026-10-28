@@ -31,6 +31,11 @@ scope and milestones; update it when a decision changes.
   DecDAB's Airspy branch has a variant that goes straight to DAB's rate; the
   host's down-converter makes that unnecessary here.
 - (2026-10-27) **Analog modes** too: AM, DSB, USB, LSB, CW, NFM, WFM.
+- (2026-10-28) **Airspy gain is one slider** (user): step 0-21 on libairspy's
+  Sensitivity or Linearity table, chosen in the gain menu (prefs
+  `airspy_mode`, `airspy_step`); the menu shows the LNA/mixer/VGA indices it
+  sets. After the optimiser, which can stop between steps, the button shows
+  the three indices instead.
 - (2026-10-28) **Pagers**: POCSAG 512/1200/2400 and FLEX 1600–6400 from
   DecPagers (`..\DecPagers`), as the `pagers` plug-in
   (`declab-decoders/src/pagers.rs`) over a copy of its protocol crate

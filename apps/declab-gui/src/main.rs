@@ -142,6 +142,20 @@ impl Options {
     }
 }
 
+/// libairspy's gain tables: the (LNA, mixer, VGA) indices at step `n` 0–21 of
+/// the linearity or sensitivity knob.
+#[cfg(feature = "airspy")]
+fn air_preset(linear: bool, n: u8) -> (u8, u8, u8) {
+    use declab_io::AirspyGains;
+    let g = if linear { AirspyGains::linearity(n) } else { AirspyGains::sensitivity(n) };
+    (g.lna, g.mixer, g.vga)
+}
+
+#[cfg(not(feature = "airspy"))]
+fn air_preset(_: bool, _: u8) -> (u8, u8, u8) {
+    (0, 0, 0)
+}
+
 fn main() -> eframe::Result {
     let opts = match Options::from_args() {
         Ok(o) => o,
@@ -229,6 +243,11 @@ struct App {
     air_lna: u8,
     air_mix: u8,
     air_vga: u8,
+    /// The Airspy's one gain knob: libairspy's linearity (true) or
+    /// sensitivity table, and the step 0–21 on it. The three stages above
+    /// follow it; the optimiser may leave them between steps.
+    air_linear: bool,
+    air_step: u8,
     /// The Airspy gain optimiser while it runs, and what the last run found.
     opt: Option<gain_opt::Optimiser>,
     opt_note: Option<String>,
@@ -338,6 +357,8 @@ impl App {
             air_lna: prefs::num(&p, "airspy_lna").unwrap_or(12),
             air_mix: prefs::num(&p, "airspy_mix").unwrap_or(10),
             air_vga: prefs::num(&p, "airspy_vga").unwrap_or(8),
+            air_linear: prefs::get(&p, "airspy_mode") == Some("linearity"),
+            air_step: prefs::num(&p, "airspy_step").unwrap_or(10),
             opt: None,
             opt_note: None,
             host: None,
@@ -885,6 +906,8 @@ impl App {
             ("airspy_lna", self.air_lna.to_string()),
             ("airspy_mix", self.air_mix.to_string()),
             ("airspy_vga", self.air_vga.to_string()),
+            ("airspy_mode", if self.air_linear { "linearity" } else { "sensitivity" }.into()),
+            ("airspy_step", self.air_step.to_string()),
         ]);
     }
 
@@ -1063,16 +1086,31 @@ impl App {
                             ui.label(RichText::new("rate").color(Color32::GRAY));
                             ui.label(RichText::new("10.00 MS/s").color(Color32::WHITE));
                             let (mut start_opt, mut cancel_opt) = (false, false);
-                            ui.menu_button(format!("LNA {} · MIX {} · VGA {}", self.air_lna, self.air_mix, self.air_vga), |ui| {
-                                // The optimiser is moving the gains: not the sliders too.
+                            let mode = if self.air_linear { "linearity" } else { "sensitivity" };
+                            let stages = (self.air_lna, self.air_mix, self.air_vga);
+                            // The optimiser may have left the stages between two steps.
+                            let title = if stages == air_preset(self.air_linear, self.air_step) {
+                                format!("gain {} · {mode}", self.air_step)
+                            } else {
+                                format!("LNA {} · MIX {} · VGA {}", stages.0, stages.1, stages.2)
+                            };
+                            ui.menu_button(title, |ui| {
+                                // The optimiser is moving the gains: not the slider too.
                                 let busy = self.opt.is_some();
                                 let mut ch = false;
                                 ui.add_enabled_ui(!busy, |ui| {
-                                    ch |= ui.add(egui::Slider::new(&mut self.air_lna, 0..=14).text("LNA")).changed();
-                                    ch |= ui.add(egui::Slider::new(&mut self.air_mix, 0..=15).text("mixer")).changed();
-                                    ch |= ui.add(egui::Slider::new(&mut self.air_vga, 0..=15).text("VGA")).changed();
+                                    ui.horizontal(|ui| {
+                                        ch |= ui.selectable_value(&mut self.air_linear, false, "Sensitivity").changed();
+                                        ch |= ui.selectable_value(&mut self.air_linear, true, "Linearity").changed();
+                                    });
+                                    ch |= ui.add(egui::Slider::new(&mut self.air_step, 0..=21).text("gain")).changed();
+                                    ui.label(
+                                        RichText::new(format!("LNA {} · mixer {} · VGA {}", stages.0, stages.1, stages.2))
+                                            .color(Color32::GRAY),
+                                    );
                                 });
                                 if ch {
+                                    (self.air_lna, self.air_mix, self.air_vga) = air_preset(self.air_linear, self.air_step);
                                     self.apply_gains();
                                 }
                                 (start_opt, cancel_opt) = self.optimiser_menu(ui);
