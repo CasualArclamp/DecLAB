@@ -83,8 +83,20 @@ impl SignalBuilder {
     }
 
     pub fn flex(&mut self, f: &FlexFrame) {
-        self.symbols(&f.head, 1600, 2, FLEX_DEV);
-        self.symbols(&f.data, f.baud, f.levels, FLEX_DEV);
+        self.flex_dev(f, FLEX_DEV, f.data.len());
+    }
+
+    /// A FLEX frame at outer deviation `dev`, with only its first
+    /// `data_syms` data symbols sent (the carrier then drops, as some
+    /// transmitters do after the last block in use).
+    pub fn flex_dev(&mut self, f: &FlexFrame, dev: f32, data_syms: usize) {
+        self.symbols(&f.head, 1600, 2, dev);
+        self.symbols(
+            &f.data[..data_syms.min(f.data.len())],
+            f.baud,
+            f.levels,
+            dev,
+        );
     }
 
     /// FM-modulate: a short premodulation filter (a box of `smooth_s`

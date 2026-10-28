@@ -138,7 +138,7 @@ impl<D: Feed> Chain<D> {
                 }
                 self.disc.set_locked(lock);
                 self.timing.set_locked(lock);
-                self.bank.set_locked(lock, self.disc.dc());
+                self.bank.set_locked(lock, self.disc.dc(), self.disc.amp());
                 if let Some(t) = &mut tap {
                     t.symbols.push(s.soft);
                 }
@@ -464,5 +464,43 @@ mod tests {
                 "FLEX {baud}/{levels}: {got:#?}"
             );
         }
+    }
+
+    /// As a real transmitter seen on air (2026-10-28): FLEX 1600/2 at
+    /// ±3.2 kHz, two thirds of the nominal ±4.8, keyed up for each frame's
+    /// first block only and silent for the rest of the 1.875 s. At the
+    /// nominal deviation each tone sits in its correlator's first null and
+    /// no frame is found.
+    #[test]
+    fn flex_at_two_thirds_deviation_in_bursts() {
+        let rate = 50_000.0;
+        let mut sig = SignalBuilder::new(rate);
+        sig.silence(0.5);
+        let frames = 6u8;
+        for f in 0..frames {
+            let pages = vec![FlexPage {
+                capcode: 1000 + u64::from(f),
+                body: FlexBody::Alpha(format!("f{f}")),
+            }];
+            let frame = flex::encode_frame(1600, 2, 3, f, &pages).unwrap();
+            // Sync 2 (25 ms) and block 0 (160 ms) only.
+            let data = 40 + 256;
+            sig.flex_dev(&frame, 3200.0, data);
+            let sent = (frame.head.len() + data) as f64 / 1600.0;
+            sig.silence(1.875 - sent);
+        }
+        let iq = sig.to_iq(-900.0, Some(12.0), 1.0 / 9600.0, 3);
+        let pages = decode(&iq, rate);
+        let got: Vec<u64> = pages
+            .iter()
+            .filter(|p| p.text == format!("f{}", p.capcode - 1000))
+            .map(|p| p.capcode)
+            .collect();
+        // The first frame may go to finding the deviation.
+        assert!(got.len() >= usize::from(frames) - 1, "{pages:#?}");
+        assert!(
+            pages.iter().all(|p| p.capcode >= 1000),
+            "false pages: {pages:#?}"
+        );
     }
 }

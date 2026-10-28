@@ -20,11 +20,34 @@
 //! frequency error times π/baud. That follows tuning offset and the
 //! transmitter's actual deviation, which often differs from nominal by more
 //! than a slow symbol's filter can stand.
+//!
+//! The FLLs only run with sync, so before that the tones must already be
+//! near the signal's: a one-symbol correlator has nulls every `baud` Hz, and
+//! a real FLEX transmitter at ±3.2 kHz instead of the nominal ±4.8 puts each
+//! tone in its 1600-baud correlator's first null, so sync is never found.
+//! So while a 2-level bank searches afresh (no sync, and none for
+//! [`HOLD_S`]), its idle inner pair of correlators sits at the
+//! discriminator slicer's blind deviation estimate, the outer
+//! pair at the nominal deviation, and decisions come from whichever pair has
+//! had more energy over the last few dozen symbols; when sync comes, that
+//! pair hands its frequencies to the FLLs. (Moving the outer pair to the
+//! blind estimate instead costs 8 dB on a nominal signal: the estimate
+//! wanders by ±500 Hz at low C/N, on top of the offset estimate's own
+//! error. Taking the stronger of the four each symbol costs 2 dB of sync
+//! detection: the largest of four noisy energies.) The second pair only
+//! runs while the estimate is worth trying: more than a quarter of the
+//! symbol rate from nominal, and not on its clamps, where noise alone puts
+//! it.
 
 use declab_core::Iq;
 
 /// Samples between recomputing the sums (and applying the FLLs).
 const RESUM_EVERY: u32 = 1024;
+
+/// How long after losing sync the tones keep their FLLs' frequencies (s):
+/// longer than a FLEX frame (1.875 s), since some transmitters key up for
+/// each frame's first block only and are silent in between.
+const HOLD_S: f64 = 2.5;
 
 /// The levels' symbol numbers: tone `k` is symbol `k` (0 lowest).
 pub const LEVELS4: [f32; 4] = [-1.0, -1.0 / 3.0, 1.0 / 3.0, 1.0];
@@ -63,14 +86,28 @@ pub struct ToneBank {
     half_len: usize,
     ring: Vec<Iq>,
     pos: usize,
-    /// Tones 0..4 lowest first; 2-level uses 0 and 3.
+    /// Tones 0..4 lowest first; 2-level uses 0 and 3 (and, without sync,
+    /// 1 and 2 as a second outer pair at the estimated deviation).
     tones: [Tone; 4],
+    /// Recent energy of the nominal (0, 3) and estimated (1, 2) outer
+    /// pairs, while a 2-level bank has no sync.
+    pair_e: [f32; 2],
+    /// Recent energy of the tones that lost (a noise floor for the FLLs).
+    floor: f32,
     since_resum: u32,
     /// Common offset (Hz) to start from while unlocked.
     coarse: f64,
+    /// The blind outer deviation estimate (Hz) and the range it may take.
+    dev: f64,
+    dev_range: (f64, f64),
+    /// Whether the second outer pair runs (decided at each [`resum`]).
+    ///
+    /// [`resum`]: Self::resum
+    alt: bool,
     locked: bool,
-    /// Samples since sync was lost (saturating).
+    /// Samples since sync was lost (saturating), and [`HOLD_S`] in samples.
     unlocked_for: u32,
+    hold: u32,
 }
 
 fn rot(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
@@ -102,10 +139,17 @@ impl ToneBank {
             ring: vec![Iq::new(0.0, 0.0); cap],
             pos: 0,
             tones: [tone(-dev), tone(-dev / 3.0), tone(dev / 3.0), tone(dev)],
+            pair_e: [0.0; 2],
+            floor: 0.0,
             since_resum: 0,
             coarse: 0.0,
+            dev,
+            // Real transmitters seen at ⅔ of nominal; a little above too.
+            dev_range: (0.5 * dev, 1.2 * dev),
+            alt: false,
             locked: false,
             unlocked_for: u32::MAX,
+            hold: (HOLD_S * rate) as u32,
         };
         b.set_mode(baud, levels);
         b
@@ -122,22 +166,73 @@ impl ToneBank {
         self.resum();
     }
 
-    /// Unlocked, the tones follow `coarse_hz` (the discriminator's blind DC
-    /// estimate of the tuning offset); locked, their own FLLs.
-    pub fn set_locked(&mut self, locked: bool, coarse_hz: f32) {
-        self.locked = locked;
+    /// Unlocked, the tones follow `coarse_hz` and `dev_hz` (the
+    /// discriminator's blind estimates of the tuning offset and the outer
+    /// deviation); locked, their own FLLs.
+    pub fn set_locked(&mut self, locked: bool, coarse_hz: f32, dev_hz: f32) {
+        self.coarse = f64::from(coarse_hz);
+        self.dev = f64::from(dev_hz);
+        let was_searching = self.searching();
         if locked {
             self.unlocked_for = 0;
         }
-        self.coarse = f64::from(coarse_hz);
+        if locked == self.locked {
+            return;
+        }
+        self.locked = locked;
+        if locked && was_searching {
+            if self.levels == 2 && self.pair_e[1] > self.pair_e[0] {
+                // The estimated pair was the better: the FLLs carry on
+                // from there.
+                for (outer, alt) in [(0, 1), (3, 2)] {
+                    self.tones[outer].delta = self.freq(alt) - self.tones[outer].nominal;
+                }
+            }
+            // The inner tones were the search's second outer pair: back to
+            // a third of the chosen pair's deviation, for a 4-level part of
+            // the frame.
+            let (lo, hi) = (self.freq(0), self.freq(3));
+            let (c, h) = ((lo + hi) / 2.0, (hi - lo) / 2.0);
+            for (k, f) in [(1, c - h / 3.0), (2, c + h / 3.0)] {
+                self.tones[k].delta = f - self.tones[k].nominal;
+            }
+            // The inner pair stops (2-level), so its sums need rebuilding
+            // before it runs again.
+            self.resum();
+        }
+    }
+
+    /// Searching afresh: no sync, and none for [`HOLD_S`]. Within the hold
+    /// the tones stay where their FLLs left them.
+    #[inline]
+    fn searching(&self) -> bool {
+        !self.locked && self.unlocked_for > self.hold
+    }
+
+    /// The (low, high) tones a 2-level bank without sync decides with: the
+    /// pair that has had more energy.
+    #[inline]
+    fn pair(&self) -> (usize, usize) {
+        if self.pair_e[1] > self.pair_e[0] {
+            (1, 2)
+        } else {
+            (0, 3)
+        }
+    }
+
+    fn freq(&self, k: usize) -> f64 {
+        self.tones[k].nominal + self.tones[k].delta
+    }
+
+    /// Whether all four correlators run: 4-level, or a 2-level search
+    /// with the second outer pair.
+    #[inline]
+    fn wide(&self) -> bool {
+        self.levels == 4 || self.alt
     }
 
     fn active(&self) -> &'static [usize] {
-        if self.levels == 4 {
-            &[0, 1, 2, 3]
-        } else {
-            &[0, 3]
-        }
+        if self.wide() { &[0, 1, 2, 3] } else { &[0, 3] }
     }
 
     /// Rebuild every active tone's sums from the ring at its current
@@ -146,20 +241,37 @@ impl ToneBank {
         self.since_resum = 0;
         let n = self.ring.len();
         let (len, half_len, rate) = (self.len, self.half_len, self.rate);
-        let locked = self.locked;
-        let coarse = self.coarse;
+        let searching = self.searching();
+        let (coarse, dev) = (self.coarse, self.dev);
         // Just after losing sync (a FLEX frame's end, a gap in a POCSAG
         // transmission) the tones stay where their FLLs left them: at low
-        // C/N the discriminator's estimate wanders by kHz. Only after a
-        // second without sync do they go back to it.
-        if !locked && self.unlocked_for as f64 > rate {
-            // Unlocked: every tone (the inner ones too, though 2-level does
-            // not use them) sits at the common (discriminator) estimate.
-            // The FLLs alias beyond ±baud, so they only run with sync.
+        // C/N the discriminator's estimate wanders by kHz. Only after
+        // `HOLD_S` without sync do they go back to it.
+        if searching {
+            // Searching: every tone sits at the common (discriminator)
+            // offset estimate. The FLLs alias beyond ±baud, so they only
+            // run with sync.
             for t in &mut self.tones {
                 t.delta = coarse;
             }
         }
+        let nominal = self.tones[3].nominal;
+        let alt = searching
+            && self.levels == 2
+            && (dev - nominal).abs() > f64::from(self.baud) / 4.0
+            && dev > self.dev_range.0
+            && dev < self.dev_range.1;
+        if alt {
+            // The second outer pair, at the estimated deviation.
+            for (k, sign) in [(1, -1.0), (2, 1.0)] {
+                let t = &mut self.tones[k];
+                t.delta = coarse + sign * dev - t.nominal;
+            }
+        } else {
+            // Not running: it starts from nothing when it next runs.
+            self.pair_e[1] = 0.0;
+        }
+        self.alt = alt;
         for &k in self.active() {
             let t = &mut self.tones[k];
             let f = t.nominal + t.delta;
@@ -196,15 +308,20 @@ impl ToneBank {
     pub fn push(&mut self, z: Iq) {
         if !self.locked {
             self.unlocked_for = self.unlocked_for.saturating_add(1);
+            if self.unlocked_for == self.hold + 1 {
+                // The hold is over: a fresh search, with both outer pairs.
+                self.pair_e = [0.0; 2];
+                self.resum();
+            }
         }
         let n = self.ring.len();
         let old_full = self.ring[(self.pos + n - self.len) % n];
         let old_half = self.ring[(self.pos + n - self.half_len) % n];
         self.ring[self.pos] = z;
         self.pos = if self.pos + 1 == n { 0 } else { self.pos + 1 };
-        let levels4 = self.levels == 4;
+        let wide = self.wide();
         for k in 0..4 {
-            if !levels4 && (k == 1 || k == 2) {
+            if !wide && (k == 1 || k == 2) {
                 continue;
             }
             let t = &mut self.tones[k];
@@ -231,16 +348,37 @@ impl ToneBank {
             let rel_a = (a[2].max(a[3]) - a[0].max(a[1])).abs();
             let rel_b = (a[1].max(a[2]) - a[0].max(a[3])).abs();
             (sym, soft, [rel_a, rel_b])
+        } else if self.alt {
+            for (p, x) in self.pair_e.iter_mut().zip([e[0] + e[3], e[1] + e[2]]) {
+                *p += (x - *p) / 32.0;
+            }
+            let (lo, hi) = self.pair();
+            let sym = if e[hi] > e[lo] { 3 } else { 0 };
+            let soft = (e[hi] - e[lo]) / (e[hi] + e[lo]).max(1e-30);
+            (sym, soft, [(a[hi] - a[lo]).abs(), 0.0])
         } else {
             let sym = if e[3] > e[0] { 3 } else { 0 };
             let soft = (e[3] - e[0]) / (e[3] + e[0]).max(1e-30);
             (sym, soft, [(a[3] - a[0]).abs(), 0.0])
         };
+        // The losing tones' recent energy: the noise floor, near enough.
+        let active = self.active();
+        let lose = active
+            .iter()
+            .filter(|&&k| k != sym)
+            .map(|&k| e[k])
+            .sum::<f32>()
+            / (active.len() - 1).max(1) as f32;
+        self.floor += (lose - self.floor) / 64.0;
         // FLL on the winner: phase step from its older to its newer half.
+        // Only when the winner stands well clear of the floor: a decoder
+        // keeps sync for a whole FLEX frame, and some transmitters are
+        // silent after its first block; on noise the loop would wander.
+        let clear = e[sym] > 2.0 * self.floor;
         let t = &mut self.tones[sym];
         let older = t.full - t.half;
         let x = t.half * older.conj();
-        if self.locked && x.norm_sqr() > 0.0 {
+        if self.locked && clear && x.norm_sqr() > 0.0 {
             let err_hz = f64::from(x.im.atan2(x.re)) * self.rate
                 / (std::f64::consts::TAU * self.half_len as f64);
             // Clamp: past ±baud the estimate aliases.
@@ -265,6 +403,10 @@ impl ToneBank {
         if self.levels == 4 {
             let (e0, e1, e2, e3) = (e(0), e(1), e(2), e(3));
             (e3 - e0 + (e2 - e1) / 3.0) / (e0 + e1 + e2 + e3).max(1e-30)
+        } else if self.alt {
+            let (lo, hi) = self.pair();
+            let (el, eh) = (e(lo), e(hi));
+            (eh - el) / (eh + el).max(1e-30)
         } else {
             let (e0, e3) = (e(0), e(3));
             (e3 - e0) / (e3 + e0).max(1e-30)
@@ -273,7 +415,7 @@ impl ToneBank {
 
     /// Tracked tone frequencies, Hz (lowest first; the 2-level ones at 0, 3).
     pub fn tone_hz(&self) -> [f64; 4] {
-        std::array::from_fn(|k| self.tones[k].nominal + self.tones[k].delta)
+        std::array::from_fn(|k| self.freq(k))
     }
 }
 
@@ -286,7 +428,7 @@ mod tests {
         let rate = 50_000.0;
         // 1200 baud 2-FSK at ±4.1 kHz (not the nominal 4.5) and +350 Hz.
         let mut b = ToneBank::new(rate, 1200, 2, 4500.0, 1200);
-        b.set_locked(true, 0.0);
+        b.set_locked(true, 0.0, 4500.0);
         b.resum();
         let sps = rate / 1200.0;
         let mut phase = 0f64;

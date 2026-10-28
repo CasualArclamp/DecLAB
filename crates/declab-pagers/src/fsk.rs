@@ -153,6 +153,13 @@ impl Slicer {
         self.dc
     }
 
+    /// The tracked outer level: with discriminator input, the deviation in
+    /// Hz (from the box filter's output, so a little under the true one at
+    /// the fastest rates).
+    pub fn amp(&self) -> f32 {
+        self.amp
+    }
+
     /// As [`push`](Self::push), but at a symbol instant `hint` may supply
     /// the decision (the tone bank's); timing and level tracking still run
     /// on `x`. Rust note: `impl FnOnce` takes any closure, called at most
