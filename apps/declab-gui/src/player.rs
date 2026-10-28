@@ -61,6 +61,13 @@ pub fn selection(p: &Programme, audio: Option<u16>, subs: Option<u16>) -> Select
     }
 }
 
+/// An HD service by its SDT type (EN 300 468 table 87: 0x11 MPEG-2 HD,
+/// 0x19 AVC HD, 0x1F HEVC, 0x20 HEVC UHD/HDR), whose pictures are 720 or
+/// more lines.
+fn is_hd(p: &Programme) -> bool {
+    matches!(p.service_type, Some(0x11 | 0x19 | 0x1F | 0x20))
+}
+
 /// A service's DVB subtitle streams (teletext subtitles are not drawn).
 pub fn subtitle_streams(p: &Programme) -> impl Iterator<Item = &decdvbt_ts::EsInfo> {
     p.streams.iter().filter(|e| e.kind == Some("subtitles"))
@@ -136,6 +143,10 @@ impl TvWindow {
         let mut sel = selection(p, audio, subs);
         sel.deint = if self.bob {
             Deinterlace::Bob
+        } else if is_hd(p) {
+            // 1080 lines shown in 540: one field is the picture, and saves
+            // ffmpeg the deinterlacer (DecLAB's CPU pass).
+            Deinterlace::Field
         } else {
             Deinterlace::Frame
         };
@@ -162,6 +173,12 @@ impl TvWindow {
     }
 
     /// Stop playing (the window stays as it is).
+    /// Silence the player (test and screenshot runs): its volume is 0 and
+    /// is not saved.
+    pub fn mute(&mut self) {
+        self.volume = 0.0;
+    }
+
     pub fn stop(&mut self) {
         self.player = None;
         self.error = None;

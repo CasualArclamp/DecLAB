@@ -17,6 +17,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run --release -p declab-gui
 cargo run --release -p declab-gui -- out/sim_fm_98.000MHz_10Msps.cs8 --decoder wfm --chan 98.8M --screenshot out/x.png --after 4
 cargo run --release -p declab-gui -- --radio airspy --freq 98M --decoder wfm --wheel   # opens with the decoder wheel up
+cargo run --release -p declab-gui -- --radio airspy --freq 546M --chan 546M --decoder dvbt --optimise --screenshot out/x.png --after 90   # Airspy gain optimiser (also "Optimise gain" in the gain menu); logs each setting to stderr
 cargo run --release -p declab-cli -- list
 cargo run --release -p declab-cli -- selftest level
 cargo run --release -p declab-cli -- run wfm --file x_98.000MHz_10Msps.cs8 --offset 1.2M --realtime

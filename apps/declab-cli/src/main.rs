@@ -9,6 +9,7 @@
 //! declab run <decoder> --radio hackrf|airspy --freq HZ [--rate HZ] [--offset HZ]
 //!                      [--gain AMP,LNA,VGA] [--seconds S] [--record OUT.cs8]
 //!                      [--ts OUT.ts] [--card] [--udp ADDR:PORT] [--http ADDR:PORT]
+//!                      [--sound]   (runs are silent unless --sound)
 //! ```
 //!
 //! `run` prints the decoder's lock and measurements once a second and plays
@@ -103,6 +104,8 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         },
     );
     host.set_decoder(Some(factory));
+    // Silent unless asked: a test run should not play through the speakers.
+    host.set_volume(if o.flag("--sound") { 0.8 } else { 0.0 });
     // The stream out over the network, through the host's TS hub.
     let udp = o.get("--udp").map(str::parse).transpose().context("--udp ADDR:PORT")?;
     let tcp = o.get("--http").map(str::parse).transpose().context("--http ADDR:PORT")?;

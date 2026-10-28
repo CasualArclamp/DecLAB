@@ -21,6 +21,7 @@ mod band;
 mod epg_view;
 mod external;
 mod freq_display;
+mod gain_opt;
 mod panels;
 mod player;
 mod prefs;
@@ -70,6 +71,9 @@ struct Options {
     window: Option<String>,
     /// `--settings`: open with the Settings window up (for screenshots).
     settings: bool,
+    /// `--optimise`: run the Airspy gain optimiser once the radio is up (it
+    /// changes the gains, and the result is kept in the preferences).
+    optimise: bool,
     screenshot: Option<PathBuf>,
     after: f64,
 }
@@ -82,12 +86,17 @@ fn parse_hz(v: &str) -> Result<f64, String> {
         Some('G' | 'g') => (&v[..v.len() - 1], 1e9),
         _ => (v, 1.0),
     };
-    num.parse::<f64>().map(|n| n * scale).map_err(|_| format!("{v:?} is not a frequency"))
+    num.parse::<f64>()
+        .map(|n| n * scale)
+        .map_err(|_| format!("{v:?} is not a frequency"))
 }
 
 impl Options {
     fn from_args() -> Result<Options, String> {
-        let mut o = Options { after: 4.0, ..Options::default() };
+        let mut o = Options {
+            after: 4.0,
+            ..Options::default()
+        };
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
             let mut value = |what: &str| args.next().ok_or(format!("{a} needs {what}"));
@@ -95,7 +104,9 @@ impl Options {
                 "--rate" => o.rate = Some(parse_hz(&value("a rate")?)?),
                 "--freq" => o.freq = Some(parse_hz(&value("a frequency")?)?),
                 "--chan" => o.chan = Some(parse_hz(&value("a frequency")?)?),
-                "--zoom" => o.zoom = Some(value("a factor")?.parse().map_err(|_| "--zoom: a number")?),
+                "--zoom" => {
+                    o.zoom = Some(value("a factor")?.parse().map_err(|_| "--zoom: a number")?)
+                }
                 "--decoder" => o.decoder = Some(value("a decoder id")?),
                 "--radio" => {
                     o.radio = Some(match value("airspy or hackrf")?.as_str() {
@@ -107,7 +118,14 @@ impl Options {
                 "--wheel" => o.wheel = true,
                 "--scope" => o.scope = Some(value("a scope name")?),
                 "--settings" => o.settings = true,
-                "--play" => o.play = Some(value("a service id")?.parse().map_err(|_| "--play: a service id")?),
+                "--optimise" | "--optimize" => o.optimise = true,
+                "--play" => {
+                    o.play = Some(
+                        value("a service id")?
+                            .parse()
+                            .map_err(|_| "--play: a service id")?,
+                    )
+                }
                 "--window" => o.window = Some(value("ts or epg")?),
                 "--screenshot" => o.screenshot = Some(value("a .png path")?.into()),
                 "--after" => o.after = value("seconds")?.parse().map_err(|_| "--after: seconds")?,
@@ -215,6 +233,9 @@ struct App {
     air_lna: u8,
     air_mix: u8,
     air_vga: u8,
+    /// The Airspy gain optimiser while it runs, and what the last run found.
+    opt: Option<gain_opt::Optimiser>,
+    opt_note: Option<String>,
 
     host: Option<Host>,
     control: Control,
@@ -267,6 +288,13 @@ struct App {
     last_frame: Option<Instant>,
     delay_ms: f64,
     shot_sent: bool,
+    /// For a screenshot run: process CPU seconds and the time at 3 s, so the
+    /// report averages the run after start-up.
+    cpu_mark: Option<(f64, Instant)>,
+    cpu_avg: Option<f32>,
+    /// Time in each part of the frame (screenshot runs report it): poll,
+    /// bottom panel, band, windows, top bar and status.
+    frame_cost: [Duration; 5],
     saving: bool,
 }
 
@@ -275,13 +303,22 @@ impl App {
         // A screenshot run must come out the same each time: no preferences.
         let saving = opts.screenshot.is_none();
         let p = if saving { prefs::load() } else { Vec::new() };
-        let kind = opts.radio.or(opts.file.as_ref().map(|_| SourceKind::File)).unwrap_or(match prefs::get(&p, "source") {
-            Some("hackrf") => SourceKind::HackRf,
-            Some("file") => SourceKind::File,
-            _ => SourceKind::Airspy,
-        });
-        let file = opts.file.clone().or_else(|| prefs::get(&p, "file").map(PathBuf::from));
-        let dec_id = opts.decoder.clone().or_else(|| prefs::get(&p, "decoder").map(String::from));
+        let kind = opts
+            .radio
+            .or(opts.file.as_ref().map(|_| SourceKind::File))
+            .unwrap_or(match prefs::get(&p, "source") {
+                Some("hackrf") => SourceKind::HackRf,
+                Some("file") => SourceKind::File,
+                _ => SourceKind::Airspy,
+            });
+        let file = opts
+            .file
+            .clone()
+            .or_else(|| prefs::get(&p, "file").map(PathBuf::from));
+        let dec_id = opts
+            .decoder
+            .clone()
+            .or_else(|| prefs::get(&p, "decoder").map(String::from));
         let dec = dec_id
             .and_then(|id| declab_decoders::ALL.iter().position(|f| f.info().id == id))
             .unwrap_or(0);
@@ -292,13 +329,19 @@ impl App {
             file,
             file_rate: opts.rate.unwrap_or(10e6),
             center_hz,
-            hack_rate: opts.rate.filter(|_| kind == SourceKind::HackRf).or(prefs::num(&p, "hackrf_rate")).unwrap_or(10e6),
+            hack_rate: opts
+                .rate
+                .filter(|_| kind == SourceKind::HackRf)
+                .or(prefs::num(&p, "hackrf_rate"))
+                .unwrap_or(10e6),
             hack_amp: prefs::get(&p, "hackrf_amp") == Some("1"),
             hack_lna: prefs::num(&p, "hackrf_lna").unwrap_or(24),
             hack_vga: prefs::num(&p, "hackrf_vga").unwrap_or(20),
             air_lna: prefs::num(&p, "airspy_lna").unwrap_or(12),
             air_mix: prefs::num(&p, "airspy_mix").unwrap_or(10),
             air_vga: prefs::num(&p, "airspy_vga").unwrap_or(8),
+            opt: None,
+            opt_note: None,
             host: None,
             control: Control::None,
             live: false,
@@ -324,6 +367,10 @@ impl App {
             settings_open: opts.settings,
             tv: {
                 let mut t = tv::Tv::new(opts.window.as_deref());
+                // Screenshot (test) runs are silent.
+                if opts.screenshot.is_some() {
+                    t.mute();
+                }
                 t.play_when_ready = opts.play;
                 t
             },
@@ -355,6 +402,9 @@ impl App {
             last_frame: None,
             delay_ms: 1000.0 / FPS,
             shot_sent: false,
+            cpu_mark: None,
+            cpu_avg: None,
+            frame_cost: [Duration::ZERO; 5],
             saving,
             opts,
         };
@@ -395,10 +445,16 @@ impl App {
             SourceKind::File => {
                 let path = self.file.clone().ok_or("open a capture first")?;
                 let hint = name_hint(&path);
-                let fmt = format_from_path(&path).ok_or("unknown sample format (.cs8 .cs16 .cf32 .cu8 .wav)")?;
-                let rate = self.opts.rate.or(hint.sample_rate).unwrap_or(self.file_rate);
+                let fmt = format_from_path(&path)
+                    .ok_or("unknown sample format (.cs8 .cs16 .cf32 .cu8 .wav)")?;
+                let rate = self
+                    .opts
+                    .rate
+                    .or(hint.sample_rate)
+                    .unwrap_or(self.file_rate);
                 self.file_rate = rate;
-                let mut r = IqFileReader::open(&path, fmt, rate, 131_072).map_err(|e| e.to_string())?;
+                let mut r =
+                    IqFileReader::open(&path, fmt, rate, 131_072).map_err(|e| e.to_string())?;
                 if let Some(c) = self.opts.freq.or(hint.center_hz) {
                     r = r.with_center_freq(c);
                 }
@@ -410,7 +466,11 @@ impl App {
                 let s = HackRfSettings {
                     center_hz: self.center_hz as u64,
                     sample_rate: self.hack_rate as u32,
-                    gains: HackRfGains { amp: self.hack_amp, lna_db: self.hack_lna, vga_db: self.hack_vga },
+                    gains: HackRfGains {
+                        amp: self.hack_amp,
+                        lna_db: self.hack_lna,
+                        vga_db: self.hack_vga,
+                    },
                 };
                 let src = HackRfSource::open(s).map_err(|e| e.to_string())?;
                 self.control = Control::HackRf(src.control());
@@ -421,7 +481,12 @@ impl App {
                 use declab_io::{AirspyGains, AirspySettings, AirspySource};
                 let s = AirspySettings {
                     center_hz: self.center_hz as u64,
-                    gains: AirspyGains { lna: self.air_lna, mixer: self.air_mix, vga: self.air_vga }.clamped(),
+                    gains: AirspyGains {
+                        lna: self.air_lna,
+                        mixer: self.air_mix,
+                        vga: self.air_vga,
+                    }
+                    .clamped(),
                     ..AirspySettings::default()
                 };
                 let src = AirspySource::open(s).map_err(|e| e.to_string())?;
@@ -447,9 +512,15 @@ impl App {
                 }
                 self.view_hz = self.center_hz;
                 self.clamp_view();
-                let opts = HostOptions { fft: 4096, rows_per_s: 30.0, segments_per_row: 12, ..HostOptions::default() };
+                let opts = HostOptions {
+                    fft: 4096,
+                    rows_per_s: 30.0,
+                    segments_per_row: 12,
+                    ..HostOptions::default()
+                };
                 let mut host = Host::start(src, opts);
-                host.set_volume(self.volume);
+                // Screenshot (test) runs are silent.
+                host.set_volume(if self.saving { self.volume } else { 0.0 });
                 host.set_decoder(Some(self.factory()));
                 host.set_channel_at(self.chan_hz, self.bandwidth_hz);
                 self.host = Some(host);
@@ -465,6 +536,7 @@ impl App {
     }
 
     fn stop(&mut self) {
+        self.opt = None;
         self.tv.reset();
         self.host = None;
         self.control = Control::None;
@@ -502,7 +574,9 @@ impl App {
         if !self.saving {
             return;
         }
-        let Some(Some(p)) = self.panels.get(i) else { return };
+        let Some(Some(p)) = self.panels.get(i) else {
+            return;
+        };
         let id = declab_decoders::ALL[i].info().id;
         let pairs: Vec<(String, String)> = p
             .settings()
@@ -512,16 +586,23 @@ impl App {
                 _ => None,
             })
             .collect();
-        let refs: Vec<(&str, String)> = pairs.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        let refs: Vec<(&str, String)> =
+            pairs.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
         prefs::set_many(&refs);
     }
 
     fn tune_channel(&mut self, hz: f64) {
         // Broadcast FM sits on a 100 kHz raster; anything else to 1 kHz.
-        let snap = if self.factory().info().id == "wfm" { 100e3 } else { 1e3 };
+        let snap = if self.factory().info().id == "wfm" {
+            100e3
+        } else {
+            1e3
+        };
         self.chan_hz = (hz / snap).round() * snap;
         // Off the edge of a radio's span: retune to it.
-        if self.live && (self.chan_hz - self.center_hz).abs() > self.rate() / 2.0 - self.bandwidth_hz {
+        if self.live
+            && (self.chan_hz - self.center_hz).abs() > self.rate() / 2.0 - self.bandwidth_hz
+        {
             self.retune(self.chan_hz);
             self.view_hz = self.chan_hz;
         }
@@ -543,22 +624,36 @@ impl App {
     /// be dragged until its edge reaches the middle of the view; a radio's
     /// view is the radio's span, which a drag retunes.
     fn clamp_view(&mut self) {
-        let half = if self.live { (self.rate() - self.span()).max(0.0) / 2.0 } else { self.rate() / 2.0 };
-        self.view_hz = self.view_hz.clamp(self.center_hz - half, self.center_hz + half);
+        let half = if self.live {
+            (self.rate() - self.span()).max(0.0) / 2.0
+        } else {
+            self.rate() / 2.0
+        };
+        self.view_hz = self
+            .view_hz
+            .clamp(self.center_hz - half, self.center_hz + half);
     }
 
     fn apply_gains(&mut self) {
         match &self.control {
             #[cfg(feature = "hackrf")]
             Control::HackRf(c) => {
-                let g = declab_io::HackRfGains { amp: self.hack_amp, lna_db: self.hack_lna, vga_db: self.hack_vga };
+                let g = declab_io::HackRfGains {
+                    amp: self.hack_amp,
+                    lna_db: self.hack_lna,
+                    vga_db: self.hack_vga,
+                };
                 if let Err(e) = c.set_gains(g.snapped()) {
                     self.error = Some(e.to_string());
                 }
             }
             #[cfg(feature = "airspy")]
             Control::Airspy(c) => {
-                let g = declab_io::AirspyGains { lna: self.air_lna, mixer: self.air_mix, vga: self.air_vga };
+                let g = declab_io::AirspyGains {
+                    lna: self.air_lna,
+                    mixer: self.air_mix,
+                    vga: self.air_vga,
+                };
                 if let Err(e) = c.set_gains(g.clamped()) {
                     self.error = Some(e.to_string());
                 }
@@ -568,13 +663,147 @@ impl App {
         self.save_prefs();
     }
 
+    fn set_air_gains(&mut self, g: gain_opt::Gains) {
+        (self.air_lna, self.air_mix, self.air_vga) = (g.lna, g.mixer, g.vga);
+        self.apply_gains();
+    }
+
+    /// Start the Airspy gain optimiser on the signal being received (see
+    /// `gain_opt.rs`). It climbs libairspy's sensitivity ladder in steps of
+    /// two rungs, then steps each stage about the best.
+    fn start_optimise(&mut self) {
+        #[cfg(feature = "airspy")]
+        if matches!(self.control, Control::Airspy(_)) && self.opt.is_none() {
+            let as_gains = |a: declab_io::AirspyGains| gain_opt::Gains {
+                lna: a.lna,
+                mixer: a.mixer,
+                vga: a.vga,
+            };
+            let mut ladder: Vec<gain_opt::Gains> = (0..=20u8)
+                .step_by(2)
+                .chain(std::iter::once(21))
+                .map(|n| as_gains(declab_io::AirspyGains::sensitivity(n)))
+                .collect();
+            ladder.dedup();
+            let original = gain_opt::Gains {
+                lna: self.air_lna,
+                mixer: self.air_mix,
+                vga: self.air_vga,
+            };
+            self.opt = Some(gain_opt::Optimiser::new(original, ladder));
+            self.opt_note = None;
+        }
+    }
+
+    /// Stop the optimiser and put the gains back as they were.
+    fn cancel_optimise(&mut self) {
+        if let Some(o) = self.opt.take() {
+            self.set_air_gains(o.original);
+            self.opt_note = Some("cancelled: the old gains are back".into());
+        }
+    }
+
+    /// Feed the optimiser what the radio and decoder say this frame.
+    fn step_optimiser(&mut self) {
+        let ready = self.live && self.stats.samples > 0;
+        if self.opts.optimise
+            && self.opt.is_none()
+            && ready
+            && self.started.elapsed() > Duration::from_secs(3)
+        {
+            self.opts.optimise = false;
+            self.start_optimise();
+        }
+        let Some(mut o) = self.opt.take() else { return };
+        if !ready {
+            self.opt = Some(o);
+            return;
+        }
+        let mer = if self.view.lock == declab_api::Lock::Searching {
+            None
+        } else {
+            self.view
+                .measurements
+                .iter()
+                .find(|m| m.name == "MER")
+                .map(|m| m.value as f32)
+        };
+        let cn = gain_opt::channel_cn(
+            &self.smooth,
+            self.row_center,
+            self.row_rate,
+            self.chan_hz,
+            self.bandwidth_hz,
+        );
+        let r = gain_opt::Reading {
+            now: Instant::now(),
+            mer,
+            cn,
+            rms_dbfs: self.stats.rms_dbfs,
+            clip_percent: self.stats.clip_percent,
+        };
+        let tried = o.done();
+        let action = o.tick(&r);
+        if o.done() > tried
+            && let Some(p) = o.points.last()
+        {
+            eprintln!(
+                "optimise gain: LNA {:2} MIX {:2} VGA {:2}  MER {}  C/N {}  {:.1} dBFS{}",
+                p.gains.lna,
+                p.gains.mixer,
+                p.gains.vga,
+                p.mer.map_or("  -  ".into(), |m| format!("{m:5.1}")),
+                p.cn.map_or("  -  ".into(), |c| format!("{c:5.1}")),
+                p.rms_dbfs,
+                if p.spoiled { "  (clipping / too hot)" } else { "" }
+            );
+        }
+        match action {
+            gain_opt::Action::Wait => self.opt = Some(o),
+            gain_opt::Action::Apply(g) => {
+                self.set_air_gains(g);
+                self.opt = Some(o);
+            }
+            gain_opt::Action::Finish(found) => {
+                let note = match (found, o.best()) {
+                    (Some(g), Some(p)) => {
+                        self.set_air_gains(g);
+                        let figure = o.figure(&p).map_or(String::new(), |f| {
+                            format!("{} {f:.1} dB at ", if o.uses_mer() { "MER" } else { "C/N" })
+                        });
+                        format!(
+                            "LNA {} · MIX {} · VGA {}: {figure}{:.0} dBFS, {} settings tried",
+                            g.lna,
+                            g.mixer,
+                            g.vga,
+                            p.rms_dbfs,
+                            o.done()
+                        )
+                    }
+                    _ => {
+                        self.set_air_gains(o.original);
+                        "no usable signal in the channel (C/N under 3 dB, or clipping at every setting): the old gains are back".into()
+                    }
+                };
+                eprintln!("optimise gain: {note}");
+                self.opt_note = Some(note);
+            }
+        }
+    }
+
     fn save_prefs(&self) {
         if !self.saving {
             return;
         }
         prefs::set_many(&[
             ("source", self.kind.key().into()),
-            ("file", self.file.as_ref().map(|p| p.display().to_string()).unwrap_or_default()),
+            (
+                "file",
+                self.file
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            ),
             ("decoder", self.factory().info().id.into()),
             ("centre", format!("{:.0}", self.center_hz)),
             ("chan", format!("{:.0}", self.chan_hz)),
@@ -606,7 +835,14 @@ impl App {
                 None => {
                     // Its rows are set each frame to its height in pixels.
                     let hist = History::default();
-                    self.minis.push(MiniState { name, hist, ring: RingImage::default(), low_hz: 0.0, span_hz: 0.0, marks: Vec::new() });
+                    self.minis.push(MiniState {
+                        name,
+                        hist,
+                        ring: RingImage::default(),
+                        low_hz: 0.0,
+                        span_hz: 0.0,
+                        marks: Vec::new(),
+                    });
                     self.minis.len() - 1
                 }
             };
@@ -652,14 +888,24 @@ impl App {
                 let i = f.info();
                 let spec = f.input(rate);
                 let r = spec.sample_rate.map_or("source rate".to_string(), |r| {
-                    if r >= 1e6 { format!("{:.3} MS/s", r / 1e6) } else { format!("{:.0} kS/s", r / 1e3) }
+                    if r >= 1e6 {
+                        format!("{:.3} MS/s", r / 1e6)
+                    } else {
+                        format!("{:.0} kS/s", r / 1e3)
+                    }
                 });
                 let bw = if spec.bandwidth_hz >= 1e6 {
                     format!("{:.1} MHz", spec.bandwidth_hz / 1e6)
                 } else {
                     format!("{:.1} kHz", spec.bandwidth_hz / 1e3)
                 };
-                Entry { id: i.id, label: i.name, family: i.family, input: format!("{r} · {bw}"), summary: i.summary }
+                Entry {
+                    id: i.id,
+                    label: i.name,
+                    family: i.family,
+                    input: format!("{r} · {bw}"),
+                    summary: i.summary,
+                }
             })
             .collect()
     }
@@ -735,14 +981,40 @@ impl App {
                         SourceKind::Airspy => {
                             ui.label(RichText::new("rate").color(Color32::GRAY));
                             ui.label(RichText::new("10.00 MS/s").color(Color32::WHITE));
+                            let (mut start_opt, mut cancel_opt) = (false, false);
                             ui.menu_button(format!("LNA {} · MIX {} · VGA {}", self.air_lna, self.air_mix, self.air_vga), |ui| {
-                                let mut ch = ui.add(egui::Slider::new(&mut self.air_lna, 0..=14).text("LNA")).changed();
-                                ch |= ui.add(egui::Slider::new(&mut self.air_mix, 0..=15).text("mixer")).changed();
-                                ch |= ui.add(egui::Slider::new(&mut self.air_vga, 0..=15).text("VGA")).changed();
+                                // The optimiser is moving the gains: not the sliders too.
+                                let busy = self.opt.is_some();
+                                let mut ch = false;
+                                ui.add_enabled_ui(!busy, |ui| {
+                                    ch |= ui.add(egui::Slider::new(&mut self.air_lna, 0..=14).text("LNA")).changed();
+                                    ch |= ui.add(egui::Slider::new(&mut self.air_mix, 0..=15).text("mixer")).changed();
+                                    ch |= ui.add(egui::Slider::new(&mut self.air_vga, 0..=15).text("VGA")).changed();
+                                });
                                 if ch {
                                     self.apply_gains();
                                 }
+                                ui.separator();
+                                if let Some(o) = &self.opt {
+                                    ui.label(format!("optimising… {} settings tried", o.done()));
+                                    cancel_opt = ui.button("Cancel").clicked();
+                                } else {
+                                    let can = running && self.live;
+                                    let b = ui
+                                        .add_enabled(can, egui::Button::new("Optimise gain"))
+                                        .on_hover_text("Tries gain settings on the tuned channel and keeps the one with the best MER (or C/N)");
+                                    start_opt = b.clicked();
+                                    if let Some(n) = &self.opt_note {
+                                        ui.label(RichText::new(n).size(12.0).color(Color32::GRAY));
+                                    }
+                                }
                             });
+                            if start_opt {
+                                self.start_optimise();
+                            }
+                            if cancel_opt {
+                                self.cancel_optimise();
+                            }
                         }
                     }
                     ui.label(RichText::new("centre").color(Color32::GRAY));
@@ -843,7 +1115,11 @@ impl App {
                 band::Action::OpenWheel(p) => {
                     self.wheel = Some(Wheel::new(p, self.dec, ctx.cumulative_frame_nr()));
                 }
-                band::Action::Zoom { factor, anchor_hz, frac } => {
+                band::Action::Zoom {
+                    factor,
+                    anchor_hz,
+                    frac,
+                } => {
                     let max_zoom = (self.rate() / MIN_SPAN_HZ).max(1.0);
                     self.zoom = (self.zoom * factor).clamp(1.0, max_zoom);
                     let span = self.span();
@@ -860,7 +1136,12 @@ impl App {
     /// by the gaps between frames actually seen, to hold `FPS`. DecDVB-T's
     /// way (same author).
     fn pace(&mut self) -> Duration {
-        let target = 1000.0 / FPS;
+        // DECLAB_FPS: another rate, for measuring what a frame costs.
+        let fps = std::env::var("DECLAB_FPS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(FPS);
+        let target = 1000.0 / fps;
         let now = Instant::now();
         if let Some(prev) = self.last_frame.replace(now) {
             let gap = now.duration_since(prev).as_secs_f64() * 1e3;
@@ -874,8 +1155,18 @@ impl App {
     }
 
     fn handle_screenshot(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.opts.screenshot.clone() else { return };
+        let Some(path) = self.opts.screenshot.clone() else {
+            return;
+        };
+        if self.cpu_mark.is_none() && self.started.elapsed().as_secs_f64() >= 3.0 {
+            self.cpu_mark = Some((declab_engine::meter::process_cpu_seconds(), Instant::now()));
+        }
         if !self.shot_sent && self.started.elapsed().as_secs_f64() >= self.opts.after {
+            if let Some((c0, t0)) = self.cpu_mark {
+                let dt = t0.elapsed().as_secs_f64().max(1e-3);
+                self.cpu_avg =
+                    Some((100.0 * (declab_engine::meter::process_cpu_seconds() - c0) / dt) as f32);
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             self.shot_sent = true;
         }
@@ -890,12 +1181,17 @@ impl App {
         let (w, h) = (image.size[0] as u32, image.size[1] as u32);
         match image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
             Ok(()) => eprintln!(
-                "screenshot saved to {} ({:.0} fps, app CPU {:.0} %, decoder {:.0} %, {})",
+                "screenshot saved to {} ({:.0} fps, app CPU {:.0} % average from 3 s, decoder {:.0} %, {}); per frame, ms: poll {:.2}, bottom {:.2}, band {:.2}, windows {:.2}, top {:.2}",
                 path.display(),
                 self.frames as f64 / self.started.elapsed().as_secs_f64(),
-                self.cpu.percent,
+                self.cpu_avg.unwrap_or(self.cpu.percent),
                 self.view.cpu_percent,
-                self.stats.describe
+                self.stats.describe,
+                self.frame_cost[0].as_secs_f64() * 1e3 / self.frames.max(1) as f64,
+                self.frame_cost[1].as_secs_f64() * 1e3 / self.frames.max(1) as f64,
+                self.frame_cost[2].as_secs_f64() * 1e3 / self.frames.max(1) as f64,
+                self.frame_cost[3].as_secs_f64() * 1e3 / self.frames.max(1) as f64,
+                self.frame_cost[4].as_secs_f64() * 1e3 / self.frames.max(1) as f64
             ),
             Err(e) => eprintln!("cannot save screenshot {}: {e}", path.display()),
         }
@@ -907,9 +1203,19 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frames += 1;
+        let mut mark = Instant::now();
+        let mut lap = |i: usize, costs: &mut [Duration; 5]| {
+            costs[i] += mark.elapsed();
+            mark = Instant::now();
+        };
         self.poll();
+        self.step_optimiser();
+        lap(0, &mut self.frame_cost);
         self.cpu.poll();
-        if self.opts.wheel && self.wheel.is_none() && self.started.elapsed() > Duration::from_millis(300) {
+        if self.opts.wheel
+            && self.wheel.is_none()
+            && self.started.elapsed() > Duration::from_millis(300)
+        {
             self.opts.wheel = false;
             let c = ctx.content_rect().center() - egui::vec2(0.0, 120.0);
             self.wheel = Some(Wheel::new(c, self.dec, ctx.cumulative_frame_nr()));
@@ -919,98 +1225,137 @@ impl eframe::App for App {
         let colour = family_colour(info.family);
         let running = self.host.as_ref().is_some_and(|h| h.running());
 
-        egui::Panel::top("top").frame(egui::Frame::side_top_panel(&ctx.global_style()).fill(Color32::from_rgb(25, 25, 25))).show(ui, |ui| self.top_bar(ui));
+        egui::Panel::top("top")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.global_style())
+                    .fill(Color32::from_rgb(25, 25, 25)),
+            )
+            .show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| {
-            panels::status(ui, &self.stats, &self.view, running, self.cpu.percent, self.error.as_deref());
+            panels::status(
+                ui,
+                &self.stats,
+                &self.view,
+                running,
+                self.cpu.percent,
+                self.error.as_deref(),
+            );
         });
-        egui::Panel::bottom("decoder").resizable(false).exact_size(330.0).show(ui, |ui| {
-            ui.add_space(6.0);
-            panels::card(ui, info.name, colour, &self.view, running);
-            ui.add_space(6.0);
-            // The scope and the card on the left; the decoder's large
-            // waterfall (WFM: its multiplex) takes the rest. Settings are in
-            // the Settings window.
-            let w = ui.available_width();
-            let h = ui.available_height();
-            let gap = ui.spacing().item_spacing.x;
-            let widths = [w * 0.5 - gap, w * 0.5 - gap];
-            // The decoder's waterfalls, a row to a physical pixel (the small
-            // one's height is fixed, the large one's the room it reported),
-            // their textures brought up to date.
-            let ppp = ctx.pixels_per_point();
-            let scopes: Vec<&str> = self.view.scopes.iter().map(|(n, _)| *n).collect();
-            let big_rows = self.big_rows;
-            let minis: Vec<panels::Mini> = self
-                .minis
-                .iter_mut()
-                .filter_map(|m| {
-                    let small = scopes.contains(&m.name);
-                    m.hist.set_capacity(if small { (panels::MINI_H * ppp).round() as usize } else { big_rows });
-                    m.ring.update(&ctx, &m.hist).map(|(tex, uv)| panels::Mini {
-                        rows: m.hist.capacity(),
-                        name: m.name,
-                        tex,
-                        uv,
-                        low_hz: m.low_hz,
-                        span_hz: m.span_hz,
-                        marks: m.marks.clone(),
+        lap(4, &mut self.frame_cost);
+        let skip = std::env::var("DECLAB_SKIP").unwrap_or_default();
+        egui::Panel::bottom("decoder")
+            .resizable(false)
+            .exact_size(330.0)
+            .show(ui, |ui| {
+                if skip.contains("bottom") {
+                    return;
+                }
+                ui.add_space(6.0);
+                panels::card(ui, info.name, colour, &self.view, running);
+                ui.add_space(6.0);
+                // The scope and the card on the left; the decoder's large
+                // waterfall (WFM: its multiplex) takes the rest. Settings are in
+                // the Settings window.
+                let w = ui.available_width();
+                let h = ui.available_height();
+                let gap = ui.spacing().item_spacing.x;
+                let widths = [w * 0.5 - gap, w * 0.5 - gap];
+                // The decoder's waterfalls, a row to a physical pixel (the small
+                // one's height is fixed, the large one's the room it reported),
+                // their textures brought up to date.
+                let ppp = ctx.pixels_per_point();
+                let scopes: Vec<&str> = self.view.scopes.iter().map(|(n, _)| *n).collect();
+                let big_rows = self.big_rows;
+                let minis: Vec<panels::Mini> = self
+                    .minis
+                    .iter_mut()
+                    .filter_map(|m| {
+                        let small = scopes.contains(&m.name);
+                        m.hist.set_capacity(if small {
+                            (panels::MINI_H * ppp).round() as usize
+                        } else {
+                            big_rows
+                        });
+                        m.ring.update(&ctx, &m.hist).map(|(tex, uv)| panels::Mini {
+                            rows: m.hist.capacity(),
+                            name: m.name,
+                            tex,
+                            uv,
+                            low_hz: m.low_hz,
+                            span_hz: m.span_hz,
+                            marks: m.marks.clone(),
+                        })
                     })
-                })
-                .collect();
-            let stream_name = self.stream_name();
-            let has_big = minis.iter().any(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name));
-            let mut picked = None;
-            ui.horizontal_top(|ui| {
-                let chan = self.chan_hz;
-                ui.allocate_ui_with_layout(egui::vec2(widths[0], h), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    panels::boxed(ui, |ui| {
-                        let pick = panels::scope_and_card(
-                            ui,
-                            &self.view,
-                            colour,
-                            &mut self.scope,
-                            info.name,
-                            chan,
-                            &minis,
-                            self.selected_service,
-                            // The services go under the card when the right
-                            // column holds a waterfall; else they have it.
-                            has_big,
-                        );
-                        if let Some(id) = pick {
-                            picked = Some(id);
-                        }
-                    })
-                });
-                ui.allocate_ui_with_layout(egui::vec2(widths[1], h), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    panels::boxed(ui, |ui| {
-                        // A transport stream's services (DVB), else a decoder's
-                        // large waterfall (WFM: its multiplex), else the
-                        // services on their own.
-                        if self.tv.active()
-                            && let Some(host) = &self.host
-                        {
-                            self.tv.services_ui(ui, host, &stream_name);
-                            return;
-                        }
-                        match minis.iter().find(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name)) {
-                            Some(m) => self.big_rows = panels::big_waterfall(ui, m).max(64),
-                            None => {
-                                if let Some(id) = panels::services(ui, &self.view, self.selected_service) {
+                    .collect();
+                let stream_name = self.stream_name();
+                let has_big = minis
+                    .iter()
+                    .any(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name));
+                let mut picked = None;
+                ui.horizontal_top(|ui| {
+                    let chan = self.chan_hz;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(widths[0], h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            panels::boxed(ui, |ui| {
+                                let pick = panels::scope_and_card(
+                                    ui,
+                                    &self.view,
+                                    colour,
+                                    &mut self.scope,
+                                    info.name,
+                                    chan,
+                                    &minis,
+                                    self.selected_service,
+                                    // The services go under the card when the right
+                                    // column holds a waterfall; else they have it.
+                                    has_big,
+                                );
+                                if let Some(id) = pick {
                                     picked = Some(id);
                                 }
-                            }
-                        }
-                    })
+                            })
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(widths[1], h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            panels::boxed(ui, |ui| {
+                                // A transport stream's services (DVB), else a decoder's
+                                // large waterfall (WFM: its multiplex), else the
+                                // services on their own.
+                                if self.tv.active()
+                                    && let Some(host) = &self.host
+                                {
+                                    self.tv.services_ui(ui, host, &stream_name);
+                                    return;
+                                }
+                                match minis
+                                    .iter()
+                                    .find(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name))
+                                {
+                                    Some(m) => self.big_rows = panels::big_waterfall(ui, m).max(64),
+                                    None => {
+                                        if let Some(id) =
+                                            panels::services(ui, &self.view, self.selected_service)
+                                        {
+                                            picked = Some(id);
+                                        }
+                                    }
+                                }
+                            })
+                        },
+                    );
                 });
-            });
-            if let Some(id) = picked {
-                self.selected_service = Some(id);
-                if let Some(h) = &self.host {
-                    h.command(declab_api::Command::SelectService(id));
+                if let Some(id) = picked {
+                    self.selected_service = Some(id);
+                    if let Some(h) = &self.host {
+                        h.command(declab_api::Command::SelectService(id));
+                    }
                 }
-            }
-        });
+            });
 
         // The Settings window.
         if self.settings_open {
@@ -1058,37 +1403,49 @@ impl eframe::App for App {
             }
         }
 
+        lap(1, &mut self.frame_cost);
         let mut actions = Vec::new();
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            self.wf_rows = band::waterfall_rows(ui.available_height(), ctx.pixels_per_point()).max(64);
-            self.history.set_capacity(self.wf_rows);
-            let tex = self.ring.update(&ctx, &self.history);
-            let label = format!("{} {:.4}", info.name, self.chan_hz / 1e6);
-            let idle = match (&self.host, &self.error) {
-                (_, Some(e)) => e.clone(),
-                (None, _) => "press Start, or open an IQ file".to_string(),
-                (Some(_), _) => "waiting for samples…".to_string(),
-            };
-            let inp = band::BandInput {
-                spectrum_db: &self.smooth,
-                row_center_hz: self.row_center,
-                row_rate: self.row_rate,
-                wf_center_hz: self.history.anchor().map_or(self.row_center, |a| a.0),
-                wf_rate: self.history.anchor().map_or(self.row_rate, |a| a.1),
-                view_center_hz: self.view_hz,
-                view_span_hz: self.span(),
-                levels: self.history.levels(),
-                waterfall: tex,
-                channel: Some((self.chan_hz, self.bandwidth_hz, colour, label)),
-                moving: self.dragging.then(|| format!("moving the band · centre {:.3} MHz", self.view_hz / 1e6)),
-                inert: self.wheel.is_some(),
-                idle_text: &idle,
-            };
-            actions = band::show(ui, &inp);
-        });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                self.wf_rows =
+                    band::waterfall_rows(ui.available_height(), ctx.pixels_per_point()).max(64);
+                self.history.set_capacity(self.wf_rows);
+                let tex = self.ring.update(&ctx, &self.history);
+                let label = format!("{} {:.4}", info.name, self.chan_hz / 1e6);
+                let idle = match (&self.host, &self.error) {
+                    (_, Some(e)) => e.clone(),
+                    (None, _) => "press Start, or open an IQ file".to_string(),
+                    (Some(_), _) => "waiting for samples…".to_string(),
+                };
+                let inp = band::BandInput {
+                    spectrum_db: &self.smooth,
+                    row_center_hz: self.row_center,
+                    row_rate: self.row_rate,
+                    wf_center_hz: self.history.anchor().map_or(self.row_center, |a| a.0),
+                    wf_rate: self.history.anchor().map_or(self.row_rate, |a| a.1),
+                    view_center_hz: self.view_hz,
+                    view_span_hz: self.span(),
+                    levels: self.history.levels(),
+                    waterfall: tex,
+                    channel: Some((self.chan_hz, self.bandwidth_hz, colour, label)),
+                    moving: self
+                        .dragging
+                        .then(|| format!("moving the band · centre {:.3} MHz", self.view_hz / 1e6)),
+                    inert: self.wheel.is_some(),
+                    idle_text: &idle,
+                };
+                if !skip.contains("band") {
+                    actions = band::show(ui, &inp);
+                }
+            });
         self.handle_band(actions, &ctx);
 
-        let entries = if self.wheel.is_some() { self.entries() } else { Vec::new() };
+        let entries = if self.wheel.is_some() {
+            self.entries()
+        } else {
+            Vec::new()
+        };
         if let Some(w) = &mut self.wheel {
             match w.show(&ctx, &entries) {
                 Some(Outcome::Pick(i)) => {
@@ -1102,17 +1459,22 @@ impl eframe::App for App {
             }
         }
 
+        lap(2, &mut self.frame_cost);
         // The player, guide and TS windows.
         let name = self.stream_name();
         if let Some(h) = &self.host {
             self.tv.windows(&ctx, h, &name);
         }
 
+        lap(3, &mut self.frame_cost);
         self.handle_screenshot(&ctx);
         // Stopped, the window only redraws on input (it costs a fifth of a
         // core to draw it 30 times a second for nothing).
         // 60 frames a second while running: decoders report 60 times a second.
-        if self.host.is_some() || self.opts.screenshot.is_some() || self.tv.player.wants_fps().is_some() {
+        if self.host.is_some()
+            || self.opts.screenshot.is_some()
+            || self.tv.player.wants_fps().is_some()
+        {
             let wait = self.pace();
             ctx.request_repaint_after(wait);
         }

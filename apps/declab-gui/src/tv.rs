@@ -54,6 +54,11 @@ impl Tv {
         }
     }
 
+    /// Silence the player (test and screenshot runs).
+    pub fn mute(&mut self) {
+        self.player.mute();
+    }
+
     /// The decoder makes a transport stream (so the services list, player
     /// and guide apply).
     pub fn active(&self) -> bool {
@@ -81,7 +86,9 @@ impl Tv {
             self.epg = host.epg();
         }
         if let Some(sid) = self.play_when_ready
-            && self.ts.report.programmes.iter().any(|p| p.number == sid && !p.streams.is_empty())
+            // Its streams (PMT) and its type (SDT: whether it is HD, which
+            // picks the player's cheaper one-field path) are known.
+            && self.ts.report.programmes.iter().any(|p| p.number == sid && !p.streams.is_empty() && p.service_type.is_some())
         {
             self.play_when_ready = None;
             self.play(host, name, sid, None, None);

@@ -357,3 +357,29 @@ none. The card shows RDS sync, RDS SNR and corrected blocks.
 - Open: not yet tried live; the whole app reads 130-220 % of a core on
   C30 with the player or the TS analyser open (T2 FEC threads, ffmpeg's
   HD decode and the analyser's report): worth a CPU pass.
+
+## 13. Airspy gain optimiser (2026-10-28)
+
+- `apps/declab-gui/src/gain_opt.rs`, after DecDVB-T's and DecDAB's HackRF
+  optimiser. The Airspy has three stages with the AGCs off (LNA 0-14, mixer
+  0-15, VGA 0-15), so it climbs libairspy's *sensitivity* ladder (rungs
+  0, 2 .. 20, 21: one knob moving all three), then up to three rounds of
+  hill climbing, each stage stepped by 2 about the best. 0.8 s to settle and
+  1.3 s to measure per setting; about 12 for the sweep and 6 a round.
+- **Figure:** the decoder's MER while it is locked (DVB-T/T2), else the
+  channel's C/N from the spectrum row (channel mean power over the 10th
+  percentile of the bins outside it, the radio's outer 5 % and a guard left
+  out), so analog and FM have one too. A C/N reading needs room outside the
+  channel: for DVB-T's 8 MHz in the 10 MHz row there is none, and only the
+  MER works.
+- A setting that clips (> 0.05 %) or runs hotter than -12 dBFS is out; ties
+  within 0.3 dB go to the coolest. If the best C/N of the sweep is under
+  3 dB (no signal in the channel) or nothing could be measured, the old
+  gains are put back. Cancelling puts them back too.
+- GUI: "Optimise gain" in the Airspy gain menu (sliders locked while it
+  runs); `--optimise` starts it 3 s after the radio is up and logs every
+  setting to stderr. The HackRF has no optimiser here yet.
+- Tested on a synthetic front end (unit tests). Live on 2026-10-28 the
+  Airspy saw no FM or UHF signal (flat noise at 96.1 MHz and C30), so the
+  sweep ran (level -59 to -25 dBFS) and the no-signal guard kept the old
+  gains; **not yet tried on a real signal**.

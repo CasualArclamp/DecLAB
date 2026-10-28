@@ -354,7 +354,7 @@ pub fn big_waterfall(ui: &mut Ui, m: &Mini) -> usize {
     room
 }
 
-/// IQ points, scaled so their RMS sits at 45 % of the half-width, drawn as
+/// IQ points, scaled so the outer points fill the plot, drawn as
 /// fine points: an image a physical pixel to a dot, brighter where points
 /// pile up (so a dense cloud shows its shape, not a blob). As DecDVB-T's
 /// scopes do, the image is one texture updated in place; painting thousands
@@ -366,8 +366,20 @@ fn scope(ui: &mut Ui, pts: &[Iq], colour: Color32, size: f32) {
     let bg = Color32::from_rgb(13, 13, 13);
     let mut counts = vec![0u16; n * n];
     if !pts.is_empty() {
-        let rms = (pts.iter().map(|z| z.norm_sqr()).sum::<f32>() / pts.len() as f32).sqrt().max(1e-9);
-        let k = 0.45 * n as f32 / 2.0 / rms;
+        // The scale: the 98th percentile of the larger of |I| and |Q| to 92 %
+        // of the half-width, so a square constellation reaches the edges
+        // (the RMS at 45 % had left a wide empty margin); stray points past
+        // it fall off. Smoothed over frames so it does not pump.
+        let mut ext: Vec<f32> = pts.iter().map(|z| z.re.abs().max(z.im.abs())).collect();
+        let at = ((ext.len() - 1) as f32 * 0.98) as usize;
+        let (_, v, _) = ext.select_nth_unstable_by(at, |a, b| a.total_cmp(b));
+        let target = (0.92 * n as f32 / 2.0) / v.max(1e-9);
+        let sid = ui.id().with("scope_scale");
+        let k = ui.data_mut(|d| {
+            let s = d.get_temp_mut_or(sid, target);
+            *s += 0.2 * (target - *s);
+            *s
+        });
         let c = n as f32 / 2.0;
         for z in pts {
             let (x, y) = (c + z.re * k, c - z.im * k);
