@@ -1,0 +1,361 @@
+// made by CasualArclamp
+//! ffmpeg as the player's decoder: where it is, how it is asked, and what
+//! its log says.
+//!
+//! ffmpeg reads the programme's packets on stdin and writes Matroska on
+//! stdout: video deinterlaced (frames flagged interlaced only; bob ×2 or
+//! frame-rate, see [`Deinterlace`]), fitted into
+//! a fixed frame by its display aspect ratio (so anamorphic SD comes out
+//! 16:9) and letterboxed, as raw RGBA; audio as stereo float PCM at 48 kHz.
+//! Its log (stderr) gives what the input streams are and any errors.
+
+use std::path::{Path, PathBuf};
+
+/// The picture ffmpeg delivers, pixels.
+pub const WIDTH: u32 = 960;
+pub const HEIGHT: u32 = 540;
+/// The audio it delivers.
+pub const AUDIO_RATE: u32 = 48_000;
+
+/// The program's file name here.
+const EXE: &str = if cfg!(windows) {
+    "ffmpeg.exe"
+} else {
+    "ffmpeg"
+};
+
+/// Where ffmpeg is: `configured` if it exists; else beside this program,
+/// on the PATH, or where its usual Windows installs put it.
+pub fn find(configured: Option<&Path>) -> Option<PathBuf> {
+    if let Some(p) = configured.filter(|p| p.is_file()) {
+        return Some(p.to_path_buf());
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(d) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
+        dirs.push(d);
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let winget = PathBuf::from(local).join("Microsoft").join("WinGet");
+        dirs.push(winget.join("Links"));
+        // Where `winget install Gyan.FFmpeg` unpacks it (Packages\Gyan.FFmpeg…\
+        // ffmpeg-<version>-full_build\bin), for when it has made no link and
+        // the PATH has not been refreshed yet.
+        if let Ok(packages) = std::fs::read_dir(winget.join("Packages")) {
+            for p in packages.flatten() {
+                if !p.file_name().to_string_lossy().starts_with("Gyan.FFmpeg") {
+                    continue;
+                }
+                if let Ok(inner) = std::fs::read_dir(p.path()) {
+                    dirs.extend(inner.flatten().map(|d| d.path().join("bin")));
+                }
+            }
+        }
+    }
+    for var in ["ProgramFiles", "ProgramW6432"] {
+        if let Some(pf) = std::env::var_os(var) {
+            dirs.push(PathBuf::from(pf).join("ffmpeg").join("bin"));
+        }
+    }
+    dirs.push(PathBuf::from(r"C:\ffmpeg\bin"));
+    dirs.into_iter().map(|d| d.join(EXE)).find(|p| p.is_file())
+}
+
+/// How interlaced pictures are made progressive (frames flagged
+/// progressive pass through either way).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Deinterlace {
+    /// Bob ×2: each field becomes a picture of its own, the other field's
+    /// lines interpolated (yadif `send_field`). 50 i gives 50 pictures a
+    /// second, with full temporal resolution.
+    #[default]
+    Bob,
+    /// One picture per frame (yadif `send_frame`): half the rate, more
+    /// vertical detail on still scenes.
+    Frame,
+}
+
+impl Deinterlace {
+    /// yadif's `mode` for this.
+    fn yadif_mode(self) -> &'static str {
+        match self {
+            Deinterlace::Bob => "send_field",
+            Deinterlace::Frame => "send_frame",
+        }
+    }
+}
+
+/// ffmpeg's arguments for a programme whose video is PID `video` and the
+/// audio to play PID `audio` (either may be absent). With `subs` (a DVB
+/// subtitle PID) and video, the subtitles are drawn over the picture: the
+/// bitmap subtitle stream is scaled to the frame and overlaid, so they come
+/// out on the full frame as the broadcaster placed them. With `gpu`, the video
+/// is decoded by the graphics card's decoder (NVDEC / D3D11VA / VAAPI,
+/// whichever ffmpeg finds), which leaves the CPU to the demodulator and FEC.
+pub fn args(
+    video: Option<u16>,
+    audio: Option<u16>,
+    subs: Option<u16>,
+    deint: Deinterlace,
+    gpu: bool,
+) -> Vec<String> {
+    let mut a: Vec<String> = [
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "info",
+        "-nostats",
+        // Enough to find the streams' parameters without a long wait.
+        "-probesize",
+        "2000000",
+        "-analyzeduration",
+        "1500000",
+    ]
+    .map(String::from)
+    .to_vec();
+    if gpu && video.is_some() {
+        // An input option, so it goes before `-i`. With no
+        // `-hwaccel_output_format` the decoded pictures come back to system
+        // memory for the filters below, and a codec or card the decoder
+        // cannot take (MPEG-2 on some, 4:2:2) falls back to software.
+        a.extend(["-hwaccel", "auto"].map(String::from));
+    }
+    a.extend(["-f", "mpegts", "-i", "pipe:0"].map(String::from));
+    // By PID (`i:` matches an MPEG-TS stream's PID); `?`: no such stream is
+    // not an error.
+    let subs = subs.filter(|_| video.is_some());
+    // With subtitles the picture comes out of a filter graph, mapped by its
+    // label; otherwise the streams are mapped as they are.
+    for pid in [video.filter(|_| subs.is_none()), audio]
+        .into_iter()
+        .flatten()
+    {
+        a.push("-map".into());
+        a.push(format!("0:i:{pid}?"));
+    }
+    if let (Some(v), Some(s)) = (video, subs) {
+        let (w, h) = (WIDTH, HEIGHT);
+        let fit = format!(
+            "scale=w='trunc(if(gt(dar,{w}/{h}),{w},{h}*dar)/2)*2':\
+             h='trunc(if(gt(dar,{w}/{h}),{w}/dar,{h})/2)*2'"
+        );
+        a.extend([
+            "-filter_complex".to_string(),
+            format!(
+                "[0:i:{v}]yadif=mode={}:deint=interlaced,{fit},setsar=1,pad={w}:{h}:-1:-1[v];\
+                 [0:i:{s}]scale={w}:{h},format=rgba[s];\
+                 [v][s]overlay=0:0:eof_action=pass[o]",
+                deint.yadif_mode()
+            ),
+            "-map".into(),
+            "[o]".into(),
+            "-c:v".into(),
+            "rawvideo".into(),
+            "-pix_fmt".into(),
+            "rgba".into(),
+            "-fps_mode".into(),
+            "passthrough".into(),
+        ]);
+    } else if video.is_some() {
+        let (w, h) = (WIDTH, HEIGHT);
+        // Fit by the display aspect ratio, even sizes, then pad to the
+        // frame. The quotes keep the commas inside if() from splitting the
+        // filter chain.
+        let fit = format!(
+            "scale=w='trunc(if(gt(dar,{w}/{h}),{w},{h}*dar)/2)*2':\
+             h='trunc(if(gt(dar,{w}/{h}),{w}/dar,{h})/2)*2'"
+        );
+        a.extend([
+            "-vf".to_string(),
+            format!(
+                "yadif=mode={}:deint=interlaced,{fit},setsar=1,pad={w}:{h}:-1:-1",
+                deint.yadif_mode()
+            ),
+            "-c:v".into(),
+            "rawvideo".into(),
+            "-pix_fmt".into(),
+            "rgba".into(),
+            // One frame out for each decoded: no duplicates or drops.
+            "-fps_mode".into(),
+            "passthrough".into(),
+        ]);
+    }
+    if audio.is_some() {
+        a.extend(
+            [
+                "-c:a",
+                "pcm_f32le",
+                "-ac",
+                "2",
+                "-ar",
+                &AUDIO_RATE.to_string(),
+            ]
+            .map(String::from),
+        );
+    }
+    a.extend(
+        [
+            "-f",
+            "matroska",
+            // Streamed: no seeking back; clusters closed often so blocks
+            // arrive promptly.
+            "-live",
+            "1",
+            "-cluster_time_limit",
+            "100",
+            "-flush_packets",
+            "1",
+            "pipe:1",
+        ]
+        .map(String::from),
+    );
+    a
+}
+
+/// What a line of ffmpeg's log is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogLine {
+    /// "Input #0, mpegts, from 'pipe:0':" — the input's streams follow.
+    InputStart,
+    /// "Output #0, …" or "Stream mapping:" — the input's streams are done.
+    InputEnd,
+    /// "Stream #0:0[0x21]: Video: h264 (High) …" → "h264 (High) …".
+    Stream {
+        pid: Option<u16>,
+        desc: String,
+    },
+    /// Something went wrong (a decoder's complaint, a fatal error).
+    Error(String),
+    Other,
+}
+
+/// Classify one line of ffmpeg's log.
+pub fn classify(line: &str) -> LogLine {
+    let t = line.trim();
+    if t.starts_with("Input #") {
+        return LogLine::InputStart;
+    }
+    if t.starts_with("Output #") || t.starts_with("Stream mapping") {
+        return LogLine::InputEnd;
+    }
+    if let Some(rest) = t.strip_prefix("Stream #") {
+        // "0:0[0x21]: Video: h264 …" (the [PID] is there for MPEG-TS).
+        let pid = rest
+            .split_once("[0x")
+            .and_then(|(_, r)| r.split_once(']'))
+            .and_then(|(h, _)| u16::from_str_radix(h, 16).ok());
+        let desc = rest
+            .split_once(": ")
+            .map(|(_, d)| d.trim().to_string())
+            .unwrap_or_default();
+        return LogLine::Stream { pid, desc };
+    }
+    let lower = t.to_ascii_lowercase();
+    let errorish = [
+        "error",
+        "invalid",
+        "corrupt",
+        "missing",
+        "non-existing",
+        "could not",
+        "failed",
+    ];
+    if errorish.iter().any(|w| lower.contains(w)) {
+        return LogLine::Error(t.to_string());
+    }
+    LogLine::Other
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_by_pid_and_fits_the_picture() {
+        let a = args(Some(0x21), Some(0x22), None, Deinterlace::Frame, false);
+        assert!(!a.iter().any(|x| x == "-hwaccel"));
+        let maps: Vec<&String> = a
+            .iter()
+            .zip(a.iter().skip(1))
+            .filter(|(k, _)| *k == "-map")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(maps, ["0:i:33?", "0:i:34?"]);
+        let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
+        assert!(vf.starts_with("yadif"));
+        assert!(vf.contains("pad=960:540"));
+        assert!(a.ends_with(&["pipe:1".to_string()]));
+        // Radio: no video options.
+        let r = args(None, Some(0x22), None, Deinterlace::Frame, true);
+        assert!(!r.iter().any(|x| x == "-vf"));
+        assert!(r.iter().any(|x| x == "pcm_f32le"));
+        // Radio has nothing to decode on the GPU.
+        assert!(!r.iter().any(|x| x == "-hwaccel"));
+    }
+
+    #[test]
+    fn subtitles_are_overlaid_by_a_filter_graph() {
+        let a = args(Some(0x21), Some(0x22), Some(0x30), Deinterlace::Bob, false);
+        let fc = &a[a.iter().position(|x| x == "-filter_complex").unwrap() + 1];
+        assert!(fc.starts_with("[0:i:33]yadif"));
+        assert!(fc.contains("[0:i:48]scale=960:540"));
+        assert!(fc.ends_with("overlay=0:0:eof_action=pass[o]"));
+        let maps: Vec<&String> = a
+            .iter()
+            .zip(a.iter().skip(1))
+            .filter(|(k, _)| *k == "-map")
+            .map(|(_, v)| v)
+            .collect();
+        // The sound by PID, the picture by the graph's label; no `-vf`.
+        assert_eq!(maps, ["0:i:34?", "[o]"]);
+        assert!(!a.iter().any(|x| x == "-vf"));
+        // Radio has nothing to overlay on.
+        let r = args(None, Some(0x22), Some(0x30), Deinterlace::Bob, false);
+        assert!(!r.iter().any(|x| x == "-filter_complex"));
+    }
+
+    #[test]
+    fn gpu_decode_is_an_input_option() {
+        let a = args(Some(0x21), None, None, Deinterlace::Bob, true);
+        let hw = a.iter().position(|x| x == "-hwaccel").unwrap();
+        assert_eq!(a[hw + 1], "auto");
+        assert!(hw < a.iter().position(|x| x == "-i").unwrap());
+    }
+
+    #[test]
+    fn bob_sends_each_field() {
+        let vf = |d| {
+            let a = args(Some(0x21), None, None, d, false);
+            a[a.iter().position(|x| x == "-vf").unwrap() + 1].clone()
+        };
+        assert!(vf(Deinterlace::Bob).starts_with("yadif=mode=send_field:deint=interlaced,"));
+        assert!(vf(Deinterlace::Frame).starts_with("yadif=mode=send_frame:deint=interlaced,"));
+        assert_eq!(Deinterlace::default(), Deinterlace::Bob);
+    }
+
+    #[test]
+    fn reads_the_log() {
+        assert_eq!(
+            classify("  Stream #0:0[0x21]: Video: h264 (High) ([27][0][0][0] / 0x001B), yuv420p(top first), 1920x1080 [SAR 1:1 DAR 16:9], 25 fps"),
+            LogLine::Stream {
+                pid: Some(0x21),
+                desc: "Video: h264 (High) ([27][0][0][0] / 0x001B), yuv420p(top first), 1920x1080 [SAR 1:1 DAR 16:9], 25 fps".into()
+            }
+        );
+        assert_eq!(
+            classify("Input #0, mpegts, from 'pipe:0':"),
+            LogLine::InputStart
+        );
+        assert_eq!(classify("Stream mapping:"), LogLine::InputEnd);
+        assert!(matches!(
+            classify("[h264 @ 0000020] error while decoding MB 10 20, bytestream -5"),
+            LogLine::Error(_)
+        ));
+        assert_eq!(classify("  Metadata:"), LogLine::Other);
+    }
+}

@@ -479,6 +479,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
+name = "decdvbt-audio"
+version = "0.0.1"
+dependencies = [
+ "cpal",
+]
+
+[[package]]
 name = "decdvbt-core"
 version = "0.0.1"
 dependencies = [
@@ -493,6 +500,15 @@ dependencies = [
  "decdvbt-core",
  "num-complex",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decdvbt-mheg"
+version = "0.0.1"
+dependencies = [
+ "ab_glyph",
+ "decdvbt-ts",
+ "png",
 ]
 
 [[package]]
@@ -539,6 +555,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "decdvbt-video"
+version = "0.0.1"
+dependencies = [
+ "decdvbt-audio",
+ "decdvbt-ts",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "declab-api"
 version = "0.0.1"
 dependencies = [
@@ -570,6 +595,7 @@ name = "declab-decoders"
 version = "0.0.1"
 dependencies = [
  "decdvbt-core",
+ "decdvbt-ofdm",
  "decdvbt-rx",
  "decdvbt-ts",
  "declab-api",
@@ -593,6 +619,7 @@ name = "declab-engine"
 version = "0.0.1"
 dependencies = [
  "cpal",
+ "decdvbt-ts",
  "declab-api",
  "declab-core",
  "declab-dsp",
@@ -606,6 +633,11 @@ name = "declab-gui"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "decdvbt-audio",
+ "decdvbt-core",
+ "decdvbt-mheg",
+ "decdvbt-ts",
+ "decdvbt-video",
  "declab-api",
  "declab-decoders",
  "declab-engine",

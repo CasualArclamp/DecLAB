@@ -54,3 +54,48 @@ pub fn get<'a>(all: &'a [(String, String)], key: &str) -> Option<&'a str> {
 pub fn num<T: std::str::FromStr>(all: &[(String, String)], key: &str) -> Option<T> {
     get(all, key)?.parse().ok()
 }
+
+// The player's settings (its window was ported from DecDVB-T and reads
+// them one at a time).
+
+fn read_one(key: &str) -> Option<String> {
+    get(&load(), key).map(String::from)
+}
+
+fn flag(key: &str, default: bool) -> bool {
+    read_one(key).map_or(default, |v| v == "1")
+}
+
+pub fn volume() -> f32 {
+    read_one("volume").and_then(|v| v.parse().ok()).map_or(0.8, |v: f32| v.clamp(0.0, 1.0))
+}
+
+pub fn set_volume(v: f32) {
+    set_many(&[("volume", format!("{v:.2}"))]);
+}
+
+/// Bob deinterlacing (50 fields a second) rather than one frame of two.
+pub fn bob() -> bool {
+    flag("bob", false)
+}
+
+pub fn set_bob(on: bool) {
+    set_many(&[("bob", if on { "1" } else { "0" }.to_string())]);
+}
+
+/// Video decoded on the graphics card.
+pub fn gpu() -> bool {
+    flag("gpu", false)
+}
+
+pub fn set_gpu(on: bool) {
+    set_many(&[("gpu", if on { "1" } else { "0" }.to_string())]);
+}
+
+pub fn ffmpeg_path() -> Option<PathBuf> {
+    read_one("ffmpeg").filter(|s| !s.is_empty()).map(PathBuf::from)
+}
+
+pub fn set_ffmpeg_path(p: Option<&std::path::Path>) {
+    set_many(&[("ffmpeg", p.map_or(String::new(), |p| p.display().to_string()))]);
+}

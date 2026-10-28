@@ -8,7 +8,7 @@
 //!                      [--bandwidth HZ] [--seconds S] [--realtime]
 //! declab run <decoder> --radio hackrf|airspy --freq HZ [--rate HZ] [--offset HZ]
 //!                      [--gain AMP,LNA,VGA] [--seconds S] [--record OUT.cs8]
-//!                      [--ts OUT.ts] [--card]
+//!                      [--ts OUT.ts] [--card] [--udp ADDR:PORT] [--http ADDR:PORT]
 //! ```
 //!
 //! `run` prints the decoder's lock and measurements once a second and plays
@@ -103,6 +103,12 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         },
     );
     host.set_decoder(Some(factory));
+    // The stream out over the network, through the host's TS hub.
+    let udp = o.get("--udp").map(str::parse).transpose().context("--udp ADDR:PORT")?;
+    let tcp = o.get("--http").map(str::parse).transpose().context("--http ADDR:PORT")?;
+    if udp.is_some() || tcp.is_some() {
+        host.set_outputs(declab_engine::Outputs { udp, tcp, ..Default::default() });
+    }
     if let Some(path) = o.get("--ts") {
         // The decoder's transport stream (DVB-T/T2).
         host.write_ts(Some(PathBuf::from(path)))?;

@@ -105,7 +105,7 @@ DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
 | M1a | Shared front end and host: `declab-core`/`-io`/`-dsp`/`-engine`, DDC + resampler + worker per decoder, waterfall rows, sound out, analog decoders, CLI `run` on files and radios | ✅ 2026-10-27 |
 | M1b | GUI from the mockups: source controls, spectrum/waterfall (middle-drag moves the band, scroll zooms), decoder wheel with icons, card, scope, decoder panels, services, status bar, prefs | ✅ 2026-10-27 on files; live in the GUI not yet tried (the Airspy was in use) |
 | M2a | DVB-T/T2 as a plug-in: decode, card, constellation, services, now/next, `.ts` out | ✅ 2026-10-28: C23 and C30 decode to DecDVB-T's very bytes at its speed |
-| M2b | TS hub, player (video, audio, subtitles), EPG, Red Button, PLP choice, HTTP/UDP out | |
+| M2b | TS hub, player (video, audio, subtitles), EPG, Red Button, PLP choice, HTTP/UDP out | ✅ 2026-10-28 on captures; not yet live |
 | M3 | DAB/DAB+ as a plug-in: audio, DLS, slideshow, SPI; libxaac question | 11D/12B captures play |
 | M4 | DVB-S and DVB-S2/S2X TS + GSE/IP (PCAP) | DecSAT's test captures decode |
 | M5 | DVB-RCS2/TDMA return burst analyser | DecSAT's inroute captures decode |
@@ -327,3 +327,33 @@ none. The card shows RDS sync, RDS SNR and corrected blocks.
 - The decoder waterfalls are drawn a row to a physical pixel on a whole
   pixel (the RDS one shimmered: 96 rows in 64 points); the multiplex
   waterfall uses 4096-point FFTs (94 Hz bins).
+
+## 12. M2b: everything after the transport stream (2026-10-28)
+
+- **The TS hub is the host's**, not the DVB-T plug-in's: DecDVB-T's
+  `hub.rs` is `declab_engine::hub`, and the decoder worker feeds it
+  whatever `Sink::ts` a decoder makes (reset on a retune or a new
+  decoder). So DVB-S/S2 TS later gets the same services, guide, outputs,
+  player and Red Button. `Host::set_outputs / ts_view / epg`.
+- **Copied in as they are:** `decdvbt-video` (the player, ffmpeg at run
+  time), `decdvbt-audio`, `decdvbt-mheg` (Red Button), and DecDVB-T's GUI
+  windows `player.rs` (with `redbutton.rs`), `epg_view.rs`, `ts_viewer.rs`,
+  `services.rs`, `external.rs` (VLC). `tv.rs` is the glue (DecDVB-T's
+  play/watch/VLC/outputs logic), so `main.rs` only calls it; when the
+  decoder makes TS, the right-hand column is DecDVB-T's services list with
+  Play / VLC / TS analyser / Guide and Outputs (record, UDP, HTTP).
+- **Verified on the captures:** BBC One HD plays from C30 (1080i H.264,
+  AAC, DVB subtitles found); the BBC Red Button Text app opens over it on
+  `sim_rb_c30` (`DECLAB_REDBUTTON=wait,wait`); the guide shows 1438 events
+  across the network; HTTP (curl: 81 211 packets in 3 s, all in sync) and
+  UDP (7 packets a datagram, none bad) out.
+- **PLP choice:** the DVB-T/T2 decoder sends L1-post's PLPs to its
+  Settings panel; the pick goes back as `plp` (`auto` = the first data
+  PLP) and is kept between runs.
+- **Scopes drawn as fine points:** a texture, a physical pixel to a dot,
+  brighter where dots pile up (DecDVB-T's way); DVB sends 6000 cells.
+- GUI: `--play SID`, `--window ts|epg`, `--settings` opens on the running
+  decoder's page. CLI: `--udp`, `--http`.
+- Open: not yet tried live; the whole app reads 130-220 % of a core on
+  C30 with the player or the TS analyser open (T2 FEC threads, ffmpeg's
+  HD decode and the analyser's report): worth a CPU pass.

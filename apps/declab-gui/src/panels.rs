@@ -354,27 +354,61 @@ pub fn big_waterfall(ui: &mut Ui, m: &Mini) -> usize {
     room
 }
 
-/// IQ points, scaled so their RMS sits at 45 % of the half-width.
+/// IQ points, scaled so their RMS sits at 45 % of the half-width, drawn as
+/// fine points: an image a physical pixel to a dot, brighter where points
+/// pile up (so a dense cloud shows its shape, not a blob). As DecDVB-T's
+/// scopes do, the image is one texture updated in place; painting thousands
+/// of circles was both coarse and dear.
 fn scope(ui: &mut Ui, pts: &[Iq], colour: Color32, size: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-    let p = ui.painter_at(rect);
-    p.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(13, 13, 13));
-    let grid = Stroke::new(1.0, Color32::from_gray(42));
-    p.line_segment([rect.center_top(), rect.center_bottom()], grid);
-    p.line_segment([rect.left_center(), rect.right_center()], grid);
-    if pts.is_empty() {
-        return;
-    }
-    let rms = (pts.iter().map(|z| z.norm_sqr()).sum::<f32>() / pts.len() as f32).sqrt().max(1e-9);
-    let k = 0.45 * size / 2.0 / rms;
-    let c = rect.center();
-    let dot = colour.gamma_multiply(0.85);
-    for z in pts {
-        let q = pos2(c.x + z.re * k, c.y - z.im * k);
-        if rect.contains(q) {
-            p.circle_filled(q, 1.4, dot);
+    let ppp = ui.ctx().pixels_per_point();
+    let n = ((size * ppp).round() as usize).max(16);
+    let bg = Color32::from_rgb(13, 13, 13);
+    let mut counts = vec![0u16; n * n];
+    if !pts.is_empty() {
+        let rms = (pts.iter().map(|z| z.norm_sqr()).sum::<f32>() / pts.len() as f32).sqrt().max(1e-9);
+        let k = 0.45 * n as f32 / 2.0 / rms;
+        let c = n as f32 / 2.0;
+        for z in pts {
+            let (x, y) = (c + z.re * k, c - z.im * k);
+            if x >= 0.0 && y >= 0.0 && (x as usize) < n && (y as usize) < n {
+                let i = y as usize * n + x as usize;
+                counts[i] = counts[i].saturating_add(1);
+            }
         }
     }
+    // A point is clearly seen; each more on the same pixel brightens it.
+    let [r, g, b, _] = colour.to_array();
+    let grid = Color32::from_gray(42);
+    let mid = n / 2;
+    let pixels: Vec<Color32> = counts
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            if c == 0 {
+                let (x, y) = (i % n, i / n);
+                return if x == mid || y == mid { grid } else { bg };
+            }
+            let a = 1.0 - (-0.55 * f32::from(c)).exp();
+            let mix = |fg: u8, bgc: u8| (f32::from(bgc) + (f32::from(fg) - f32::from(bgc)) * (0.35 + 0.65 * a)) as u8;
+            Color32::from_rgb(mix(r, 13), mix(g, 13), mix(b, 13))
+        })
+        .collect();
+    let image = egui::ColorImage::new([n, n], pixels);
+    let id = ui.id().with("scope_texture");
+    let tex = ui.data_mut(|d| d.get_temp::<egui::TextureHandle>(id));
+    let tex = match tex {
+        Some(mut t) => {
+            t.set(image, egui::TextureOptions::NEAREST);
+            t
+        }
+        None => {
+            let t = ui.ctx().load_texture("scope", image, egui::TextureOptions::NEAREST);
+            ui.data_mut(|d| d.insert_temp(id, t.clone()));
+            t
+        }
+    };
+    ui.painter_at(rect).image(tex.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
 }
 
 /// Services (click one to decode it) and the decoder's text.

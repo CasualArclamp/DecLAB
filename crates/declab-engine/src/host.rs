@@ -36,6 +36,7 @@ use declab_io::{IqFileWriter, IqSource, format_from_path};
 
 use crate::audio::AudioOut;
 use crate::frontend::{FrontEnd, FrontEndReading, FrontEndSettings};
+use crate::hub::{Feeder, Outputs, TsHub, TsView};
 use crate::meter::{Stage, StageLoad, StageMeter};
 use crate::waterfall::Waterfall;
 
@@ -233,6 +234,8 @@ pub struct Host {
     cmd: Sender<SourceCmd>,
     source_join: Option<JoinHandle<()>>,
     worker: Option<Worker>,
+    /// The transport stream's hub: whatever TS the decoder makes goes here.
+    hub: TsHub,
     source_rate: f64,
     live: bool,
 }
@@ -266,6 +269,7 @@ impl Host {
             cmd,
             source_join: Some(source_join),
             worker: None,
+            hub: TsHub::start(),
             source_rate,
             live,
         }
@@ -301,12 +305,15 @@ impl Host {
             v.name = info.name;
         }
         let decoder = factory.create();
+        let feeder = self.hub.feeder();
+        // A new decoder: what the hub holds is the old one's stream.
+        feeder.reset();
         let (tx, rx) = mpsc::sync_channel(WORKER_QUEUE);
         let sh = self.shared.clone();
         let cmd = self.cmd.clone();
         let join = std::thread::Builder::new()
             .name("declab-decoder".into())
-            .spawn(move || worker_thread(decoder, spec, rx, sh, cmd))
+            .spawn(move || worker_thread(decoder, spec, rx, sh, cmd, feeder))
             .expect("cannot start the decoder thread");
         *self.shared.worker_tx.lock().unwrap() = Some(tx.clone());
         self.worker = Some(Worker { tx, join });
@@ -360,6 +367,22 @@ impl Host {
             *f = Some(std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(p)?));
         }
         Ok(())
+    }
+
+    /// Where the decoder's transport stream goes (file, UDP, HTTP, the
+    /// player's tap, a Red Button carousel).
+    pub fn set_outputs(&self, o: Outputs) {
+        self.hub.set_outputs(o);
+    }
+
+    /// The transport stream as the hub sees it (services, PIDs, rate…).
+    pub fn ts_view(&self) -> TsView {
+        self.hub.view()
+    }
+
+    /// The programme guide gathered from the stream.
+    pub fn epg(&self) -> std::sync::Arc<decdvbt_ts::Epg> {
+        self.hub.epg()
     }
 
     pub fn set_volume(&self, v: f32) {
@@ -732,6 +755,7 @@ fn worker_thread(
     rx: Receiver<WorkerMsg>,
     sh: Arc<Shared>,
     cmd: Sender<SourceCmd>,
+    feeder: Feeder,
 ) {
     let mut sink = Sink::default();
     let mut target = Target::Offset(0.0);
@@ -780,6 +804,7 @@ fn worker_thread(
                 if jump {
                     decoder.reset();
                     first_sample = 0;
+                    feeder.reset();
                 }
             }
             WorkerMsg::Block(buf, meta) => {
@@ -787,6 +812,7 @@ fn worker_thread(
                     if generation.is_some() {
                         decoder.reset();
                         chain = None;
+                        feeder.reset();
                     }
                     generation = Some(meta.generation);
                     first_sample = 0;
@@ -875,6 +901,7 @@ fn worker_thread(
         }
         if !sink.ts.is_empty() {
             v.ts_packets += sink.ts.len() as u64;
+            feeder.feed(sink.ts.iter().flatten().copied().collect());
             if let Some(f) = sh.ts_file.lock().unwrap().as_mut() {
                 use std::io::Write;
                 for p in &sink.ts {

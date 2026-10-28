@@ -5,13 +5,17 @@
 //! - [`waterfall`] / [`spectrum`]: the waterfall's rows, on a thread of their own.
 //! - [`frontend`]: DC offset and I/Q image taken off the radio's samples.
 //! - [`audio`]: decoded audio to the sound card.
+//! - [`hub`]: a decoder's transport stream: services, guide, outputs,
+//!   the player's tap, Red Button carousels (from DecDVB-T).
 //! - [`meter`]: CPU meters.
 
 pub mod audio;
 pub mod frontend;
 pub mod host;
+pub mod hub;
 pub mod meter;
 pub mod spectrum;
 pub mod waterfall;
 
 pub use host::{ChannelInfo, DecoderView, Host, HostOptions, Row, Stats};
+pub use hub::{CarouselLink, CarouselState, Outputs, TsHub, TsView};

@@ -18,6 +18,8 @@ declab-api = { path = "../declab-api", default-features = false }
 declab-core = { path = "../declab-core" }
 declab-io = { path = "../declab-io" }
 declab-dsp = { path = "../declab-dsp" }
+# The TS hub's tables, EPG, outputs and carousels.
+decdvbt-ts = { path = "../decdvbt-ts" }
 rustfft.workspace = true
 # Sound output: WASAPI on Windows, ALSA on Linux (needs libasound2-dev to build).
 cpal = "0.18.2"

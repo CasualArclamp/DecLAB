@@ -23,6 +23,13 @@ declab-api = { path = "../../crates/declab-api" }
 declab-decoders = { path = "../../crates/declab-decoders" }
 declab-engine = { path = "../../crates/declab-engine" }
 declab-io = { path = "../../crates/declab-io" }
+# DVB: the TS tables and guide, the player (ffmpeg at run time) and its
+# sound, the Red Button's MHEG-5 engine; DecDVB-T's, copied in.
+decdvbt-core = { path = "../../crates/decdvbt-core" }
+decdvbt-ts = { path = "../../crates/decdvbt-ts" }
+decdvbt-video = { path = "../../crates/decdvbt-video" }
+decdvbt-audio = { path = "../../crates/decdvbt-audio" }
+decdvbt-mheg = { path = "../../crates/decdvbt-mheg" }
 anyhow.workspace = true
 # The glow (OpenGL) renderer instead of eframe's default wgpu, as in the
 # other Dec apps. "x11"/"wayland" only matter on Linux.

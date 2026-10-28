@@ -12,12 +12,13 @@
 //! Table A.1 for DVB-T; the PLP's code for T2), and the mode's details.
 
 use declab_api::{
-    Block, Card, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq, Lock, Service,
-    Sink,
+    Block, Card, Command, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq, Lock,
+    Service, Sink,
 };
 use decdvbt_core::dvbt::{Bandwidth, Mode};
 use decdvbt_rx::auto::{AutoReceiver, Standard};
 use decdvbt_rx::receiver::ReceiverStatus;
+use decdvbt_rx::t2::plp::PlpParams;
 use decdvbt_rx::t2::receiver::{FS_NATIVE, T2Status};
 use decdvbt_ts::{TsAnalyser, service_type_name};
 
@@ -30,7 +31,7 @@ const SCOPES_S: f64 = 1.0 / 15.0;
 /// The services list from the TS tables, this often.
 const SERVICES_S: f64 = 1.0;
 /// Points kept for the scope.
-const SCOPE_POINTS: usize = 2000;
+const SCOPE_POINTS: usize = 6000;
 
 pub struct Factory;
 
@@ -54,6 +55,30 @@ impl DecoderFactory for Factory {
     fn create(&self) -> Box<dyn Decoder> {
         Box::new(Dvbt::default())
     }
+
+    #[cfg(feature = "ui")]
+    fn panel(&self) -> Option<Box<dyn declab_api::Panel>> {
+        Some(Box::new(panel::DvbtPanel::default()))
+    }
+}
+
+/// The PLPs a DVB-T2 multiplex's L1 lists, sent to the panel when they
+/// change: (id, a line describing it).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PlpList(pub Vec<(u8, String)>);
+
+/// One PLP from L1-post, described: "data 256-QAM 2/3 rotated".
+fn describe_plp(c: &decdvbt_ofdm::t2::l1::PlpConfig) -> String {
+    let kind = match c.plp_type {
+        0 => "common",
+        1 => "data (type 1)",
+        2 => "data",
+        _ => "other",
+    };
+    match PlpParams::from_l1(c) {
+        Some(p) => format!("{kind} · {} {}{}", p.qam.name(), p.rate, if p.rotated { " rotated" } else { "" }),
+        None => format!("{kind} · not decodable here"),
+    }
 }
 
 #[derive(Default)]
@@ -72,6 +97,9 @@ struct Dvbt {
     stream_mbps: Option<f64>,
     last_services: Vec<Service>,
     points: Vec<Iq>,
+    /// The PLP asked for (None: the first data PLP); kept across a reset.
+    plp: Option<u8>,
+    last_plps: PlpList,
 }
 
 impl Dvbt {
@@ -107,6 +135,14 @@ impl Dvbt {
         out.card = Some(card);
         if !self.points.is_empty() {
             out.constellation.extend_from_slice(&self.points);
+        }
+        // The PLPs, for the panel, when they change.
+        let plps = PlpList(
+            t2.l1post.as_ref().map_or_else(Vec::new, |l| l.plps.iter().map(|c| (c.plp_id, describe_plp(c))).collect()),
+        );
+        if plps != self.last_plps {
+            out.custom.push(Box::new(plps.clone()));
+            self.last_plps = plps;
         }
     }
 
@@ -153,6 +189,7 @@ impl Decoder for Dvbt {
         let rate = block.tuning.sample_rate;
         if self.rx.is_none() || self.rate != rate {
             let mut rx = AutoReceiver::new(rate, 0.0);
+            rx.set_plp(self.plp);
             // From a radio the T2 FEC gives up a frame rather than hold the
             // worker when it is behind (a radio's samples do not wait); from
             // a file it waits, and nothing is lost.
@@ -191,10 +228,25 @@ impl Decoder for Dvbt {
         }
     }
 
+    fn command(&mut self, cmd: Command, out: &mut Sink) {
+        if let Command::Set { key, value } = cmd {
+            if key != "plp" {
+                return;
+            }
+            self.plp = if value == "auto" { None } else { value.parse().ok() };
+            if let Some(rx) = &mut self.rx {
+                rx.set_plp(self.plp);
+            }
+            out.log(format!("PLP: {}", self.plp.map_or("the first data PLP".into(), |p| p.to_string())));
+        }
+    }
+
     fn reset(&mut self) {
         // A retune: the receiver starts looking again; the TS tables are the
-        // new multiplex's.
+        // new multiplex's. The PLP asked for stays.
+        let plp = self.plp;
         *self = Dvbt::default();
+        self.plp = plp;
     }
 
     fn wants_threads(&self) -> usize {
@@ -302,4 +354,58 @@ fn searching_card(t: &ReceiverStatus, t2: &T2Status) -> Card {
         details.push(kv("T2", format!("P1 S1 = {s1}: frames this receiver does not decode")));
     }
     Card { title: "DVB-T / T2".into(), headline: "searching".into(), gauge: None, details, text: Vec::new() }
+}
+
+/// The DVB-T/T2 settings panel: which PLP of a T2 multiplex to decode.
+#[cfg(feature = "ui")]
+mod panel {
+    use declab_api::{Command, Panel};
+    use egui::{RichText, Ui};
+
+    use super::PlpList;
+
+    #[derive(Default)]
+    pub struct DvbtPanel {
+        /// The PLPs the running decoder last saw.
+        plps: PlpList,
+        /// None: the first data PLP.
+        chosen: Option<u8>,
+    }
+
+    impl Panel for DvbtPanel {
+        fn receive(&mut self, msg: &(dyn std::any::Any + Send)) {
+            if let Some(l) = msg.downcast_ref::<PlpList>() {
+                self.plps = l.clone();
+            }
+        }
+
+        fn ui(&mut self, ui: &mut Ui, commands: &mut Vec<Command>) {
+            ui.label("DVB-T2 PLP (physical layer pipe)");
+            let label = |c: Option<u8>| c.map_or("first data PLP".to_string(), |p| format!("PLP {p}"));
+            let before = self.chosen;
+            egui::ComboBox::from_id_salt("plp").selected_text(label(self.chosen)).width(260.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.chosen, None, label(None));
+                for (id, what) in &self.plps.0 {
+                    ui.selectable_value(&mut self.chosen, Some(*id), format!("PLP {id} · {what}"));
+                }
+            });
+            if self.chosen != before {
+                let value = self.chosen.map_or("auto".to_string(), |p| p.to_string());
+                commands.push(Command::Set { key: "plp".into(), value });
+            }
+            if self.plps.0.is_empty() {
+                ui.label(RichText::new("The PLPs are listed once a T2 signal is read.").size(11.0).weak());
+            }
+        }
+
+        fn settings(&self) -> Vec<Command> {
+            vec![Command::Set { key: "plp".into(), value: self.chosen.map_or("auto".into(), |p| p.to_string()) }]
+        }
+
+        fn restore(&mut self, key: &str, value: &str) {
+            if key == "plp" {
+                self.chosen = value.parse().ok();
+            }
+        }
+    }
 }

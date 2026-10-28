@@ -18,12 +18,19 @@
 //! window and closes; it neither reads nor writes the preferences.
 
 mod band;
+mod epg_view;
+mod external;
 mod freq_display;
 mod panels;
+mod player;
 mod prefs;
+mod redbutton;
+mod services;
 mod settings;
 #[cfg(test)]
 mod sim;
+mod ts_viewer;
+mod tv;
 mod waterfall;
 mod wheel;
 
@@ -57,6 +64,10 @@ struct Options {
     wheel: bool,
     /// `--scope NAME`: show this decoder scope (for screenshots).
     scope: Option<String>,
+    /// `--play SID`: play this service once its streams are known.
+    play: Option<u16>,
+    /// `--window ts|epg`: open with that window up.
+    window: Option<String>,
     /// `--settings`: open with the Settings window up (for screenshots).
     settings: bool,
     screenshot: Option<PathBuf>,
@@ -96,6 +107,8 @@ impl Options {
                 "--wheel" => o.wheel = true,
                 "--scope" => o.scope = Some(value("a scope name")?),
                 "--settings" => o.settings = true,
+                "--play" => o.play = Some(value("a service id")?.parse().map_err(|_| "--play: a service id")?),
+                "--window" => o.window = Some(value("ts or epg")?),
                 "--screenshot" => o.screenshot = Some(value("a .png path")?.into()),
                 "--after" => o.after = value("seconds")?.parse().map_err(|_| "--after: seconds")?,
                 "-h" | "--help" => {
@@ -215,6 +228,8 @@ struct App {
     /// `declab_decoders::ALL`; the Settings window shows them.
     panels: Vec<Option<Box<dyn Panel>>>,
     settings_open: bool,
+    /// What follows a decoder's transport stream: services, player, guide.
+    tv: tv::Tv,
     /// The settings window's page: None for General, else a decoder.
     settings_page: Option<usize>,
     chan_hz: f64,
@@ -307,7 +322,13 @@ impl App {
                 })
                 .collect(),
             settings_open: opts.settings,
+            tv: {
+                let mut t = tv::Tv::new(opts.window.as_deref());
+                t.play_when_ready = opts.play;
+                t
+            },
             settings_page: None,
+            // (`--settings` opens on the running decoder's page: set in `new`.)
             chan_hz,
             bandwidth_hz: 0.0,
             selected_service: None,
@@ -338,6 +359,9 @@ impl App {
             opts,
         };
         app.choose_decoder(dec);
+        if app.settings_open {
+            app.settings_page = Some(app.dec);
+        }
         // A file or radio named on the command line starts at once.
         if app.opts.file.is_some() || app.opts.radio.is_some() {
             app.start();
@@ -441,6 +465,7 @@ impl App {
     }
 
     fn stop(&mut self) {
+        self.tv.reset();
         self.host = None;
         self.control = Control::None;
         self.source_rate = 0.0;
@@ -454,6 +479,7 @@ impl App {
         self.selected_service = None;
         self.view = DecoderView::default();
         self.minis.clear();
+        self.tv.reset();
         if let Some(h) = &mut self.host {
             h.set_decoder(Some(f));
             h.set_channel_at(self.chan_hz, self.bandwidth_hz);
@@ -565,8 +591,15 @@ impl App {
     }
 
     /// Take what the host has made since the last frame.
+    /// A name for what is received (recordings are named after it).
+    fn stream_name(&self) -> String {
+        format!("{}_{:.3}MHz", self.factory().info().id, self.chan_hz / 1e6)
+    }
+
     fn poll(&mut self) {
+        let name = self.stream_name();
         let Some(h) = &self.host else { return };
+        self.tv.poll(h, &name);
         for (name, row) in h.take_waterfall_rows() {
             let i = match self.minis.iter().position(|m| m.name == name) {
                 Some(i) => i,
@@ -924,6 +957,7 @@ impl eframe::App for App {
                     })
                 })
                 .collect();
+            let stream_name = self.stream_name();
             let has_big = minis.iter().any(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name));
             let mut picked = None;
             ui.horizontal_top(|ui| {
@@ -950,8 +984,15 @@ impl eframe::App for App {
                 });
                 ui.allocate_ui_with_layout(egui::vec2(widths[1], h), egui::Layout::top_down(egui::Align::Min), |ui| {
                     panels::boxed(ui, |ui| {
-                        // A decoder's large waterfall (WFM: its multiplex), else
-                        // the services on their own.
+                        // A transport stream's services (DVB), else a decoder's
+                        // large waterfall (WFM: its multiplex), else the
+                        // services on their own.
+                        if self.tv.active()
+                            && let Some(host) = &self.host
+                        {
+                            self.tv.services_ui(ui, host, &stream_name);
+                            return;
+                        }
                         match minis.iter().find(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name)) {
                             Some(m) => self.big_rows = panels::big_waterfall(ui, m).max(64),
                             None => {
@@ -1061,11 +1102,17 @@ impl eframe::App for App {
             }
         }
 
+        // The player, guide and TS windows.
+        let name = self.stream_name();
+        if let Some(h) = &self.host {
+            self.tv.windows(&ctx, h, &name);
+        }
+
         self.handle_screenshot(&ctx);
         // Stopped, the window only redraws on input (it costs a fifth of a
         // core to draw it 30 times a second for nothing).
         // 60 frames a second while running: decoders report 60 times a second.
-        if self.host.is_some() || self.opts.screenshot.is_some() {
+        if self.host.is_some() || self.opts.screenshot.is_some() || self.tv.player.wants_fps().is_some() {
             let wait = self.pace();
             ctx.request_repaint_after(wait);
         }
