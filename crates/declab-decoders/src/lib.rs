@@ -10,6 +10,7 @@ use declab_api::DecoderFactory;
 mod analog;
 mod dvbt;
 mod analog_rds;
+mod dmr;
 mod level;
 mod pagers;
 
@@ -25,6 +26,7 @@ pub static ALL: &[&dyn DecoderFactory] = &[
     &analog::Factory(Mode::Lsb),
     &analog::Factory(Mode::Dsb),
     &analog::Factory(Mode::Cw),
+    &dmr::Factory,
     &pagers::Factory,
     &level::Factory,
 ];

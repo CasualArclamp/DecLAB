@@ -601,6 +601,7 @@ dependencies = [
  "declab-api",
  "declab-dsp",
  "declab-pagers",
+ "declab-pmr",
  "egui",
  "num-complex",
  "rustfft",
@@ -669,6 +670,13 @@ name = "declab-pagers"
 version = "0.0.1"
 dependencies = [
  "declab-core",
+ "num-complex",
+]
+
+[[package]]
+name = "declab-pmr"
+version = "0.0.1"
+dependencies = [
  "num-complex",
 ]
 

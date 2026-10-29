@@ -20,6 +20,10 @@ cargo run --release -p declab-gui -- --radio airspy --freq 98M --decoder wfm --w
 cargo run --release -p declab-gui -- --radio airspy --freq 546M --chan 546M --decoder dvbt --optimise --screenshot out/x.png --after 90   # Airspy gain optimiser (also "Optimise gain" in the gain menu); logs each setting to stderr
 cargo run --release -p declab-gui -- ..\DecPagers\out\sim_pagers_153.000MHz_1Msps.cs8 --decoder pagers --chan 153.15M --screenshot out/x.png --after 10   # pagers (make the file with `decpagers sim`)
 cargo run -p declab-gui --example make_icon   # redraws apps/declab-gui/assets/icon.ico and icon-256.png (preview out/icon-preview.png)
+cargo run --release -p declab-pmr --example dmr_make -- out/sim_dmr.cf32 15   # simulated DMR repeater: call, Tier III CSBKs, LRRP
+cargo run --release -p declab-gui -- out/sim_dmr.cf32 --rate 48000 --decoder dmr --screenshot out/x.png --after 8
+cargo run --release -p declab-pmr --example dmr_sweep -- 4 800   # DMR sensitivity vs C/N (and CPU)
+cargo run --release -p declab-cli -- run dmr --radio rtlsdr --freq 439.5M --gain 40.2 --card
 cargo run --release -p declab-cli -- list
 cargo run --release -p declab-cli -- selftest level
 cargo run --release -p declab-cli -- run wfm --file x_98.000MHz_10Msps.cs8 --offset 1.2M --realtime
@@ -27,8 +31,9 @@ cargo run --release -p declab-cli -- run nfm --radio airspy --freq 446.05M --off
 cargo run --release -p declab-cli -- run usb --radio hackrf --freq 14.2M --gain 1,32,20
 ```
 
-Only an Airspy R2 is plugged in at the moment (the HackRF is not). Both
-drivers are pure Rust over nusb and need the WinUSB driver. The user's own
+Only an Airspy R2 is plugged in at the moment (the HackRF is not). All
+three drivers (HackRF, Airspy, RTL-SDR) are pure Rust over nusb and need the
+WinUSB driver. The user's own
 DecDVB-T GUI may be holding the Airspy ("Access is denied"): never kill it.
 
 The GUI keeps its settings in `%APPDATA%\DecLAB\prefs.txt`; screenshot runs

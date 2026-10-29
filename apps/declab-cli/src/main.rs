@@ -6,8 +6,8 @@
 //! declab selftest <decoder>
 //! declab run <decoder> --file <capture> [--rate HZ] [--freq HZ] [--offset HZ]
 //!                      [--bandwidth HZ] [--seconds S] [--realtime]
-//! declab run <decoder> --radio hackrf|airspy --freq HZ [--rate HZ] [--offset HZ]
-//!                      [--gain AMP,LNA,VGA] [--seconds S] [--record OUT.cs8]
+//! declab run <decoder> --radio hackrf|airspy|rtlsdr --freq HZ [--rate HZ] [--offset HZ]
+//!                      [--gain AMP,LNA,VGA | DB | agc] [--ppm PPM] [--seconds S] [--record OUT.cs8]
 //!                      [--ts OUT.ts] [--card] [--udp ADDR:PORT] [--http ADDR:PORT]
 //!                      [--sound]   (runs are silent unless --sound)
 //! ```
@@ -88,7 +88,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     } else if let Some(radio) = o.get("--radio") {
         open_radio(radio, &o)?
     } else {
-        bail!("give --file <capture> or --radio hackrf|airspy");
+        bail!("give --file <capture> or --radio hackrf|airspy|rtlsdr");
     };
 
     let live = source.is_live();
@@ -248,11 +248,44 @@ fn open_airspy(_: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
     bail!("built without the airspy feature")
 }
 
+#[cfg(feature = "rtlsdr")]
+fn open_rtlsdr(o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    use declab_io::{RtlGains, RtlSdrSource, RtlSettings};
+    if let Some(r) = o.hz("--rate")?
+        && (r - 2.048e6).abs() > 1.0
+    {
+        bail!("the RTL-SDR runs at 2.048 MS/s only");
+    }
+    let gains = match o.get("--gain") {
+        // Rust note: `map_err(anyhow::Error::msg)` turns the parser's
+        // `String` error into an anyhow one so `?` can pass it up.
+        Some(g) => RtlGains::parse(g).map_err(anyhow::Error::msg)?,
+        None => RtlGains::default(),
+    };
+    let ppm = match o.get("--ppm") {
+        Some(p) => p.parse().context("--ppm PPM")?,
+        None => 0.0,
+    };
+    let s = RtlSettings {
+        center_hz: o.hz("--freq")?.context("--freq")? as u64,
+        gains,
+        ppm,
+        ..RtlSettings::default()
+    };
+    Ok(Box::new(RtlSdrSource::open(s)?))
+}
+
+#[cfg(not(feature = "rtlsdr"))]
+fn open_rtlsdr(_: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    bail!("built without the rtlsdr feature")
+}
+
 fn open_radio(name: &str, o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
     match name {
         "hackrf" => open_hackrf(o),
         "airspy" => open_airspy(o),
-        other => bail!("unknown radio {other:?} (hackrf or airspy)"),
+        "rtlsdr" | "rtl" => open_rtlsdr(o),
+        other => bail!("unknown radio {other:?} (hackrf, airspy or rtlsdr)"),
     }
 }
 

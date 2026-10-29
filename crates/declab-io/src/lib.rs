@@ -3,10 +3,17 @@
 //!
 //! Everything upstream of the demodulator talks to an [`IqSource`]: an IQ file
 //! (replay) or
-//! the live HackRF One or Airspy R2. Recording goes out through [`IqFileWriter`].
+//! the live HackRF One, Airspy R2 or RTL-SDR. Recording goes out through [`IqFileWriter`].
 
 pub mod file;
+pub mod raw_stream;
+pub mod rtlsdr_proto;
 pub mod wav;
+
+#[cfg(feature = "rtlsdr")]
+pub mod rtlsdr;
+#[cfg(feature = "rtlsdr")]
+mod usb;
 
 #[cfg(feature = "airspy")]
 pub mod airspy;
@@ -14,7 +21,11 @@ pub mod airspy;
 pub mod hackrf;
 
 pub use file::{IqFileReader, IqFileWriter, NameHint, format_from_path, name_hint};
+pub use rtlsdr_proto::{RtlGains, RtlSettings};
 pub use wav::{CaptureInfo, WavIq, probe_capture};
+
+#[cfg(feature = "rtlsdr")]
+pub use rtlsdr::{RtlInfo, RtlSdrControl, RtlSdrSource, rtlsdr_info};
 
 #[cfg(feature = "airspy")]
 pub use airspy::{

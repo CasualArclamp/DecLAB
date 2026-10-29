@@ -12,6 +12,7 @@ rust-version.workspace = true
 default = []
 hackrf = ["declab-io/hackrf"]
 airspy = ["declab-io/airspy"]
+rtlsdr = ["declab-io/rtlsdr"]
 
 [dependencies]
 declab-api = { path = "../declab-api", default-features = false }

@@ -9,7 +9,7 @@
 //! status bar last. Laid out from the agreed mockups (docs/DESIGN.md §1).
 //!
 //! ```text
-//! declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf]
+//! declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr]
 //!            [--decoder ID] [--chan HZ] [--zoom Z] [--wheel]
 //!            [--screenshot OUT.png] [--after SECS]
 //! ```
@@ -109,9 +109,10 @@ impl Options {
                 }
                 "--decoder" => o.decoder = Some(value("a decoder id")?),
                 "--radio" => {
-                    o.radio = Some(match value("airspy or hackrf")?.as_str() {
+                    o.radio = Some(match value("airspy, hackrf or rtlsdr")?.as_str() {
                         "airspy" => SourceKind::Airspy,
                         "hackrf" => SourceKind::HackRf,
+                        "rtlsdr" | "rtl" => SourceKind::RtlSdr,
                         r => return Err(format!("unknown radio {r:?}")),
                     })
                 }
@@ -130,7 +131,7 @@ impl Options {
                 "--screenshot" => o.screenshot = Some(value("a .png path")?.into()),
                 "--after" => o.after = value("seconds")?.parse().map_err(|_| "--after: seconds")?,
                 "-h" | "--help" => {
-                    return Err("declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf] \
+                    return Err("declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr] \
                                 [--decoder ID] [--chan HZ] [--zoom Z] [--wheel] [--screenshot OUT.png] [--after SECS]"
                         .into());
                 }
@@ -213,6 +214,7 @@ struct MiniState {
 enum SourceKind {
     Airspy,
     HackRf,
+    RtlSdr,
     File,
 }
 
@@ -221,6 +223,7 @@ impl SourceKind {
         match self {
             SourceKind::Airspy => "Airspy R2",
             SourceKind::HackRf => "HackRF One",
+            SourceKind::RtlSdr => "RTL-SDR",
             SourceKind::File => "IQ file",
         }
     }
@@ -228,6 +231,7 @@ impl SourceKind {
         match self {
             SourceKind::Airspy => "airspy",
             SourceKind::HackRf => "hackrf",
+            SourceKind::RtlSdr => "rtlsdr",
             SourceKind::File => "file",
         }
     }
@@ -240,6 +244,8 @@ enum Control {
     HackRf(declab_io::HackRfControl),
     #[cfg(feature = "airspy")]
     Airspy(declab_io::AirspyControl),
+    #[cfg(feature = "rtlsdr")]
+    RtlSdr(declab_io::RtlSdrControl),
 }
 
 struct App {
@@ -262,6 +268,11 @@ struct App {
     /// follow it; the optimiser may leave them between steps.
     air_linear: bool,
     air_step: u8,
+    /// The RTL-SDR's tuner AGC, its manual gain (tenths of a dB, a step of
+    /// the R820T's table) and the dongle's clock error in ppm.
+    rtl_agc: bool,
+    rtl_db10: u16,
+    rtl_ppm: f64,
     /// The Airspy gain optimiser while it runs, and what the last run found.
     opt: Option<gain_opt::Optimiser>,
     opt_note: Option<String>,
@@ -340,6 +351,7 @@ impl App {
             .unwrap_or(match prefs::get(&p, "source") {
                 Some("hackrf") => SourceKind::HackRf,
                 Some("file") => SourceKind::File,
+                Some("rtlsdr") => SourceKind::RtlSdr,
                 _ => SourceKind::Airspy,
             });
         let file = opts
@@ -373,6 +385,9 @@ impl App {
             air_vga: prefs::num(&p, "airspy_vga").unwrap_or(8),
             air_linear: prefs::get(&p, "airspy_mode") == Some("linearity"),
             air_step: prefs::num(&p, "airspy_step").unwrap_or(10),
+            rtl_agc: prefs::get(&p, "rtlsdr_agc") == Some("1"),
+            rtl_db10: prefs::num(&p, "rtlsdr_gain").unwrap_or(declab_io::RtlGains::default().db10),
+            rtl_ppm: prefs::num(&p, "rtlsdr_ppm").unwrap_or(0.0),
             opt: None,
             opt_note: None,
             host: None,
@@ -465,6 +480,7 @@ impl App {
         match self.kind {
             SourceKind::Airspy => 10e6,
             SourceKind::HackRf => self.hack_rate,
+            SourceKind::RtlSdr => declab_io::rtlsdr_proto::SAMPLE_RATE_HZ as f64,
             SourceKind::File => self.file_rate,
         }
     }
@@ -525,6 +541,19 @@ impl App {
                 };
                 let src = AirspySource::open(s).map_err(|e| e.to_string())?;
                 self.control = Control::Airspy(src.control());
+                Ok(Box::new(src))
+            }
+            #[cfg(feature = "rtlsdr")]
+            SourceKind::RtlSdr => {
+                use declab_io::{RtlSdrSource, RtlSettings};
+                let s = RtlSettings {
+                    center_hz: self.center_hz as u64,
+                    gains: self.rtl_gains(),
+                    ppm: self.rtl_ppm,
+                    ..RtlSettings::default()
+                };
+                let src = RtlSdrSource::open(s).map_err(|e| e.to_string())?;
+                self.control = Control::RtlSdr(src.control());
                 Ok(Box::new(src))
             }
             #[allow(unreachable_patterns)]
@@ -737,9 +766,20 @@ impl App {
                     self.error = Some(e.to_string());
                 }
             }
+            #[cfg(feature = "rtlsdr")]
+            Control::RtlSdr(c) => {
+                let r = c.set_gains(self.rtl_gains()).and_then(|()| c.set_ppm(self.rtl_ppm));
+                if let Err(e) = r {
+                    self.error = Some(e.to_string());
+                }
+            }
             _ => {}
         }
         self.save_prefs();
+    }
+
+    fn rtl_gains(&self) -> declab_io::RtlGains {
+        declab_io::RtlGains { agc: self.rtl_agc, db10: declab_io::RtlGains::nearest_step(self.rtl_db10) }
     }
 
     /// Set the radio's gains to what the optimiser says.
@@ -922,6 +962,9 @@ impl App {
             ("airspy_vga", self.air_vga.to_string()),
             ("airspy_mode", if self.air_linear { "linearity" } else { "sensitivity" }.into()),
             ("airspy_step", self.air_step.to_string()),
+            ("rtlsdr_agc", if self.rtl_agc { "1" } else { "0" }.into()),
+            ("rtlsdr_gain", self.rtl_db10.to_string()),
+            ("rtlsdr_ppm", format!("{:.1}", self.rtl_ppm)),
         ]);
     }
 
@@ -1031,7 +1074,7 @@ impl App {
                     ui.label(RichText::new("source").color(Color32::GRAY));
                     let before = self.kind;
                     egui::ComboBox::from_id_salt("source").selected_text(self.kind.label()).show_ui(ui, |ui| {
-                        for k in [SourceKind::Airspy, SourceKind::HackRf, SourceKind::File] {
+                        for k in [SourceKind::Airspy, SourceKind::HackRf, SourceKind::RtlSdr, SourceKind::File] {
                             ui.selectable_value(&mut self.kind, k, k.label());
                         }
                     });
@@ -1135,6 +1178,38 @@ impl App {
                             if cancel_opt {
                                 self.cancel_optimise();
                             }
+                        }
+                        SourceKind::RtlSdr => {
+                            ui.label(RichText::new("rate").color(Color32::GRAY));
+                            ui.label(RichText::new("2.048 MS/s").color(Color32::WHITE));
+                            let title = if self.rtl_agc {
+                                "gain AGC".to_string()
+                            } else {
+                                format!("gain {:.1} dB", f64::from(self.rtl_gains().db10) / 10.0)
+                            };
+                            ui.menu_button(title, |ui| {
+                                let mut ch = ui.checkbox(&mut self.rtl_agc, "Tuner AGC").changed();
+                                // The slider walks the R820T's own steps, by index.
+                                let table = &declab_io::rtlsdr_proto::GAINS_DB10;
+                                let mut i = table.iter().position(|&g| g == self.rtl_gains().db10).unwrap_or(0);
+                                ui.add_enabled_ui(!self.rtl_agc, |ui| {
+                                    let r = ui.add(
+                                        egui::Slider::new(&mut i, 0..=table.len() - 1)
+                                            .custom_formatter(|v, _| format!("{:.1}", f64::from(table[v as usize]) / 10.0))
+                                            .text("dB"),
+                                    );
+                                    if r.changed() {
+                                        self.rtl_db10 = table[i];
+                                        ch = true;
+                                    }
+                                });
+                                ch |= ui
+                                    .add(egui::DragValue::new(&mut self.rtl_ppm).range(-200.0..=200.0).speed(0.1).suffix(" ppm"))
+                                    .changed();
+                                if ch {
+                                    self.apply_gains();
+                                }
+                            });
                         }
                     }
                     ui.label(RichText::new("centre").color(Color32::GRAY));

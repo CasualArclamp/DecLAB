@@ -1,7 +1,7 @@
 # made by CasualArclamp
 [package]
 name = "declab-io"
-description = "DecLAB I/O: IQ file replay/record and the HackRF One and Airspy R2 front ends"
+description = "DecLAB I/O: IQ file replay/record and the HackRF One, Airspy R2 and RTL-SDR front ends"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,6 +17,12 @@ hackrf = ["dep:seify-hackrfone"]
 # Live Airspy R2 front end, in pure Rust over nusb as well (no libairspy, no
 # libusb, no DLLs). The radio must use the WinUSB driver on Windows.
 airspy = ["dep:nusb", "dep:futures-lite"]
+# Live RTL-SDR front end (RTL2832U with an R820T/R820T2/R828D tuner: the V3,
+# V4 and most current dongles), from DecPagers (DecDAB before it), pure Rust
+# over nusb as well. On Windows the dongle must use the WinUSB driver (Zadig).
+# Receive only, the bias tee is always off. The chips' logic is plain code,
+# built and tested without the feature.
+rtlsdr = ["dep:nusb"]
 
 [dependencies]
 declab-core = { path = "../declab-core" }

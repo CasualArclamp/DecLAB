@@ -44,13 +44,16 @@ pub enum Family {
     Radio,
     /// AM, FM, SSB, CW.
     Analog,
+    /// Two-way radio's digital voice and trunking: DMR (later NXDN, P25,
+    /// TETRA).
+    Voice,
     /// Anything else: tools, examples, third-party decoders.
     Other,
 }
 
 impl Family {
-    pub const ALL: [Family; 5] =
-        [Family::Terrestrial, Family::Satellite, Family::Radio, Family::Analog, Family::Other];
+    pub const ALL: [Family; 6] =
+        [Family::Terrestrial, Family::Satellite, Family::Radio, Family::Analog, Family::Voice, Family::Other];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -58,6 +61,7 @@ impl Family {
             Family::Satellite => "Satellite",
             Family::Radio => "Digital radio",
             Family::Analog => "Analog",
+            Family::Voice => "Digital voice",
             Family::Other => "Other",
         }
     }

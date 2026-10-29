@@ -1,0 +1,12 @@
+# made by CasualArclamp
+[package]
+name = "declab-pmr"
+description = "Digital land-mobile radio for DecLAB: the shared 4FSK receiver, DMR Tier I/II/III (later NXDN, P25, TETRA), their FEC, and a modulator for tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+num-complex.workspace = true

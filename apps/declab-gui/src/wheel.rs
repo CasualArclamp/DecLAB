@@ -30,6 +30,7 @@ pub fn family_colour(f: Family) -> Color32 {
         Family::Satellite => Color32::from_rgb(95, 176, 255),
         Family::Radio => Color32::from_rgb(110, 230, 130),
         Family::Analog => Color32::from_rgb(210, 155, 255),
+        Family::Voice => Color32::from_rgb(255, 120, 110),
         Family::Other => Color32::from_rgb(176, 182, 188),
     }
 }
@@ -360,6 +361,16 @@ pub fn icon(painter: &egui::Painter, id: &str, p: Pos2, s: f32, ink: Color32) {
             painter.circle_filled(p + vec2(-s * 0.8, 0.0), 2.6, ink);
             painter.rect_filled(Rect::from_center_size(p, vec2(s * 0.9, 5.0)), 1.5, ink);
             painter.circle_filled(p + vec2(s * 0.8, 0.0), 2.6, ink);
+        }
+        "dmr" => {
+            // A handheld two-way radio: body, aerial, speaker slots.
+            let r = Rect::from_center_size(p + vec2(0.0, s * 0.2), vec2(s * 0.9, s * 1.4));
+            painter.rect_stroke(r, 2.5, st, egui::StrokeKind::Middle);
+            painter.line_segment([r.left_top() + vec2(s * 0.2, 0.0), r.left_top() + vec2(s * 0.2, -s * 0.7)], st);
+            for k in 0..3 {
+                let y = r.top() + s * (0.3 + 0.22 * k as f32);
+                painter.line_segment([pos2(r.left() + s * 0.2, y), pos2(r.right() - s * 0.2, y)], Stroke::new(1.0, ink));
+            }
         }
         "level" => {
             // A bar meter.

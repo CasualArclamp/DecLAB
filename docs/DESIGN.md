@@ -126,6 +126,8 @@ DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
 | M4 | DVB-S and DVB-S2/S2X TS + GSE/IP (PCAP) | DecSAT's test captures decode |
 | M5 | DVB-RCS2/TDMA return burst analyser | DecSAT's inroute captures decode |
 | M6 | Release: CI, portable exe, README | v0.1.0 |
+| V1 | RTL-SDR source; DMR Tier I/II/III + packet data + LRRP (`declab-pmr`, `dmr` plug-in), weak-signal receiver | ✅ 2026-10-29 in simulation only: no real DMR capture yet; no AMBE+2 synthesiser, so no sound |
+| V2–V4 | NXDN, then P25, then TETRA, on the same front end where they can | |
 | later | DLL plug-ins; DVB-C (port of `Documents\DecSAT\dvbc_decode.py`); modulators |
 
 ## 4. Notes from M1a (2026-10-27)
@@ -410,3 +412,77 @@ none. The card shows RDS sync, RDS SNR and corrected blocks.
   1.5 -> 30.4 dB from the lowest rung, clipping at LNA 14 / MIX 10 / VGA 8
   (MER 17), and chose **LNA 13 / MIX 8 / VGA 5: MER 30.3 dB at -20 dBFS** in
   14 settings (about 35 s), the cooler of two settings within 0.3 dB.
+
+## 14. RTL-SDR and DMR (2026-10-29)
+
+The user asked for RTL-SDR support and digital speech decoding (DMR Tier I,
+II and III, then NXDN, P25 and TETRA), optimised for low SNR. Then, mid-task,
+for LRRP on DMR.
+
+- **RTL-SDR:** DecPagers' pure-Rust RTL2832U + R820T/R828D driver (from
+  DecDAB), copied into `declab-io` behind the `rtlsdr` feature (on by default
+  in both apps). It runs at 2.048 MS/s only. CLI: `--radio rtlsdr --gain
+  40.2|agc --ppm N`. GUI: "RTL-SDR" in the source list, with a gain menu
+  (AGC, the R820T's 29 gain steps, ppm). Not yet run with a dongle in
+  DecLAB.
+- **`crates/declab-pmr`**: `fsk4` (the 4FSK front end NXDN and P25 will
+  share), `fec` (the codes of ETSI TS 102 361-1 annex B, with generator
+  matrices copied from the spec tables), and `dmr/` (receiver, BPTC, AMBE
+  frame FEC, PDUs, packet data, LRRP, simulator). Constants are cited to
+  TS 102 361-1/-2/-3/-4. The AMBE interleave and Golay come from DSD/mbelib
+  (ISC licence, notice kept in `ambe.rs`). The LRRP token layouts come from
+  SDRTrunk (GPL-3), because LRRP has no public spec.
+- **Plug-in `dmr`** (new family "Digital voice"): calls per slot (start,
+  end, duration, voice BER), Tier III CSBKs (grants with LPCN and slot,
+  Aloha, broadcasts, clears) and the CACH Short LC system ID. Data packets
+  are reassembled, and LRRP locations are logged with latitude and
+  longitude.
+- **Voice is AMBE+2 parameter frames only.** There is no synthesiser yet.
+  mbelib (ISC) has the codebooks, but bringing them in is a download, and
+  AMBE+2 may still be patent-encumbered in places, so that is the user's
+  decision.
+
+### Weak-signal receiver: what the sweep measured
+
+`cargo run --release -p declab-pmr --example dmr_sweep -- SEEDS OFFSET_HZ
+[CUTOFFS]` runs a simulated Tier III site (a group call on TS1, CSBKs on
+TS2) at falling C/N, with C/N measured in 12.5 kHz.
+
+- **The discriminator beats the complex-product detector** (matched filter
+  on z·z*[n−1], then arg) by 2–3 dB. The product version distorts at large
+  phase steps. The plug-in uses the discriminator; the sweep keeps both.
+- **Pre-detection low-pass at 4 kHz** (not 5.5 kHz) gains about 1 dB, but
+  only with **AFC**. The receiver turns its measured offset into an NCO
+  ahead of the filter, and it demodulates in 20 ms slices: run on whole host
+  blocks, the AFC ran away, because each burst re-measured an offset already
+  corrected.
+- **Soft decoding everywhere:** ML for the slot type, EMB and TACT; Chase-II
+  for the Hamming rows and the AMBE Golay words; a Pyndiah-style soft
+  iteration for BPTC (196,96), worth about 0.5–1 dB on CSBKs; soft Viterbi
+  for rate ¾ data.
+- **Flywheel:** after a SYNC, bursts are predicted every 30 ms. Voice
+  bursts B–F (no SYNC) and a voice A whose SYNC was lost are decoded on
+  timing from the eye's energy.
+- **Validation:** Hamming (7,4) is perfect, and Golay (20,8) and QR (16,7)
+  have small covering radii, so noise passes their distance tests. A burst
+  only counts if its BPTC decodes, its CRC passes, or its AMBE Golay
+  corrections are few. Before this fix the receiver held "lock" on noise
+  and the AFC wandered. The test `does_not_lock_on_noise` guards it.
+- **Results** (discriminator, 800 Hz offset, 4 runs): voice frames (the
+  protected bits) 100 % to 7 dB, 96 % at 5 dB, 91 % at 4 dB; CSBKs 98 % at
+  7 dB, 88 % at 5 dB. The first version managed 41 % voice at 5 dB.
+- **CPU:** about 0.4 % of one core decoding and 1.5 % hunting.
+
+### Not yet / to check on real signals
+
+- **CRC-32 byte order:** clause B.3.9 is ambiguous about the octet order
+  of the message CRC-32. The assembler accepts either order.
+- **MBC last-block CRC:** the scope of the last block's CRC is read from
+  the spec text; it is untested against real traffic.
+- **Rate 1 data** is not decoded.
+- **Header compression:** the network number is configured in the radios,
+  not sent, so compressed headers show 12.x.x.x addresses.
+- **Simulation only:** everything is tested against the built-in modulator,
+  which was written from the same reading of the spec. A real capture (the
+  RTL-SDR or the Airspy on a DMR repeater or hotspot) is the next check.
+
