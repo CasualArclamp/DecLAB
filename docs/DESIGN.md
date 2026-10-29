@@ -128,6 +128,7 @@ DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
 | M6 | Release: CI, portable exe, README | v0.1.0 |
 | V1 | RTL-SDR source; DMR Tier I/II/III + packet data + LRRP (`declab-pmr`, `dmr` plug-in), weak-signal receiver | ✅ 2026-10-29 in simulation only: no real DMR capture yet. AMBE+2 vocoder (port of mbelib) plays 2026-10-29 |
 | V2 | NXDN48 conventional voice (`nxdn` plug-in), SNR gate in DMR and NXDN | ✅ 2026-10-29 in simulation only; NXDN trunking (CAC), data calls and NXDN96 not yet |
+| V2b | One "Digital voice" decoder detecting DMR, NXDN48 and NXDN96; NXDN96 | ✅ 2026-10-29 in simulation only; NXDN96 voice is half-rate (EHR) only |
 | V3–V4 | P25, then TETRA | |
 | later | DLL plug-ins; DVB-C (port of `Documents\DecSAT\dvbc_decode.py`); modulators |
 
@@ -560,4 +561,37 @@ TS2) at falling C/N, with C/N measured in 12.5 kHz.
     A discriminator's output only offsets with frequency, so this is exact.
     Before, a frame straddling the lock-time jump decoded badly. It also
     halved the residual BER of strong signals.
+
+## 16. One decoder for digital voice; NXDN96 (2026-10-29)
+
+- **The user asked for one decoder that detects the mode.** The list now
+  has a single "Digital voice" entry (`voice.rs`, id `voice`) instead of DMR
+  and NXDN.
+  - It runs the DMR, NXDN48 and NXDN96 decoders side by side on the same
+    24 kS/s channel; each receiver filters to its own band.
+  - Their SNR gates keep the absent modes quiet. Whichever locks drives the
+    card, scope and sound, and the others keep listening.
+  - Log lines are tagged with the mode. "detected X" and "signal lost" mark
+    the switches.
+  - Settings: one page, one gate slider per mode.
+  - Tests: `detects_each_mode_in_turn` (DMR, then NXDN48, then NXDN96, with
+    noise between) checks the order, each call, that nothing is detected
+    falsely, and that every voice frame is spoken exactly once.
+  - About 2–3 % of a core while all three hunt.
+- **NXDN96** (asked for as a follow-up). SDRTrunk (`TransmissionMode`, after
+  TS 1-A table 3.3-1) and DSD-FME both frame NXDN96 exactly like NXDN48:
+  the same 192-symbol frame, sync, LICH, coding and scrambler, at 4800 baud
+  (40 ms) with the outer symbol at 2400 Hz. The receiver and simulator take
+  a `Mode`.
+  - Sweep: best cut-off 4 kHz (hunting 6 kHz). Voice 94 % at 5 dB C/N in
+    12.5 kHz. Two minutes of noise: 0 events; its best fit was 8.0 dB, at
+    the 8 dB gate, so the CRCs behind the gate matter there.
+  - The NXDN48 and NXDN96 receivers each stay silent on the other's signal
+    (tested).
+  - Voice is decoded as half-rate (EHR) AMBE+2, as both open decoders do.
+    Full-rate (EFR) NXDN96 voice has no open decoder ("never observed",
+    DSD-FME) and is not decoded.
+- **Fix:** a frame accepted on the flywheel after a carrier dropped could
+  pass its garbage voice on. Voice is now emitted only from frames that
+  check out (a CRC passed, or the Golay words came out near).
 

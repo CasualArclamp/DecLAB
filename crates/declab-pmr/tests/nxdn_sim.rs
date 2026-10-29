@@ -3,10 +3,14 @@
 
 use declab_pmr::fsk4::Iq;
 use declab_pmr::nxdn::receiver::RATE;
-use declab_pmr::nxdn::{Event, Message, Receiver, sim};
+use declab_pmr::nxdn::{Event, Message, Mode, Receiver, sim};
 
 fn run(iq: &[Iq], chunk: usize) -> (Vec<Event>, Receiver) {
-    let mut rx = Receiver::new();
+    run_mode(Mode::Nxdn48, iq, chunk)
+}
+
+fn run_mode(mode: Mode, iq: &[Iq], chunk: usize) -> (Vec<Event>, Receiver) {
+    let mut rx = Receiver::for_mode(mode);
     let mut ev = Vec::new();
     for c in iq.chunks(chunk) {
         rx.process(c, &mut ev);
@@ -74,4 +78,33 @@ fn quiet_on_noise() {
     let (ev, rx) = run(&noise, 2400);
     assert!(ev.is_empty(), "events from noise: {ev:?}");
     assert!(!rx.locked());
+}
+
+#[test]
+fn nxdn96_decodes_a_call_and_ignores_nxdn48() {
+    let msg = Message::vcall(0x01, 4321, 9, true);
+    let (bits, frames) = sim::call(3, &msg, 3);
+    let mut iq = sim::modulate_mode(Mode::Nxdn96, &bits, RATE, 0.1);
+    sim::add_noise_mode(Mode::Nxdn96, &mut iq, RATE, 20.0, -300.0, 8);
+    let (ev, rx) = run_mode(Mode::Nxdn96, &iq, 2400);
+    let voice: usize = ev
+        .iter()
+        .map(|e| match e {
+            Event::Voice { frames } => frames.len(),
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(voice as u32, frames, "{ev:?}");
+    assert!(ev.iter().any(
+        |e| matches!(e, Event::Facch { msg: m } if m.to_string() == "group call TG 9 from 4321")
+    ));
+    assert_eq!(rx.stats.ran, Some(3));
+    // The NXDN48 receiver hears nothing in an NXDN96 signal, and the other
+    // way about: the combined decoder can run both.
+    let (ev48, rx48) = run_mode(Mode::Nxdn48, &iq, 2400);
+    assert!(ev48.is_empty() && !rx48.locked(), "{ev48:?}");
+    let mut iq48 = sim::modulate(&bits, RATE, 0.1);
+    sim::add_noise(&mut iq48, RATE, 20.0, 0.0, 9);
+    let (ev96, _) = run_mode(Mode::Nxdn96, &iq48, 2400);
+    assert!(ev96.is_empty(), "{ev96:?}");
 }

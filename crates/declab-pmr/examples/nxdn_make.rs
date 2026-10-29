@@ -1,12 +1,12 @@
 // made by CasualArclamp
 //! Write a simulated NXDN48 call to an IQ file, for the GUI.
 //!
-//! `cargo run --release -p declab-pmr --example nxdn_make -- OUT.cf32 [C/N dB]`
+//! `cargo run --release -p declab-pmr --example nxdn_make -- OUT.cf32 [C/N dB [96]]`
 //! then `declab-gui OUT.cf32 --rate 48000 --decoder nxdn`.
 
 use std::io::Write;
 
-use declab_pmr::nxdn::{Message, sim};
+use declab_pmr::nxdn::{Message, Mode, sim};
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -15,13 +15,18 @@ fn main() -> std::io::Result<()> {
         .cloned()
         .unwrap_or_else(|| "out/sim_nxdn.cf32".into());
     let cn: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(15.0);
+    let mode = if args.get(2).map(String::as_str) == Some("96") {
+        Mode::Nxdn96
+    } else {
+        Mode::Nxdn48
+    };
     let rate = 48_000.0;
     let msg = Message::vcall(0x01, 1234, 77, true);
     let (mut bits, _) = sim::call(5, &msg, 8);
     let (b2, _) = sim::call(5, &Message::vcall(0x01, 2001, 9, true), 5);
     bits.extend(b2);
-    let mut iq = sim::modulate(&bits, rate, 0.3);
-    sim::add_noise(&mut iq, rate, cn, -450.0, 42);
+    let mut iq = sim::modulate_mode(mode, &bits, rate, 0.3);
+    sim::add_noise_mode(mode, &mut iq, rate, cn, -450.0, 42);
     // Well below full scale, as a radio's samples would be.
     iq.iter_mut().for_each(|s| *s *= 0.25);
     let mut f = std::io::BufWriter::new(std::fs::File::create(&path)?);

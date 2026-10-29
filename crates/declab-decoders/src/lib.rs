@@ -14,6 +14,9 @@ mod dmr;
 mod level;
 mod nxdn;
 mod pagers;
+mod voice;
+#[cfg(feature = "ui")]
+mod gate_panel;
 
 use analog::Mode;
 
@@ -27,8 +30,7 @@ pub static ALL: &[&dyn DecoderFactory] = &[
     &analog::Factory(Mode::Lsb),
     &analog::Factory(Mode::Dsb),
     &analog::Factory(Mode::Cw),
-    &dmr::Factory,
-    &nxdn::Factory,
+    &voice::Factory,
     &pagers::Factory,
     &level::Factory,
 ];

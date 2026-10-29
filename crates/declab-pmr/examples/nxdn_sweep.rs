@@ -2,24 +2,37 @@
 //! Sensitivity of the NXDN48 receiver: a simulated call at falling C/N
 //! (measured in 6.25 kHz), and where the SNR gate sits.
 //!
-//! `cargo run --release -p declab-pmr --example nxdn_sweep [-- SEEDS [OFFSET_HZ [CUTOFFS]]]`
+//! `cargo run --release -p declab-pmr --example nxdn_sweep [-- SEEDS [OFFSET_HZ [CUTOFFS [96]]]]`
+//! (a fourth argument `96` sweeps NXDN96, C/N in 12.5 kHz; CUTOFFS `-`
+//! keeps the default).
 //!
 //! Columns: voice frames whose protected bits came out right; SACCH
 //! superframe messages and FACCH1 messages decoded, of those sent; the
 //! channel BER the AMBE Golay words saw.
 
 use declab_pmr::fsk4::Iq;
-use declab_pmr::nxdn::receiver::{CHANNEL_HZ, RATE};
-use declab_pmr::nxdn::{Event, Message, Receiver, sim};
+use declab_pmr::nxdn::receiver::{RATE, channel_for};
+use declab_pmr::nxdn::{Event, Message, Mode, Receiver, sim};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let seeds: u64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(4);
     let offset: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(300.0);
+    let mode = if args.get(3).map(String::as_str) == Some("96") {
+        Mode::Nxdn96
+    } else {
+        Mode::Nxdn48
+    };
     let chans: Vec<f64> = args
         .get(2)
-        .map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect())
-        .unwrap_or_else(|| vec![CHANNEL_HZ]);
+        .map(|s| {
+            s.split(',')
+                .filter_map(|x| x.parse().ok())
+                .collect::<Vec<f64>>()
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec![channel_for(mode).0]);
+    println!("{}", mode.name());
 
     let msg = Message::vcall(0x01, 1234, 77, true);
     let superframes = 6;
@@ -28,10 +41,10 @@ fn main() {
     let (b2, f2) = sim::call(5, &msg, superframes);
     bits.extend(b2);
     let frames = frames + f2;
-    let clean = sim::modulate(&bits, RATE, 0.3);
+    let clean = sim::modulate_mode(mode, &bits, RATE, 0.3);
 
     let t = std::time::Instant::now();
-    let mut rx = Receiver::new();
+    let mut rx = Receiver::for_mode(mode);
     let mut ev = Vec::new();
     for c in clean.chunks(2400) {
         rx.process(c, &mut ev);
@@ -44,7 +57,7 @@ fn main() {
 
     // The gate: SYNC eye SNR on noise, and on the signal near threshold.
     let snrs = |iq: &[Iq]| {
-        let mut rx = Receiver::new();
+        let mut rx = Receiver::for_mode(mode);
         rx.snr_gate_db = f32::MIN;
         let (mut ev, mut v, mut seen) = (Vec::new(), Vec::new(), 0);
         for c in iq.chunks(240) {
@@ -65,7 +78,7 @@ fn main() {
         }
     };
     let mut noise = vec![Iq::new(0.0, 0.0); 24_000 * 120];
-    sim::add_noise(&mut noise, RATE, 0.0, 0.0, 77);
+    sim::add_noise_mode(mode, &mut noise, RATE, 0.0, 0.0, 77);
     let t = std::time::Instant::now();
     let v = snrs(&noise);
     println!(
@@ -76,7 +89,7 @@ fn main() {
         100.0 * t.elapsed().as_secs_f64() / 120.0
     );
     // With the gate on: what does two minutes of noise produce?
-    let mut rx = Receiver::new();
+    let mut rx = Receiver::for_mode(mode);
     let mut ev = Vec::new();
     let mut locked = 0;
     for c in noise.chunks(2400) {
@@ -91,7 +104,7 @@ fn main() {
     );
     for cn in [4.0, 6.0] {
         let mut iq = clean.clone();
-        sim::add_noise(&mut iq, RATE, cn, offset, 9);
+        sim::add_noise_mode(mode, &mut iq, RATE, cn, offset, 9);
         let v = snrs(&iq);
         println!(
             "gate: C/N {cn} dB, eye SNR 5% {:.1} median {:.1} dB",
@@ -109,8 +122,8 @@ fn main() {
                 (0u32, 0u32, 0u32, 0u64, 0u64);
             for seed in 0..seeds {
                 let mut iq = clean.clone();
-                sim::add_noise(&mut iq, RATE, cn, offset, 1 + seed * 7919);
-                let mut rx = Receiver::with_channel(chan);
+                sim::add_noise_mode(mode, &mut iq, RATE, cn, offset, 1 + seed * 7919);
+                let mut rx = Receiver::with_channel(mode, chan);
                 let mut ev = Vec::new();
                 for c in iq.chunks(2400) {
                     rx.process(c, &mut ev);

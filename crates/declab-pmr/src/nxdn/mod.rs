@@ -1,6 +1,6 @@
 // made by CasualArclamp
-//! NXDN48 (NXDN at 4800 bit/s in 6.25 kHz): conventional voice and its
-//! signalling.
+//! NXDN48 (4800 bit/s in 6.25 kHz) and NXDN96 (9600 bit/s in 12.5 kHz):
+//! conventional voice and its signalling.
 //!
 //! The NXDN Forum's specifications are behind a registration form, so the
 //! layouts here follow two open implementations that interoperate with real
@@ -8,7 +8,10 @@
 //! G4KLX), which both builds and reads NXDN frames, and DSD (`nxdn_const.h`,
 //! ISC licence, © 2010 DSD Author) for the voice frames.
 //!
-//! A frame is 384 bits (192 symbols, 80 ms at 2400 baud):
+//! A frame is 384 bits (192 symbols: 80 ms at NXDN48's 2400 baud, 40 ms at
+//! NXDN96's 4800). NXDN96 differs only in symbol rate and deviation
+//! (SDRTrunk `TransmissionMode`, after NXDN TS 1-A table 3.3-1, GPL-3.0,
+//! © Dennis Sheirer; DSD-FME frames both the same way):
 //!
 //! ```text
 //!  FSW 20 | LICH 16 | SACCH 60 | 288: 4 voice frames, or FACCH1 in either half or both
@@ -20,8 +23,12 @@
 //! - [`receiver`]: IQ in, [`Event`]s out.
 //! - [`sim`]: a modulator for the tests and the sweep.
 //!
+//! NXDN96 voice is decoded as the half-rate (EHR) AMBE+2 that NXDN48 uses,
+//! as SDRTrunk and DSD-FME do; full-rate (EFR) voice has no open decoder
+//! (DSD-FME: "never observed") and is not decoded.
+//!
 //! Not yet: the control channel (RCCH: frames are recognised but their CAC
-//! is not decoded), the data channel's UDCH/FACCH2, and NXDN96 (9600 bit/s).
+//! is not decoded) and the data channel's UDCH/FACCH2.
 
 pub mod receiver;
 pub mod sim;
@@ -32,10 +39,44 @@ use crate::conv;
 
 pub use receiver::{Event, Receiver, Stats};
 
-/// Symbols a second (NXDN48).
-pub const SYMBOL_RATE: f64 = 2400.0;
-/// The outer symbols' deviation (±3), NXDN48.
-pub const OUTER_DEV_HZ: f64 = 1050.0;
+/// NXDN48 or NXDN96 (SDRTrunk `TransmissionMode`: 2400 baud ±1050 Hz,
+/// 4800 baud ±2400 Hz for the outer symbols).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Nxdn48,
+    Nxdn96,
+}
+
+impl Mode {
+    pub fn symbol_rate(self) -> f64 {
+        match self {
+            Mode::Nxdn48 => 2400.0,
+            Mode::Nxdn96 => 4800.0,
+        }
+    }
+
+    pub fn outer_dev_hz(self) -> f64 {
+        match self {
+            Mode::Nxdn48 => 1050.0,
+            Mode::Nxdn96 => 2400.0,
+        }
+    }
+
+    /// The channel, Hz: C/N is measured in it.
+    pub fn channel_hz(self) -> f64 {
+        match self {
+            Mode::Nxdn48 => 6_250.0,
+            Mode::Nxdn96 => 12_500.0,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Nxdn48 => "NXDN48",
+            Mode::Nxdn96 => "NXDN96",
+        }
+    }
+}
 /// The Nyquist roll-off.
 pub const ALPHA: f64 = 0.2;
 /// Bits and symbols a frame.

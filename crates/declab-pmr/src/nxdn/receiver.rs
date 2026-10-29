@@ -1,5 +1,6 @@
 // made by CasualArclamp
-//! The NXDN48 receiver: channel IQ at 24 kS/s (ten samples a symbol) in,
+//! The NXDN receiver (NXDN48 or NXDN96, chosen at construction): channel IQ
+//! at 24 kS/s (ten or five samples a symbol) in,
 //! [`Event`]s out. Built as the DMR receiver is (see `dmr::receiver` for
 //! the reasoning): discriminator and matched filter with AFC, a normalised
 //! correlator on the 10-symbol frame sync word, an SNR gate on each
@@ -14,16 +15,14 @@
 //! words.
 
 use super::{
-    ALPHA, FRAME_SYMBOLS, FSW, Lich, Message, OUTER_DEV_HZ, Rfct, SYMBOL_RATE, Steal,
-    facch1_decode, layout, sacch_decode, scrambler_bit,
+    ALPHA, FRAME_SYMBOLS, FSW, Lich, Message, Mode, Rfct, Steal, facch1_decode, layout,
+    sacch_decode, scrambler_bit,
 };
 use crate::dmr::ambe::{self, AmbeFrame};
 use crate::fsk4::{Detector, Fsk4Demod, Iq};
 
 /// The rate the receiver takes.
 pub const RATE: f64 = 24_000.0;
-const SPS: usize = 10;
-const FRAME: f64 = (FRAME_SYMBOLS * SPS) as f64;
 /// Symbol index of the FSW's last symbol.
 const SYNC_END: f64 = 9.0;
 /// The pre-detection low-pass once locked (the sweep's best), and while
@@ -31,6 +30,17 @@ const SYNC_END: f64 = 9.0;
 /// off-tune signal's edge and the gate turns its first frames away.
 pub const CHANNEL_HZ: f64 = 2_000.0;
 const HUNT_CHANNEL_HZ: f64 = 3_000.0;
+/// The same for NXDN96 (twice the symbol rate; see `nxdn_sweep`).
+pub const CHANNEL_HZ_96: f64 = 4_000.0;
+const HUNT_CHANNEL_HZ_96: f64 = 6_000.0;
+
+/// The receiver's own low-pass for a mode: locked, and hunting.
+pub fn channel_for(mode: Mode) -> (f64, f64) {
+    match mode {
+        Mode::Nxdn48 => (CHANNEL_HZ, HUNT_CHANNEL_HZ),
+        Mode::Nxdn96 => (CHANNEL_HZ_96, HUNT_CHANNEL_HZ_96),
+    }
+}
 /// FSW correlation to start from cold, and at a predicted frame.
 const ACQUIRE: f32 = 0.8;
 const TRACK: f32 = 0.45;
@@ -84,7 +94,12 @@ pub struct Stats {
 
 pub struct Receiver {
     pub snr_gate_db: f32,
+    mode: Mode,
+    /// Samples a symbol and a frame.
+    sps: usize,
+    frame: f64,
     chan_hz: f64,
+    hunt_hz: f64,
     demod: Fsk4Demod,
     f: Vec<f32>,
     base: u64,
@@ -105,26 +120,41 @@ pub struct Receiver {
 }
 
 impl Receiver {
+    /// NXDN48.
     pub fn new() -> Receiver {
-        Receiver::with_channel(CHANNEL_HZ)
+        Receiver::for_mode(Mode::Nxdn48)
     }
 
-    pub fn with_channel(chan_hz: f64) -> Receiver {
+    pub fn for_mode(mode: Mode) -> Receiver {
+        Receiver::with_channel(mode, channel_for(mode).0)
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    pub fn with_channel(mode: Mode, chan_hz: f64) -> Receiver {
+        let sps = (RATE / mode.symbol_rate()).round() as usize;
+        let hunt_hz = channel_for(mode).1.max(chan_hz);
         let fsw = std::array::from_fn(|i| super::symbol(((FSW >> (18 - 2 * i)) & 3) as u8));
         Receiver {
             snr_gate_db: SNR_GATE_DB,
+            mode,
+            sps,
+            frame: (FRAME_SYMBOLS * sps) as f64,
             chan_hz,
+            hunt_hz,
             demod: Fsk4Demod::new(
                 RATE,
-                SYMBOL_RATE,
-                OUTER_DEV_HZ,
+                mode.symbol_rate(),
+                mode.outer_dev_hz(),
                 ALPHA,
-                HUNT_CHANNEL_HZ.max(chan_hz),
+                hunt_hz,
                 Detector::Discriminator,
             ),
             f: Vec::with_capacity(32_768),
             base: 0,
-            scan: (9 * SPS) as u64,
+            scan: (9 * sps) as u64,
             peak: None,
             candidate: None,
             track: None,
@@ -153,7 +183,7 @@ impl Receiver {
 
     pub fn reset(&mut self) {
         let (tap, gate) = (self.tap.is_some(), self.snr_gate_db);
-        *self = Receiver::with_channel(self.chan_hz);
+        *self = Receiver::with_channel(self.mode, self.chan_hz);
         self.snr_gate_db = gate;
         self.enable_tap(tap);
     }
@@ -187,9 +217,9 @@ impl Receiver {
 
     fn trim(&mut self) {
         let keep_from = match (self.track, self.candidate) {
-            (Some((t, _)), _) => t - FRAME,
-            (None, Some((c, _))) => c - FRAME,
-            _ => self.scan as f64 - FRAME,
+            (Some((t, _)), _) => t - self.frame,
+            (None, Some((c, _))) => c - self.frame,
+            _ => self.scan as f64 - self.frame,
         };
         let drop = (keep_from.max(0.0) as u64).saturating_sub(self.base) as usize;
         if drop > 16_384 {
@@ -211,7 +241,7 @@ impl Receiver {
     fn correlate(&self, t: f64) -> f32 {
         let (mut c, mut s, mut s2) = (0f32, 0f32, 0f32);
         for (k, &sym) in self.fsw.iter().enumerate() {
-            let x = self.at(t - ((9 - k) * SPS) as f64);
+            let x = self.at(t - ((9 - k) * self.sps) as f64);
             c += sym * x;
             s += x;
             s2 += x * x;
@@ -243,7 +273,7 @@ impl Receiver {
         while self.scan + 1 < end {
             let t = self.scan;
             self.scan += 1;
-            if t < self.base + (9 * SPS) as u64 {
+            if t < self.base + (9 * self.sps) as u64 {
                 continue;
             }
             let r = self.correlate(t as f64);
@@ -251,7 +281,7 @@ impl Receiver {
                 Some((pt, pr)) => {
                     if r > pr {
                         self.peak = Some((t, r));
-                    } else if t - pt >= SPS as u64 {
+                    } else if t - pt >= self.sps as u64 {
                         self.peak = None;
                         self.candidate = Some((self.refine(pt as f64), pr));
                         return true;
@@ -265,8 +295,8 @@ impl Receiver {
     }
 
     fn have(&self, tau: f64) -> bool {
-        let first = tau - SYNC_END * SPS as f64 - 2.0;
-        let last = tau + (FRAME_SYMBOLS as f64 - 1.0 - SYNC_END) * SPS as f64 + 4.0;
+        let first = tau - SYNC_END * self.sps as f64 - 2.0;
+        let last = tau + (FRAME_SYMBOLS as f64 - 1.0 - SYNC_END) * self.sps as f64 + 4.0;
         first >= self.base as f64 && last < self.end() as f64
     }
 
@@ -282,14 +312,14 @@ impl Receiver {
             self.afc_step(self.dc);
             self.demod.set_channel(self.chan_hz);
         } else {
-            self.scan = self.scan.max(tau as u64 + SPS as u64);
+            self.scan = self.scan.max(tau as u64 + self.sps as u64);
         }
         true
     }
 
     fn step_track(&mut self) -> bool {
         let (t, misses) = self.track.expect("called while tracking");
-        let mut tau = t + FRAME;
+        let mut tau = t + self.frame;
         if !self.have(tau + 4.0) {
             return false;
         }
@@ -313,7 +343,7 @@ impl Receiver {
         if misses >= LOST_AFTER {
             self.track = None;
             self.demod.set_afc(0.0);
-            self.demod.set_channel(HUNT_CHANNEL_HZ.max(self.chan_hz));
+            self.demod.set_channel(self.hunt_hz);
             self.dc = 0.0;
             self.sacch = [None; 4];
             self.scan = tau as u64;
@@ -342,7 +372,7 @@ impl Receiver {
         let e = |d: f64| {
             (0..FRAME_SYMBOLS)
                 .map(|j| {
-                    let x = self.at(tau + d + (j as f64 - SYNC_END) * SPS as f64) - self.dc;
+                    let x = self.at(tau + d + (j as f64 - SYNC_END) * self.sps as f64) - self.dc;
                     x * x
                 })
                 .sum::<f32>()
@@ -407,7 +437,7 @@ impl Receiver {
     /// Decode the frame whose FSW ends at `tau`. True if it checked.
     fn decode_frame(&mut self, tau: f64, sync: Option<f32>) -> bool {
         let raw: Vec<f32> = (0..FRAME_SYMBOLS)
-            .map(|j| self.at(tau + (j as f64 - SYNC_END) * SPS as f64))
+            .map(|j| self.at(tau + (j as f64 - SYNC_END) * self.sps as f64))
             .collect();
         let acquiring = self.track.is_none();
         if let Some(rho) = sync {
@@ -567,7 +597,12 @@ impl Receiver {
                 self.stats.voice_bits += 46;
             }
             checked |= errors <= VOICE_ERRORS * frames.len() as u32 / 4;
-            self.events.push(Event::Voice { frames });
+            // Voice only from a frame that checked (a CRC passed here, or
+            // the Golay words came out near): a flywheeled frame of noise
+            // after the carrier drops must not be spoken.
+            if checked {
+                self.events.push(Event::Voice { frames });
+            }
         }
         checked
     }

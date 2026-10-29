@@ -362,7 +362,7 @@ pub fn icon(painter: &egui::Painter, id: &str, p: Pos2, s: f32, ink: Color32) {
             painter.rect_filled(Rect::from_center_size(p, vec2(s * 0.9, 5.0)), 1.5, ink);
             painter.circle_filled(p + vec2(s * 0.8, 0.0), 2.6, ink);
         }
-        "dmr" | "nxdn" => {
+        "voice" | "dmr" | "nxdn" | "nxdn96" => {
             // A handheld two-way radio: body, aerial, speaker slots.
             let r = Rect::from_center_size(p + vec2(0.0, s * 0.2), vec2(s * 0.9, s * 1.4));
             painter.rect_stroke(r, 2.5, st, egui::StrokeKind::Middle);

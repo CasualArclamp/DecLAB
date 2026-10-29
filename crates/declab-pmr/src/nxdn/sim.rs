@@ -4,8 +4,8 @@
 //! scrambled), then 4FSK.
 
 use super::{
-    ALPHA, FSW, Lich, Message, OUTER_DEV_HZ, Rfct, SYMBOL_RATE, Steal, facch1_encode, layout,
-    sacch_encode, scrambler_bit,
+    ALPHA, FSW, Lich, Message, Mode, Rfct, Steal, facch1_encode, layout, sacch_encode,
+    scrambler_bit,
 };
 use crate::dmr::ambe;
 use crate::fsk4::Iq;
@@ -101,18 +101,35 @@ pub fn call(ran: u8, msg: &Message, superframes: usize) -> (Vec<u8>, u32) {
     (bits, n)
 }
 
-/// 4FSK from frame bits at `rate`.
+/// NXDN48 4FSK from frame bits at `rate`.
 pub fn modulate(bits: &[u8], rate: f64, pad_s: f64) -> Vec<Iq> {
+    modulate_mode(Mode::Nxdn48, bits, rate, pad_s)
+}
+
+/// 4FSK for either mode.
+pub fn modulate_mode(mode: Mode, bits: &[u8], rate: f64, pad_s: f64) -> Vec<Iq> {
     let symbols: Vec<f32> = bits
         .as_chunks::<2>()
         .0
         .iter()
         .map(|d| super::symbol((d[0] << 1) | d[1]))
         .collect();
-    crate::fsk4::modulate(&symbols, rate, SYMBOL_RATE, OUTER_DEV_HZ, ALPHA, pad_s)
+    crate::fsk4::modulate(
+        &symbols,
+        rate,
+        mode.symbol_rate(),
+        mode.outer_dev_hz(),
+        ALPHA,
+        pad_s,
+    )
 }
 
-/// Noise for a C/N measured in the 6.25 kHz channel.
+/// Noise for a C/N measured in NXDN48's 6.25 kHz channel.
 pub fn add_noise(iq: &mut [Iq], rate: f64, cn_db: f64, offset_hz: f64, seed: u64) {
-    crate::fsk4::add_noise(iq, rate, cn_db, 6_250.0, offset_hz, seed);
+    add_noise_mode(Mode::Nxdn48, iq, rate, cn_db, offset_hz, seed);
+}
+
+/// Noise for a C/N measured in the mode's channel (12.5 kHz for NXDN96).
+pub fn add_noise_mode(mode: Mode, iq: &mut [Iq], rate: f64, cn_db: f64, offset_hz: f64, seed: u64) {
+    crate::fsk4::add_noise(iq, rate, cn_db, mode.channel_hz(), offset_hz, seed);
 }

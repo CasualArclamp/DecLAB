@@ -1,5 +1,5 @@
 // made by CasualArclamp
-//! NXDN48 (6.25 kHz, 4800 bit/s) conventional voice, from
+//! NXDN48 (6.25 kHz) and NXDN96 (12.5 kHz) conventional voice, from
 //! `crates/declab-pmr`: calls (who, to which talkgroup, how long, the
 //! voice BER) from FACCH1 and the SACCH superframe, the RAN, and voice
 //! through the AMBE+2 vocoder at 48 kHz.
@@ -16,7 +16,7 @@ use declab_api::{
     Sink,
 };
 use declab_pmr::nxdn::receiver::{RATE, SNR_GATE_DB};
-use declab_pmr::nxdn::{Event, Message, Receiver};
+use declab_pmr::nxdn::{Event, Message, Mode, Receiver};
 use declab_pmr::vocoder::ambe2::{self, FrameKind};
 use declab_pmr::vocoder::{Ambe2Decoder, Upsample6};
 
@@ -25,31 +25,42 @@ const SYMBOL_POINTS: usize = 384;
 /// A call with no voice for this long has ended (its release was lost).
 const CALL_TIMEOUT_S: f64 = 1.0;
 
-pub struct Factory;
+/// NXDN48 or NXDN96.
+pub struct Factory(pub Mode);
 
 impl DecoderFactory for Factory {
     fn info(&self) -> DecoderInfo {
+        let (id, summary) = match self.0 {
+            Mode::Nxdn48 => (
+                "nxdn",
+                "NXDN48 (6.25 kHz) conventional voice: calls, talkgroups, AMBE+2 speech",
+            ),
+            Mode::Nxdn96 => (
+                "nxdn96",
+                "NXDN96 (12.5 kHz) conventional voice: calls, talkgroups, AMBE+2 speech",
+            ),
+        };
         DecoderInfo {
-            id: "nxdn",
-            name: "NXDN",
+            id,
+            name: self.0.name(),
             family: Family::Voice,
-            standard: "NXDN (layouts after MMDVMHost)",
-            summary: "NXDN48 conventional voice: calls, talkgroups, AMBE+2 speech",
+            standard: "NXDN (layouts after MMDVMHost and SDRTrunk)",
+            summary,
         }
     }
 
     fn input(&self, _source_rate: f64) -> InputSpec {
-        // The receiver filters to ±2–3 kHz itself; the host keeps the
-        // neighbours out.
+        // The receiver filters to its own narrower low-pass; the host keeps
+        // the neighbours out.
         InputSpec {
             sample_rate: Some(RATE),
-            bandwidth_hz: 6_250.0,
+            bandwidth_hz: self.0.channel_hz(),
             block_len: 2_400,
         }
     }
 
     fn create(&self) -> Box<dyn Decoder> {
-        Box::new(Nxdn::new())
+        Box::new(Nxdn::new(self.0))
     }
 
     fn default_scope(&self) -> &'static str {
@@ -58,11 +69,23 @@ impl DecoderFactory for Factory {
 
     #[cfg(feature = "ui")]
     fn panel(&self) -> Option<Box<dyn declab_api::Panel>> {
-        Some(Box::new(crate::dmr::GatePanel {
-            gate_db: SNR_GATE_DB,
-            noise_max: 6.4,
-            real_median: 11.0,
+        Some(Box::new(crate::gate_panel::GatePanel {
+            gates: vec![gate(self.0)],
         }))
+    }
+}
+
+/// NXDN's SNR gate for the settings panel, with its measured figures.
+#[cfg(feature = "ui")]
+pub(crate) fn gate(mode: Mode) -> crate::gate_panel::Gate {
+    // The best fit two minutes of noise made (`nxdn_sweep`).
+    let noise_max = if mode == Mode::Nxdn48 { 7.4 } else { 8.0 };
+    crate::gate_panel::Gate {
+        label: mode.name(),
+        key: "snr_gate",
+        db: SNR_GATE_DB,
+        noise_max,
+        real_median: 11.0,
     }
 }
 
@@ -75,6 +98,7 @@ struct Call {
 }
 
 struct Nxdn {
+    mode: Mode,
     rx: Receiver,
     events: Vec<Event>,
     call: Option<Call>,
@@ -91,10 +115,11 @@ struct Nxdn {
 }
 
 impl Nxdn {
-    fn new() -> Self {
-        let mut rx = Receiver::new();
+    fn new(mode: Mode) -> Self {
+        let mut rx = Receiver::for_mode(mode);
         rx.enable_tap(true);
         Nxdn {
+            mode,
             rx,
             events: Vec::new(),
             call: None,
@@ -113,7 +138,7 @@ impl Nxdn {
 
     fn note(&mut self, value: String, out: &mut Sink) {
         out.log(value.clone());
-        self.recent.push_front(("NXDN".into(), value));
+        self.recent.push_front((self.mode.name().into(), value));
         self.recent.truncate(RECENT);
     }
 
@@ -232,7 +257,7 @@ impl Nxdn {
         };
         let pair = |k: &str, v: String| (k.to_string(), v);
         out.card = Some(Card {
-            title: "NXDN48".into(),
+            title: self.mode.name().into(),
             headline,
             gauge: st.locked.then(|| Gauge {
                 label: "eye SNR".into(),
@@ -315,7 +340,7 @@ mod tests {
         let (bits, frames) = sim::call(5, &msg, 2);
         let mut iq = sim::modulate(&bits, RATE, 0.1);
         sim::add_noise(&mut iq, RATE, 20.0, 200.0, 4);
-        let mut d = Factory.create();
+        let mut d = Factory(Mode::Nxdn48).create();
         let (mut log, mut sound, mut card) = (Vec::new(), 0usize, None);
         let tuning = Tuning {
             center_hz: 0.0,
