@@ -23,7 +23,7 @@ use declab_api::{
 use declab_pmr::dmr::data::Packet;
 use declab_pmr::dmr::lrrp::{self, Lrrp};
 use declab_pmr::dmr::pdu::{Csbk, FullLc, ShortLc};
-use declab_pmr::dmr::receiver::RATE;
+use declab_pmr::dmr::receiver::{RATE, SNR_GATE_DB};
 use declab_pmr::dmr::{Event, Receiver, Source};
 use declab_pmr::fsk4::Detector;
 use declab_pmr::vocoder::ambe2::{self, FrameKind};
@@ -64,6 +64,15 @@ impl DecoderFactory for Factory {
 
     fn default_scope(&self) -> &'static str {
         "Symbols"
+    }
+
+    #[cfg(feature = "ui")]
+    fn panel(&self) -> Option<Box<dyn declab_api::Panel>> {
+        Some(Box::new(GatePanel {
+            gate_db: SNR_GATE_DB,
+            noise_max: 3.6,
+            real_median: 13.0,
+        }))
     }
 }
 
@@ -418,7 +427,18 @@ impl Dmr {
                 pair("CSBKs", format!("{} ({} CRC fails)", st.csbks, st.crc_fail)),
                 pair("LRRP locations", self.locations.to_string()),
                 pair("bursts", format!("{} ({} bad)", st.bursts, st.bursts_bad)),
-                pair("sync", format!("{:.2}", st.sync_quality)),
+                pair(
+                    "sync",
+                    format!(
+                        "{:.2} ({:.0} dB)",
+                        st.sync_quality,
+                        st.sync_snr_db.max(-99.0)
+                    ),
+                ),
+                pair(
+                    "SNR gate",
+                    format!("{:.0} dB ({} turned away)", self.rx.snr_gate_db, st.gated),
+                ),
                 pair(
                     "playing",
                     match self.playing {
@@ -435,6 +455,15 @@ impl Dmr {
 }
 
 impl Decoder for Dmr {
+    fn command(&mut self, cmd: declab_api::Command, out: &mut Sink) {
+        if let declab_api::Command::Set { key, value } = cmd {
+            match (key.as_str(), value.parse::<f32>()) {
+                ("snr_gate", Ok(db)) => self.rx.snr_gate_db = db.clamp(0.0, 20.0),
+                _ => out.log(format!("dmr: no setting {key:?} = {value:?}")),
+            }
+        }
+    }
+
     fn process(&mut self, block: &Block<'_>, out: &mut Sink) {
         self.rx.process(block.iq, &mut self.events);
         self.now_s = (block.first_sample + block.iq.len() as u64) as f64 / block.tuning.sample_rate;
@@ -451,6 +480,59 @@ impl Decoder for Dmr {
         self.calls = [None, None];
         self.playing = None;
         self.sym_hist.clear();
+    }
+}
+
+#[cfg(feature = "ui")]
+pub use panel::GatePanel;
+
+/// The settings panel (see `declab_api::Panel`): the SNR gate, shared by
+/// the digital voice modes, each with its own measured figures.
+#[cfg(feature = "ui")]
+mod panel {
+    use declab_api::{Command, Panel};
+    use egui::Ui;
+
+    pub struct GatePanel {
+        pub gate_db: f32,
+        /// The best fit noise made, and the median of real signals near the
+        /// sensitivity limit (the mode's measurements, for the help text).
+        pub noise_max: f32,
+        pub real_median: f32,
+    }
+
+    impl Panel for GatePanel {
+        fn settings(&self) -> Vec<Command> {
+            vec![Command::Set {
+                key: "snr_gate".into(),
+                value: format!("{:.0}", self.gate_db),
+            }]
+        }
+
+        fn restore(&mut self, key: &str, value: &str) {
+            if let ("snr_gate", Ok(db)) = (key, value.parse::<f32>()) {
+                self.gate_db = db.clamp(0.0, 20.0);
+            }
+        }
+
+        fn ui(&mut self, ui: &mut Ui, commands: &mut Vec<Command>) {
+            let r = ui.add(
+                egui::Slider::new(&mut self.gate_db, 0.0..=20.0)
+                    .step_by(1.0)
+                    .text("SNR gate, dB"),
+            );
+            if r.changed() {
+                commands.push(Command::Set {
+                    key: "snr_gate".into(),
+                    value: format!("{:.0}", self.gate_db),
+                });
+            }
+            ui.label(
+                format!(
+                "A sync whose own eye SNR is below this is not believed. Noise fitted at most                  {:.1} dB; real signals at the sensitivity limit fit about {:.0} dB. Raise it if                  noise still triggers; lower it for the weakest signals.",
+                self.noise_max, self.real_median
+            ));
+        }
     }
 }
 

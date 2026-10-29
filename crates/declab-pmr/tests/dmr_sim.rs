@@ -126,7 +126,11 @@ fn decodes_lrrp_in_both_data_formats() {
     for chunk in iq.chunks(2400) {
         rx.process(chunk, &mut ev);
     }
-    assert!((rx.stats.offset_hz - 400.0).abs() < 60.0, "offset {}", rx.stats.offset_hz);
+    assert!(
+        (rx.stats.offset_hz - 400.0).abs() < 60.0,
+        "offset {}",
+        rx.stats.offset_hz
+    );
     let packets: Vec<_> = ev
         .iter()
         .filter_map(|e| match e {
@@ -159,8 +163,36 @@ fn does_not_lock_on_noise() {
         rx.process(chunk, &mut ev);
         locked += usize::from(rx.locked().is_some());
     }
-    assert!(locked < 5, "locked {locked} of 200 blocks on noise");
-    assert!(rx.stats.offset_hz.abs() < 1.0, "AFC wandered to {} Hz", rx.stats.offset_hz);
+    assert_eq!(locked, 0, "locked {locked} of 200 blocks on noise");
+    assert!(ev.is_empty(), "events from noise: {ev:?}");
+    assert!(
+        rx.stats.offset_hz.abs() < 1.0,
+        "AFC wandered to {} Hz",
+        rx.stats.offset_hz
+    );
+}
+
+#[test]
+fn lets_go_when_the_carrier_stops() {
+    let (bits, _, _, _, frames) = site();
+    let mut iq = sim::modulate(&bits, RATE, 0.05);
+    // The transmitter stops dead; 10 s of the receiver's own noise follow.
+    iq.extend(std::iter::repeat_n(
+        declab_pmr::fsk4::Iq::new(0.0, 0.0),
+        24_000 * 10,
+    ));
+    sim::add_noise(&mut iq, RATE, 10.0, 300.0, 5);
+    let mut rx = Receiver::new(Detector::Discriminator);
+    let mut ev = Vec::new();
+    for chunk in iq.chunks(2400) {
+        rx.process(chunk, &mut ev);
+    }
+    assert_eq!(rx.locked(), None, "still locked after 10 s of noise");
+    let voice = ev
+        .iter()
+        .filter(|e| matches!(e, Event::Voice { .. }))
+        .count();
+    assert_eq!(voice as u32 * 3, frames, "voice bursts made up from noise");
 }
 
 #[test]

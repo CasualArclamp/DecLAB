@@ -127,7 +127,8 @@ DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
 | M5 | DVB-RCS2/TDMA return burst analyser | DecSAT's inroute captures decode |
 | M6 | Release: CI, portable exe, README | v0.1.0 |
 | V1 | RTL-SDR source; DMR Tier I/II/III + packet data + LRRP (`declab-pmr`, `dmr` plug-in), weak-signal receiver | ✅ 2026-10-29 in simulation only: no real DMR capture yet. AMBE+2 vocoder (port of mbelib) plays 2026-10-29 |
-| V2–V4 | NXDN, then P25, then TETRA, on the same front end where they can | |
+| V2 | NXDN48 conventional voice (`nxdn` plug-in), SNR gate in DMR and NXDN | ✅ 2026-10-29 in simulation only; NXDN trunking (CAC), data calls and NXDN96 not yet |
+| V3–V4 | P25, then TETRA | |
 | later | DLL plug-ins; DVB-C (port of `Documents\DecSAT\dvbc_decode.py`); modulators |
 
 ## 4. Notes from M1a (2026-10-27)
@@ -484,6 +485,20 @@ TS2) at falling C/N, with C/N measured in 12.5 kHz.
   only counts if its BPTC decodes, its CRC passes, or its AMBE Golay
   corrections are few. Before this fix the receiver held "lock" on noise
   and the AFC wandered. The test `does_not_lock_on_noise` guards it.
+- **SNR gate** (asked for 2026-10-29: "no false triggers on noise"). The
+  level fit on a SYNC's 24 known symbols gives that SYNC's own eye SNR.
+  - Measured: over 120 s of pure noise, 130 SYNC candidates turned up and
+    the best fitted at 3.6 dB (median −0.2). Real SYNCs at 5 dB C/N (the
+    sensitivity limit) have a median of 13 dB, 95 % above 3.2 dB.
+  - So a SYNC below **6 dB** is not believed when acquiring, and a locked
+    channel stops decoding when its smoothed eye falls below 0 dB (6 dB of
+    margin, so a fade does not cut a call).
+  - Sensitivity is unchanged within run-to-run noise. Tests: 20 s of
+    noise gives no lock and no events (`does_not_lock_on_noise`), and after
+    the carrier stops the receiver lets go and makes up no voice
+    (`lets_go_when_the_carrier_stops`).
+  - The DMR settings panel has a slider (0–20 dB); the card shows how many
+    SYNCs the gate turned away.
 - **Results** (discriminator, 800 Hz offset, 4 runs): voice frames (the
   protected bits) 100 % to 7 dB, 96 % at 5 dB, 91 % at 4 dB; CSBKs 98 % at
   7 dB, 88 % at 5 dB. The first version managed 41 % voice at 5 dB.
@@ -501,4 +516,48 @@ TS2) at falling C/N, with C/N measured in 12.5 kHz.
 - **Simulation only:** everything is tested against the built-in modulator,
   which was written from the same reading of the spec. A real capture (the
   RTL-SDR or the Airspy on a DMR repeater or hotspot) is the next check.
+
+## 15. NXDN48 (2026-10-29)
+
+- **Sources.** The NXDN Forum's specifications sit behind a registration
+  form (personal details for each download), so they were not fetched.
+  Layouts follow MMDVMHost (GPL-2.0-or-later, credited): it builds and reads
+  real NXDN frames for hotspots and repeaters. DSD (ISC) is used for the
+  voice frames: NXDN's AMBE+2 interleave is DMR's very table.
+- **Frame:** 384 bits, 80 ms. FSW 0xCDF59 (20 bits), LICH (8 bits, each the
+  first bit of a ±3 dibit), SACCH (26 bits + CRC-6, K=5 rate ½,
+  punctured, 12×5 interleave), then four voice frames or FACCH1 (80 bits +
+  CRC-12, punctured, 16×9 interleave) in either half. Everything after the
+  FSW is scrambled; the descrambler flips the LLRs.
+- **`crates/declab-pmr`:**
+  - `conv.rs`: the K=5 code, decoded by a soft Viterbi (punctured bits as
+    LLR 0; MMDVMHost slices first).
+  - `nxdn/`: receiver, frames, simulator.
+  - `fsk4`: now holds the shared 4FSK modulator and noise.
+- **Plug-in `nxdn`:** calls from FACCH1 set-up and release, plus the SACCH
+  superframe (so a late entry still learns who is talking); RAN; voice
+  through the vocoder; the same SNR-gate panel as DMR.
+- **Sweep** (`cargo run --release -p declab-pmr --example nxdn_sweep -- 4
+  800`, C/N in 6.25 kHz):
+  - The pre-detection low-pass is best at 2 kHz (1.5 and 2.6 kHz were
+    worse).
+  - Voice frames (protected bits): 100 % to 8 dB, 98 % at 6 dB, 95 % at
+    5 dB, 84 % at 4 dB.
+  - FACCH1: 100 % to 7 dB, 96 % at 5 dB.
+  - CPU: about 0.6 % of a core, decoding or hunting.
+- **SNR gate (NXDN):** the FSW is only 10 symbols, so the gate's fit adds
+  the 8 LICH symbols (±3, sign decided). That flatters noise a little.
+  - Over 120 s of noise, the best of ~1100 candidates fitted at 7.4 dB.
+    Fitting the FSW alone was worse (11.6 dB).
+  - Hence an 8 dB gate. With it, 120 s of noise gave 0 events and never
+    locked. Real frames near the limit fit at a median of 11–14 dB.
+- **Two fixes that also went into DMR:**
+  - **Hunt through a wider filter** (3 kHz NXDN, 5.5 kHz DMR) and narrow
+    it on lock. Through the narrow one, an off-tune signal's first frames
+    fitted badly and the gate turned them away (FACCH1 at 14 dB C/N was
+    only 88 %).
+  - **AFC steps shift the already-demodulated samples** by the same amount.
+    A discriminator's output only offsets with frequency, so this is exact.
+    Before, a frame straddling the lock-time jump decoded badly. It also
+    halved the residual BER of strong signals.
 

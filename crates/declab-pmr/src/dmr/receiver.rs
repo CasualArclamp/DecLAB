@@ -43,6 +43,19 @@ const SYNC_END: f64 = 77.0;
 
 /// The pre-detection low-pass's cut-off (the sweep's best).
 pub const CHANNEL_HZ: f64 = 4_000.0;
+/// The low-pass while hunting, before the AFC knows the offset (see the
+/// NXDN receiver, where a narrow one turned an off-tune signal's first
+/// frames away at the SNR gate).
+const HUNT_CHANNEL_HZ: f64 = 5_500.0;
+/// The SNR gate's default, dB of eye SNR. Measured (2026-10-29): over
+/// 120 s of noise the best SYNC candidate fitted at 3.6 dB (median −0.2);
+/// real SYNCs at 5 dB C/N, the sensitivity limit, have a median of 13 dB
+/// and 95 % above 3.2 dB. Acquisition needs only one of many SYNCs, so 6 dB
+/// costs it little and keeps noise out.
+pub const SNR_GATE_DB: f32 = 6.0;
+/// Once locked, the smoothed eye may sag this far below the gate before
+/// bursts are refused (a fade should not drop a call at once).
+const TRACK_MARGIN_DB: f32 = 6.0;
 /// How much of each burst's measured offset the AFC takes.
 const AFC_GAIN: f32 = 0.3;
 /// Samples demodulated before the receiver looks for bursts again (20 ms).
@@ -146,6 +159,10 @@ pub struct Stats {
     /// The frequency offset seen, Hz.
     pub offset_hz: f32,
     pub colour_code: Option<u8>,
+    /// The eye SNR of the latest SYNC alone, dB.
+    pub sync_snr_db: f32,
+    /// SYNCs and bursts the SNR gate turned away.
+    pub gated: u64,
     /// What the receiver is locked to.
     pub source: Option<Source>,
 }
@@ -173,6 +190,10 @@ struct SlotState {
 }
 
 pub struct Receiver {
+    /// The SNR gate, dB of eye SNR: a SYNC whose own fit is worse is not
+    /// believed, and a locked channel whose eye falls this far (less
+    /// `TRACK_MARGIN_DB`) is let go. [`SNR_GATE_DB`] by default.
+    pub snr_gate_db: f32,
     chan_hz: f64,
     demod: Fsk4Demod,
     /// Matched-filter output; `f[0]` is sample `base`.
@@ -209,8 +230,16 @@ impl Receiver {
     /// With the pre-detection low-pass at `chan_hz` (for the sweep).
     pub fn with_channel(detector: Detector, chan_hz: f64) -> Receiver {
         Receiver {
+            snr_gate_db: SNR_GATE_DB,
             chan_hz,
-            demod: Fsk4Demod::new(RATE, SYMBOL_RATE, OUTER_DEV_HZ, ALPHA, chan_hz, detector),
+            demod: Fsk4Demod::new(
+                RATE,
+                SYMBOL_RATE,
+                OUTER_DEV_HZ,
+                ALPHA,
+                HUNT_CHANNEL_HZ.max(chan_hz),
+                detector,
+            ),
             f: Vec::with_capacity(16_384),
             base: 0,
             scan: (23 * SPS) as u64,
@@ -245,8 +274,10 @@ impl Receiver {
 
     pub fn reset(&mut self) {
         let tap = self.tap.is_some();
+        let gate = self.snr_gate_db;
         let stats = std::mem::take(&mut self.stats);
         *self = Receiver::with_channel(self.demod.detector(), self.chan_hz);
+        self.snr_gate_db = gate;
         self.stats = Stats {
             bursts: stats.bursts,
             ..Stats::default()
@@ -397,6 +428,8 @@ impl Receiver {
             _ => 0,
         };
         if self.decode_burst(tau, Some((source, voice, rho)), source, slot) {
+            self.afc_step(self.dc);
+            self.demod.set_channel(self.chan_hz);
             self.track = Some(Track {
                 tau,
                 source,
@@ -466,6 +499,7 @@ impl Receiver {
             self.track = None;
             self.stats.source = None;
             self.demod.set_afc(0.0);
+            self.demod.set_channel(HUNT_CHANNEL_HZ.max(self.chan_hz));
             self.dc = 0.0;
             self.slots = Default::default();
             self.scan = tau as u64;
@@ -478,6 +512,21 @@ impl Receiver {
             });
         }
         true
+    }
+
+    /// Move the AFC by `delta` symbol units (the offset the level fit
+    /// sees). The samples already demodulated were made with the old
+    /// setting; in a discriminator's output a frequency shift is only an
+    /// offset, so they are shifted to match, and nothing straddles the
+    /// change (a frame half before and half after a jump decoded badly).
+    fn afc_step(&mut self, delta: f32) {
+        let u = self.demod.units_per_hz();
+        self.demod
+            .set_afc(self.demod.afc_hz() + f64::from(delta / u));
+        for x in &mut self.f {
+            *x -= delta;
+        }
+        self.dc -= delta;
     }
 
     /// The timing correction the eye asks for: energy of the 132 symbol
@@ -502,7 +551,9 @@ impl Receiver {
     }
 
     /// Fit `x = gain·s + dc` to known symbols; update the levels and noise.
-    fn fit(&mut self, xs: &[f32], ss: &[f32], weight: f32) {
+    /// Returns this fit's own eye SNR, dB (mean symbol energy 5 over the
+    /// residual), or `None` if nothing could be fitted.
+    fn fit(&mut self, xs: &[f32], ss: &[f32], weight: f32) -> Option<f32> {
         let n = xs.len() as f32;
         let (sx, ss_, sxx, sss, sxs) = xs
             .iter()
@@ -512,11 +563,11 @@ impl Receiver {
             });
         let den = n * sss - ss_ * ss_;
         if den.abs() < 1e-6 {
-            return;
+            return None;
         }
         let g = (n * sxs - sx * ss_) / den;
         if g <= 0.05 {
-            return;
+            return None;
         }
         let dc = (sx - g * ss_) / n;
         // Residual variance in symbol units².
@@ -527,6 +578,7 @@ impl Receiver {
         self.gain += weight * (g - self.gain);
         self.dc += weight * (dc - self.dc);
         self.noise += weight * (nv - self.noise);
+        Some(10.0 * (5.0 / nv).log10())
     }
 
     /// The 2 soft bits of symbol value `y` (symbol units).
@@ -559,10 +611,29 @@ impl Receiver {
             let p = VOICE_SYNC.iter().position(|(x, _)| *x == s).unwrap_or(0);
             let sign = if voice { 1.0 } else { -1.0 };
             let ss: Vec<f32> = self.syncs[p].iter().map(|v| v * sign).collect();
-            let w = if self.track.is_none() { 1.0 } else { 0.5 };
-            self.fit(&raw[54..78], &ss, w);
+            let acquiring = self.track.is_none();
+            let w = if acquiring { 1.0 } else { 0.5 };
+            let snr = self.fit(&raw[54..78], &ss, w).unwrap_or(f32::MIN);
             self.stats.sync_quality = rho;
+            self.stats.sync_snr_db = snr;
             self.stats.syncs += 1;
+            // The SNR gate: a SYNC found in noise fits its 24 known symbols
+            // badly, so its own eye SNR is low; a real one near the
+            // sensitivity limit still fits well (see `SNR_GATE_DB`).
+            if acquiring && snr < self.snr_gate_db {
+                self.stats.gated += 1;
+                return false;
+            }
+        }
+        // While tracking, a channel whose eye has closed below the gate is
+        // not decoded: the transmitter has gone, or noise has taken over.
+        if self.track.is_some()
+            && 10.0 * (5.0 / self.noise).log10() < self.snr_gate_db - TRACK_MARGIN_DB
+        {
+            self.stats.gated += 1;
+            self.stats.bursts += 1;
+            self.stats.bursts_bad += 1;
+            return false;
         }
         let y: Vec<f32> = raw.iter().map(|x| (x - self.dc) / self.gain).collect();
         let mut llr = vec![0f32; 264];
@@ -622,14 +693,9 @@ impl Receiver {
                 self.fit(&raw, &ss, 0.2);
             }
             self.stats.eye_snr_db = 10.0 * (5.0 / self.noise).log10();
-            // AFC: move the mixer part of the way to the offset seen, and
-            // take the same off the level fit (samples still to come shift
-            // with it; those already demodulated keep a little of the old
-            // offset, which the small gain rides out).
+            // AFC: move the mixer part of the way to the offset seen.
+            self.afc_step(AFC_GAIN * self.dc);
             let u = self.demod.units_per_hz();
-            let step = AFC_GAIN * self.dc / u;
-            self.demod.set_afc(self.demod.afc_hz() + f64::from(step));
-            self.dc -= AFC_GAIN * self.dc;
             self.stats.offset_hz = self.demod.afc_hz() as f32 + self.dc / u;
             if let Some(tap) = &mut self.tap {
                 tap.extend_from_slice(&y);

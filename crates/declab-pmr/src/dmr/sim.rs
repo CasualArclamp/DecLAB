@@ -12,7 +12,7 @@ use super::{
     mask,
 };
 use crate::fec;
-use crate::fsk4::{Iq, rrc};
+use crate::fsk4::Iq;
 
 fn sync_of(table: &[(Source, u64); 4], s: Source) -> u64 {
     table
@@ -325,51 +325,17 @@ impl Repeater {
 /// 4FSK from bits (two a symbol, clause 10.2) at `rate`, unit amplitude,
 /// with `pad_s` of unmodulated carrier either side.
 pub fn modulate(bits: &[u8], rate: f64, pad_s: f64) -> Vec<Iq> {
-    let sps = (rate / SYMBOL_RATE).round() as usize;
-    let h = rrc(ALPHA, sps, 8);
-    let n_sym = bits.len() / 2;
-    let pad = (pad_s * rate) as usize;
-    let mut impulses = vec![0f32; pad + n_sym * sps + h.len() + pad];
-    for s in 0..n_sym {
-        let d = (bits[2 * s] << 1) | bits[2 * s + 1];
-        impulses[pad + s * sps] = super::symbol(d);
-    }
-    // The pulse shaping, then deviation: an RRC summed to 1 passes a symbol
-    // held over many symbols at its level, so scale the impulses by sps.
-    let k = (OUTER_DEV_HZ / 3.0) as f32 * sps as f32;
-    let mut phase = 0f64;
-    let mut out = Vec::with_capacity(impulses.len());
-    for i in 0..impulses.len() {
-        let mut f = 0f32;
-        for (j, &t) in h.iter().enumerate() {
-            if i >= j {
-                f += impulses[i - j] * t;
-            }
-        }
-        phase += 2.0 * std::f64::consts::PI * f64::from(f * k) / rate;
-        out.push(Iq::from_polar(1.0, phase as f32));
-    }
-    out
+    let symbols: Vec<f32> = bits
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|d| super::symbol((d[0] << 1) | d[1]))
+        .collect();
+    crate::fsk4::modulate(&symbols, rate, SYMBOL_RATE, OUTER_DEV_HZ, ALPHA, pad_s)
 }
 
 /// Add white Gaussian noise for a carrier-to-noise ratio `cn_db` measured in
 /// a 12.5 kHz channel (the carrier has unit power), and a frequency offset.
 pub fn add_noise(iq: &mut [Iq], rate: f64, cn_db: f64, offset_hz: f64, seed: u64) {
-    let n_power = rate / 12_500.0 * 10f64.powf(-cn_db / 10.0);
-    let sigma = (n_power / 2.0).sqrt() as f32;
-    let mut s = seed | 1;
-    let mut uniform = move || {
-        s ^= s << 13;
-        s ^= s >> 7;
-        s ^= s << 17;
-        ((s >> 11) as f64 + 0.5) / (1u64 << 53) as f64
-    };
-    let w = 2.0 * std::f64::consts::PI * offset_hz / rate;
-    for (i, x) in iq.iter_mut().enumerate() {
-        let (u1, u2) = (uniform(), uniform());
-        let r = (-2.0 * u1.ln()).sqrt();
-        let a = 2.0 * std::f64::consts::PI * u2;
-        let rot = Iq::from_polar(1.0, (w * i as f64) as f32);
-        *x = *x * rot + Iq::new((r * a.cos()) as f32 * sigma, (r * a.sin()) as f32 * sigma);
-    }
+    crate::fsk4::add_noise(iq, rate, cn_db, 12_500.0, offset_hz, seed);
 }

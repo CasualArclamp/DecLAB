@@ -176,6 +176,13 @@ impl Fsk4Demod {
         self.afc_step * self.rate / (2.0 * std::f64::consts::PI)
     }
 
+    /// Change the channel low-pass's cut-off. Its length (and so its delay)
+    /// stays the same, so the timing of what is already tracked holds.
+    pub fn set_channel(&mut self, chan_hz: f64) {
+        let n = self.channel.taps.len();
+        self.channel.taps = lowpass(chan_hz, self.rate, n);
+    }
+
     /// Symbol units per hertz of frequency.
     pub fn units_per_hz(&self) -> f32 {
         self.scale * (2.0 * std::f64::consts::PI / self.rate) as f32
@@ -208,5 +215,63 @@ impl Fsk4Demod {
         self.prev = Iq::new(0.0, 0.0);
         self.afc_step = 0.0;
         self.afc_phase = 0.0;
+    }
+}
+
+/// 4FSK from symbols (±1, ±3) at `rate`, unit amplitude: impulses through
+/// the transmit RRC, then deviation (outer symbol at `outer_dev_hz`), with
+/// `pad_s` of unmodulated carrier either side. For simulators and tests.
+pub fn modulate(
+    symbols: &[f32],
+    rate: f64,
+    symbol_rate: f64,
+    outer_dev_hz: f64,
+    alpha: f64,
+    pad_s: f64,
+) -> Vec<Iq> {
+    let sps = (rate / symbol_rate).round() as usize;
+    let h = rrc(alpha, sps, 8);
+    let pad = (pad_s * rate) as usize;
+    let mut impulses = vec![0f32; pad + symbols.len() * sps + h.len() + pad];
+    for (s, &v) in symbols.iter().enumerate() {
+        impulses[pad + s * sps] = v;
+    }
+    // An RRC summed to 1 passes a symbol held over many symbols at its
+    // level only when the impulses are scaled by sps.
+    let k = (outer_dev_hz / 3.0) as f32 * sps as f32;
+    let mut phase = 0f64;
+    let mut out = Vec::with_capacity(impulses.len());
+    for i in 0..impulses.len() {
+        let mut f = 0f32;
+        for (j, &t) in h.iter().enumerate() {
+            if i >= j {
+                f += impulses[i - j] * t;
+            }
+        }
+        phase += 2.0 * std::f64::consts::PI * f64::from(f * k) / rate;
+        out.push(Iq::from_polar(1.0, phase as f32));
+    }
+    out
+}
+
+/// Add white Gaussian noise for a carrier-to-noise ratio `cn_db` measured in
+/// `ref_bw_hz` (the carrier has unit power), and a frequency offset.
+pub fn add_noise(iq: &mut [Iq], rate: f64, cn_db: f64, ref_bw_hz: f64, offset_hz: f64, seed: u64) {
+    let n_power = rate / ref_bw_hz * 10f64.powf(-cn_db / 10.0);
+    let sigma = (n_power / 2.0).sqrt() as f32;
+    let mut s = seed | 1;
+    let mut uniform = move || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        ((s >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+    };
+    let w = 2.0 * std::f64::consts::PI * offset_hz / rate;
+    for (i, x) in iq.iter_mut().enumerate() {
+        let (u1, u2) = (uniform(), uniform());
+        let r = (-2.0 * u1.ln()).sqrt();
+        let a = 2.0 * std::f64::consts::PI * u2;
+        let rot = Iq::from_polar(1.0, (w * i as f64) as f32);
+        *x = *x * rot + Iq::new((r * a.cos()) as f32 * sigma, (r * a.sin()) as f32 * sigma);
     }
 }

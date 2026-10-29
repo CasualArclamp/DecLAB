@@ -23,6 +23,9 @@ cargo run -p declab-gui --example make_icon   # redraws apps/declab-gui/assets/i
 cargo run --release -p declab-pmr --example dmr_make -- out/sim_dmr.cf32 15   # simulated DMR repeater: call, Tier III CSBKs, LRRP
 cargo run --release -p declab-gui -- out/sim_dmr.cf32 --rate 48000 --decoder dmr --screenshot out/x.png --after 8
 cargo run --release -p declab-pmr --example dmr_sweep -- 4 800   # DMR sensitivity vs C/N (and CPU)
+cargo run --release -p declab-pmr --example nxdn_make -- out/sim_nxdn.cf32 12   # simulated NXDN48 calls
+cargo run --release -p declab-gui -- out/sim_nxdn.cf32 --rate 48000 --decoder nxdn --screenshot out/x.png --after 6
+cargo run --release -p declab-pmr --example nxdn_sweep -- 4 800   # NXDN sensitivity, SNR gate on noise, CPU
 cargo run --release -p declab-cli -- run dmr --radio rtlsdr --freq 439.5M --gain 40.2 --card
 cargo run --release -p declab-cli -- list
 cargo run --release -p declab-cli -- selftest level
