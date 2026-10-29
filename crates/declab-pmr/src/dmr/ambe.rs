@@ -44,6 +44,9 @@ pub struct AmbeFrame {
     pub bits: [u8; 49],
     /// Bits C0 and C1's Golay codes corrected (of 46).
     pub errors: u32,
+    /// Of those, the data bits (of 24): mbelib's `errs2`, which decides
+    /// when the vocoder repeats the last frame instead.
+    pub data_errors: u32,
 }
 
 /// The C1 whitening (mbelib `mbe_demodulateAmbe3600x2450Data`): 23 bits
@@ -99,6 +102,7 @@ pub fn decode(llr: &[f32; 72]) -> AmbeFrame {
     AmbeFrame {
         bits,
         errors: (c0 ^ h0).count_ones() + (c1 ^ h1).count_ones(),
+        data_errors: ((c0 ^ h0) >> 11).count_ones() + ((c1 ^ h1) >> 11).count_ones(),
     }
 }
 

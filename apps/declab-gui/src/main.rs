@@ -637,7 +637,7 @@ impl App {
     /// The decoder makes its own sound (the analog modes, digital radio): the
     /// top bar shows the volume. TV sound has the player window's slider.
     fn makes_sound(&self) -> bool {
-        matches!(self.factory().info().family, Family::Analog | Family::Radio)
+        matches!(self.factory().info().family, Family::Analog | Family::Radio | Family::Voice)
     }
 
     /// The volume slider and mute button.

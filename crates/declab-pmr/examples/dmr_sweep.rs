@@ -92,6 +92,26 @@ fn main() {
         "CPU hunting on noise: {:.2} % of one core",
         100.0 * t.elapsed().as_secs_f64() / secs
     );
+    // The vocoder: 50 s of frames (fastest of three), with the upsampler.
+    let vocoder_s = (0..3)
+        .map(|_| {
+            let mut dec = declab_pmr::vocoder::Ambe2Decoder::new();
+            let mut up = declab_pmr::vocoder::Upsample6::new();
+            let mut pcm = [0f32; 160];
+            let mut out = Vec::with_capacity(960);
+            let t = std::time::Instant::now();
+            for n in 0..2500 {
+                dec.decode(&sim::test_frame(n / 4), 0, &mut pcm);
+                out.clear();
+                up.process(&pcm, &mut out);
+            }
+            t.elapsed().as_secs_f64()
+        })
+        .fold(f64::MAX, f64::min);
+    println!(
+        "CPU vocoder (one slot speaking): {:.2} % of one core",
+        100.0 * vocoder_s / 50.0
+    );
     println!(
         "{seeds} runs a point, {frames} voice frames and {csbks_sent} CSBKs a run, {offset} Hz offset"
     );

@@ -5,15 +5,20 @@
 //! the voice channel's bit error rate), the Tier III control channel
 //! (Aloha, grants, broadcasts, clears) and the repeater's Short LC, on the
 //! card and in the log, and data packets, with Motorola LRRP location
-//! reports decoded to latitude and longitude. Voice is decoded to AMBE+2 parameter frames; there
-//! is no AMBE+2 synthesiser yet, so there is no sound.
+//! reports decoded to latitude and longitude.
+//!
+//! Sound: one slot at a time, the first to carry voice, held until its call
+//! ends. AMBE+2 frames go through the vocoder (ported from mbelib) to 8 kHz,
+//! then six times up to 48 kHz. Calls marked private (encrypted) are not
+//! played: they would only be noise.
 //!
 //! Scope "Symbols": the soft symbols of the latest bursts, four bands.
 
 use std::collections::VecDeque;
 
 use declab_api::{
-    Block, Card, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq, Lock, Sink,
+    Audio, Block, Card, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq, Lock,
+    Sink,
 };
 use declab_pmr::dmr::data::Packet;
 use declab_pmr::dmr::lrrp::{self, Lrrp};
@@ -21,6 +26,8 @@ use declab_pmr::dmr::pdu::{Csbk, FullLc, ShortLc};
 use declab_pmr::dmr::receiver::RATE;
 use declab_pmr::dmr::{Event, Receiver, Source};
 use declab_pmr::fsk4::Detector;
+use declab_pmr::vocoder::ambe2::{self, FrameKind};
+use declab_pmr::vocoder::{Ambe2Decoder, Upsample6};
 
 /// Lines kept on the card.
 const RECENT: usize = 8;
@@ -83,7 +90,18 @@ struct Dmr {
     now_s: f64,
     since_report: usize,
     sym_hist: VecDeque<f32>,
+    /// One vocoder per slot (each keeps its own frame history).
+    vocoders: [Ambe2Decoder; 2],
+    up: Upsample6,
+    /// The slot being played, and when its last voice came.
+    playing: Option<(u8, f64)>,
+    frames_out: u64,
+    pcm8: Vec<f32>,
+    pcm48: Vec<f32>,
 }
+
+/// Silence after which the slot being played lets go of the speaker.
+const PLAY_HOLD_S: f64 = 1.0;
 
 /// A call in a few characters, for the headline: "TG 2350 ← 2341234".
 fn short(lc: &FullLc) -> String {
@@ -113,7 +131,51 @@ impl Dmr {
             now_s: 0.0,
             since_report: 0,
             sym_hist: VecDeque::new(),
+            vocoders: [Ambe2Decoder::new(), Ambe2Decoder::new()],
+            up: Upsample6::new(),
+            playing: None,
+            frames_out: 0,
+            pcm8: Vec::with_capacity(3 * ambe2::FRAME),
+            pcm48: Vec::with_capacity(18 * ambe2::FRAME),
         }
+    }
+
+    /// One voice burst's three frames: to the speaker if this slot is the
+    /// one being played (or nothing is).
+    fn play(&mut self, slot: u8, frames: &[declab_pmr::dmr::ambe::AmbeFrame; 3], out: &mut Sink) {
+        let s = slot as usize;
+        let encrypted = self.calls[s]
+            .as_ref()
+            .is_some_and(|c| c.lc.call().is_some_and(|x| x.3.privacy()));
+        match self.playing {
+            Some((p, t)) if p != slot && self.now_s - t < PLAY_HOLD_S => return,
+            Some((p, _)) if p == slot => {}
+            _ => {
+                self.vocoders[s].reset();
+                self.up.reset();
+            }
+        }
+        if encrypted {
+            return;
+        }
+        self.playing = Some((slot, self.now_s));
+        self.pcm8.clear();
+        let mut buf = [0f32; ambe2::FRAME];
+        for f in frames {
+            let kind = self.vocoders[s].decode(&f.bits, f.data_errors, &mut buf);
+            if kind != FrameKind::Erasure {
+                self.frames_out += 1;
+            }
+            self.pcm8.extend_from_slice(&buf);
+        }
+        self.pcm48.clear();
+        self.up.process(&self.pcm8, &mut self.pcm48);
+        out.audio.push(Audio {
+            service: 0,
+            sample_rate: 48_000,
+            channels: 1,
+            samples: self.pcm48.clone(),
+        });
     }
 
     fn note(&mut self, label: String, value: String, out: &mut Sink) {
@@ -145,6 +207,9 @@ impl Dmr {
     }
 
     fn end_call(&mut self, slot: u8, out: &mut Sink) {
+        if self.playing.is_some_and(|(p, _)| p == slot) {
+            self.playing = None;
+        }
         if let Some(c) = self.calls[slot as usize].take() {
             let ber = 100.0 * c.errors as f64 / (c.frames * 46).max(1) as f64;
             out.log(format!(
@@ -231,6 +296,7 @@ impl Dmr {
                 }
                 Event::Terminator { slot, .. } => self.end_call(slot, out),
                 Event::Voice { slot, frames, .. } => {
+                    self.play(slot, &frames, out);
                     if let Some(c) = &mut self.calls[slot as usize] {
                         c.frames += 3;
                         c.errors += frames.iter().map(|f| u64::from(f.errors)).sum::<u64>();
@@ -353,7 +419,15 @@ impl Dmr {
                 pair("LRRP locations", self.locations.to_string()),
                 pair("bursts", format!("{} ({} bad)", st.bursts, st.bursts_bad)),
                 pair("sync", format!("{:.2}", st.sync_quality)),
-                pair("voice out", "AMBE+2 frames (no vocoder yet)".into()),
+                pair(
+                    "playing",
+                    match self.playing {
+                        Some((p, _)) => {
+                            format!("{} ({} frames spoken)", slot_name(p), self.frames_out)
+                        }
+                        None => format!("– ({} frames spoken)", self.frames_out),
+                    },
+                ),
             ],
             text,
         });
@@ -375,6 +449,7 @@ impl Decoder for Dmr {
     fn reset(&mut self) {
         self.rx.reset();
         self.calls = [None, None];
+        self.playing = None;
         self.sym_hist.clear();
     }
 }
@@ -426,6 +501,7 @@ mod tests {
             generation: 0,
         };
         let mut card = None;
+        let mut sound = Vec::new();
         for (n, chunk) in iq.chunks(2_400).enumerate() {
             let block = Block {
                 iq: chunk,
@@ -438,6 +514,10 @@ mod tests {
             d.process(&block, &mut sink);
             log.append(&mut sink.log);
             card = sink.card.or(card);
+            for a in sink.audio {
+                assert_eq!((a.sample_rate, a.channels), (48_000, 1));
+                sound.extend(a.samples);
+            }
         }
         assert!(
             log.iter()
@@ -461,5 +541,9 @@ mod tests {
             "{log:#?}"
         );
         assert!(card.is_some());
+        // 18 voice frames of 20 ms, at 48 kHz, and not silent.
+        assert_eq!(sound.len(), 18 * 960);
+        assert!(sound.iter().all(|x| x.is_finite()));
+        assert!(sound.iter().any(|x| x.abs() > 1e-3));
     }
 }
