@@ -116,6 +116,12 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         // The decoder's transport stream (DVB-T/T2).
         host.write_ts(Some(PathBuf::from(path)))?;
     }
+    if let Some(path) = o.get("--wav") {
+        // The decoder's sound, as 16-bit PCM.
+        host.write_audio(Some(PathBuf::from(path)))?;
+    }
+    // A service by name, once the decoder lists it.
+    let mut want_service = o.get("--service").map(str::to_lowercase);
     if let Some(path) = o.get("--record") {
         // The raw samples, as they come from the source (format from the extension).
         host.record(Some(PathBuf::from(path)));
@@ -172,10 +178,12 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             println!("    text: {t}");
             last_text = t.clone();
         }
-        if let Some(sv) = v.services.first()
-            && !sv.name.is_empty()
+        if let Some(name) = &want_service
+            && let Some(sv) = v.services.iter().find(|s| s.name.to_lowercase().contains(name.as_str()))
         {
-            println!("    service: {}", sv.name);
+            println!("    selecting {} ({})", sv.name, sv.kind);
+            host.command(declab_api::Command::SelectService(sv.id));
+            want_service = None;
         }
         if !audio_said && let Some(a) = &v.audio {
             println!("    sound: {a}");
@@ -199,6 +207,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         p[0], p[1], p[2], p[3], p[4], v.cpu_percent
     );
     let wall = t0.elapsed().as_secs_f64();
+    host.write_audio(None)?;
     drop(host);
     println!("process CPU {:.0} % of one core on average over {wall:.1} s", 100.0 * cpu / wall.max(1e-3));
     Ok(())

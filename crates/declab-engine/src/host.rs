@@ -220,6 +220,8 @@ struct Shared {
     volume: AtomicU32,
     /// Where the decoder's transport stream is written, if anywhere.
     ts_file: Mutex<Option<std::io::BufWriter<std::fs::File>>>,
+    /// The decoder's sound to a WAV file (`Host::write_audio`).
+    wav_file: Mutex<Option<WavOut>>,
     running: AtomicBool,
     /// Blocks handed to the worker and not yet decoded.
     in_flight: AtomicUsize,
@@ -257,6 +259,7 @@ impl Host {
             handoff_dropped: Mutex::new(0),
             volume: AtomicU32::new(0.8f32.to_bits()),
             ts_file: Mutex::new(None),
+            wav_file: Mutex::new(None),
             running: AtomicBool::new(true),
             in_flight: AtomicUsize::new(0),
         });
@@ -359,6 +362,19 @@ impl Host {
     }
 
     /// Write the decoder's transport stream to `path` (a `.ts`), or stop.
+    /// Write the decoder's sound to a 16-bit WAV file (`None` closes it). A
+    /// change of rate or channels starts the file over.
+    pub fn write_audio(&self, path: Option<PathBuf>) -> std::io::Result<()> {
+        let mut f = self.shared.wav_file.lock().unwrap();
+        if let Some(old) = f.take() {
+            old.finish()?;
+        }
+        if let Some(p) = path {
+            *f = Some(WavOut { file: std::io::BufWriter::new(std::fs::File::create(p)?), shape: None, bytes: 0 });
+        }
+        Ok(())
+    }
+
     pub fn write_ts(&self, path: Option<PathBuf>) -> std::io::Result<()> {
         let mut f = self.shared.ts_file.lock().unwrap();
         if let Some(mut old) = f.take() {
@@ -867,7 +883,11 @@ fn worker_thread(
             // The sound thread opens the device; nothing here waits for it.
             let a = audio.get_or_insert_with(AudioOut::spawn);
             a.set_volume(f32::from_bits(sh.volume.load(Ordering::Relaxed)));
+            let mut wav = sh.wav_file.lock().unwrap();
             for chunk in sink.audio.drain(..) {
+                if let Some(w) = wav.as_mut() {
+                    w.push(chunk.sample_rate, chunk.channels, &chunk.samples);
+                }
                 a.push(chunk.sample_rate, chunk.channels, chunk.samples);
             }
         }
@@ -964,6 +984,69 @@ fn worker_thread(
     }
 }
 
+/// A WAV file being written: 16-bit PCM, its header's sizes filled in when
+/// it is finished.
+struct WavOut {
+    file: std::io::BufWriter<std::fs::File>,
+    /// Rate and channels, from the first chunk.
+    shape: Option<(u32, u16)>,
+    bytes: u32,
+}
+
+impl WavOut {
+    fn header(rate: u32, ch: u16, bytes: u32) -> Vec<u8> {
+        let mut h = Vec::with_capacity(44);
+        h.extend_from_slice(b"RIFF");
+        h.extend_from_slice(&(36 + bytes).to_le_bytes());
+        h.extend_from_slice(b"WAVEfmt ");
+        h.extend_from_slice(&16u32.to_le_bytes());
+        h.extend_from_slice(&1u16.to_le_bytes());
+        h.extend_from_slice(&ch.to_le_bytes());
+        h.extend_from_slice(&rate.to_le_bytes());
+        h.extend_from_slice(&(rate * u32::from(ch) * 2).to_le_bytes());
+        h.extend_from_slice(&(ch * 2).to_le_bytes());
+        h.extend_from_slice(&16u16.to_le_bytes());
+        h.extend_from_slice(b"data");
+        h.extend_from_slice(&bytes.to_le_bytes());
+        h
+    }
+
+    fn push(&mut self, rate: u32, ch: u16, samples: &[f32]) {
+        use std::io::Write;
+        if samples.is_empty() || rate == 0 {
+            return;
+        }
+        if self.shape != Some((rate, ch)) {
+            // The first sound, or another service's: the file starts over
+            // with this one (a service chosen after the first had played).
+            use std::io::{Seek, SeekFrom};
+            let _ = self.file.flush();
+            let f = self.file.get_mut();
+            let _ = f.set_len(0);
+            let _ = f.seek(SeekFrom::Start(0));
+            self.shape = Some((rate, ch));
+            self.bytes = 0;
+            let _ = self.file.write_all(&Self::header(rate, ch, 0));
+        }
+        for &x in samples {
+            let v = (x.clamp(-1.0, 1.0) * 32767.0) as i16;
+            let _ = self.file.write_all(&v.to_le_bytes());
+        }
+        self.bytes += 2 * samples.len() as u32;
+    }
+
+    fn finish(mut self) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        self.file.flush()?;
+        if let Some((rate, ch)) = self.shape {
+            let f = self.file.get_mut();
+            f.seek(SeekFrom::Start(0))?;
+            f.write_all(&Self::header(rate, ch, self.bytes))?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -989,3 +1072,4 @@ mod tests {
         assert_eq!(c.run(&input), &input[..]);
     }
 }
+

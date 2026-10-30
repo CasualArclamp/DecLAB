@@ -1,0 +1,13 @@
+# made by CasualArclamp
+[package]
+name = "decdab-codecs"
+description = "DecDAB audio codecs: HE-AAC v2 for DAB+ (libxaac) and MPEG-1/2 Layer II for DAB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decsat-xaac-sys = { path = "../decsat-xaac-sys" }
+thiserror.workspace = true

@@ -1,0 +1,3 @@
+[submodule "third_party/libxaac"]
+	path = third_party/libxaac
+	url = https://github.com/ittiam-systems/libxaac.git

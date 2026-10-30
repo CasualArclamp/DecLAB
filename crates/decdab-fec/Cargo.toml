@@ -1,0 +1,12 @@
+# made by CasualArclamp
+[package]
+name = "decdab-fec"
+description = "DecDAB FEC: the rate-1/4 convolutional code, puncturing (EEP/UEP), Viterbi, energy dispersal, time interleaving, Reed-Solomon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decdab-core = { path = "../decdab-core" }

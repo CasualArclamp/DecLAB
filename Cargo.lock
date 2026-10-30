@@ -479,6 +479,74 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
+name = "decdab-codecs"
+version = "0.0.1"
+dependencies = [
+ "decsat-xaac-sys",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decdab-core"
+version = "0.0.1"
+dependencies = [
+ "num-complex",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decdab-data"
+version = "0.0.1"
+dependencies = [
+ "flate2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decdab-dsp"
+version = "0.0.1"
+dependencies = [
+ "decdab-core",
+ "num-complex",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decdab-fec"
+version = "0.0.1"
+dependencies = [
+ "decdab-core",
+]
+
+[[package]]
+name = "decdab-fic"
+version = "0.0.1"
+dependencies = [
+ "decdab-core",
+ "decdab-fec",
+]
+
+[[package]]
+name = "decdab-msc"
+version = "0.0.1"
+dependencies = [
+ "decdab-core",
+ "decdab-fec",
+ "decdab-fic",
+]
+
+[[package]]
+name = "decdab-ofdm"
+version = "0.0.1"
+dependencies = [
+ "decdab-core",
+ "decdab-dsp",
+ "decdab-fec",
+ "num-complex",
+ "rustfft",
+]
+
+[[package]]
 name = "decdvbt-audio"
 version = "0.0.1"
 dependencies = [
@@ -594,6 +662,11 @@ dependencies = [
 name = "declab-decoders"
 version = "0.0.1"
 dependencies = [
+ "decdab-codecs",
+ "decdab-data",
+ "decdab-fic",
+ "decdab-msc",
+ "decdab-ofdm",
  "decdvbt-core",
  "decdvbt-ofdm",
  "decdvbt-rx",
@@ -678,6 +751,13 @@ name = "declab-pmr"
 version = "0.0.1"
 dependencies = [
  "num-complex",
+]
+
+[[package]]
+name = "decsat-xaac-sys"
+version = "0.0.1"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

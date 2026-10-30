@@ -9,6 +9,7 @@ use declab_api::DecoderFactory;
 
 mod analog;
 mod analog_rds;
+mod dab;
 mod dmr;
 mod dvbt;
 #[cfg(feature = "ui")]
@@ -26,6 +27,7 @@ use analog::Mode;
 /// The mode picker's list, in the order it shows them within a family.
 pub static ALL: &[&dyn DecoderFactory] = &[
     &dvbt::Factory,
+    &dab::Factory,
     &analog::Factory(Mode::Wfm),
     &analog::Factory(Mode::Nfm),
     &analog::Factory(Mode::Am),

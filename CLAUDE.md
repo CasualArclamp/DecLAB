@@ -33,6 +33,8 @@ cargo run --release -p declab-pmr --example tetra_make -- out/sim_tetra.cf32 12 
 cargo run --release -p declab-pmr --example tetra_sweep -- 4 500 [diff]   # TETRA sensitivity, gate on noise, CPU (diff: differential detection)
 cargo run --release -p declab-pmr --example tetra_file -- IN.cf32   # a 72 kS/s TETRA carrier's fit slot by slot (lock losses, re-alignments)
 cargo run --release -p declab-cli -- run voice --radio rtlsdr --freq 439.5M --gain 40.2 --card
+cargo run --release -p declab-cli -- run dab --file ../DecDAB/captures/11d_long_222.064MHz_4.096Msps_amp.cs8 --service "classic fm" --wav out/x.wav --card   # DAB/DAB+ (DecDAB's captures); AAC by libxaac
+cargo run --release -p declab-gui -- ../DecDAB/captures/11d_long_222.064MHz_4.096Msps_amp.cs8 --decoder dab --screenshot out/x.png --after 12
 cargo run --release -p declab-cli -- list
 cargo run --release -p declab-cli -- selftest level
 cargo run --release -p declab-cli -- run wfm --file x_98.000MHz_10Msps.cs8 --offset 1.2M --realtime
@@ -47,6 +49,9 @@ DecDVB-T GUI may be holding the Airspy ("Access is denied"): never kill it.
 
 The GUI keeps its settings in `%APPDATA%\DecLAB\prefs.txt`; screenshot runs
 neither read nor write it.
+
+libxaac (DAB+ audio) builds from the `third_party/libxaac` submodule
+(`git submodule update --init`); the first build takes a minute.
 
 ## Adding a decoder
 

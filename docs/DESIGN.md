@@ -109,9 +109,9 @@ Shared crates are merged once; standard-specific DSP is copied in with a
 | `declab-dab` | `decdab-ofdm`, `-fic`, `-msc`, `-fec`, `-codecs`, `-data`, `decdab-fdk-sys` |
 | `apps/declab-gui`, `apps/declab-cli` | new, built from the three GUIs' parts |
 
-**Licence clash to settle in M3:** DecDAB uses FDK-AAC for DAB+, DecSAT
+**Licence clash, settled in M3:** DecDAB uses FDK-AAC for DAB+, DecSAT
 avoided FDK because its licence does not mix with the GPL (it uses libxaac).
-DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
+DecLAB is GPL-3.0-or-later, so DAB+ uses libxaac (§20).
 
 ## 3. Milestones
 
@@ -122,7 +122,7 @@ DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
 | M1b | GUI from the mockups: source controls, spectrum/waterfall (middle-drag moves the band, scroll zooms), decoder wheel with icons, card, scope, decoder panels, services, status bar, prefs | ✅ 2026-10-27 on files; live in the GUI not yet tried (the Airspy was in use) |
 | M2a | DVB-T/T2 as a plug-in: decode, card, constellation, services, now/next, `.ts` out | ✅ 2026-10-28: C23 and C30 decode to DecDVB-T's very bytes at its speed |
 | M2b | TS hub, player (video, audio, subtitles), EPG, Red Button, PLP choice, HTTP/UDP out | ✅ 2026-10-28 on captures; not yet live |
-| M3 | DAB/DAB+ as a plug-in: audio, DLS, slideshow, SPI; libxaac question | 11D/12B captures play |
+| M3 | DAB/DAB+ as a plug-in: audio, DLS, slideshow, SPI; libxaac question | ✅ 2026-10-30: 11D and 12B play (DAB+ by libxaac, DAB by DecDAB's MP2), DLS shown; SPI not yet |
 | M4 | DVB-S and DVB-S2/S2X TS + GSE/IP (PCAP) | DecSAT's test captures decode |
 | M5 | DVB-RCS2/TDMA return burst analyser | DecSAT's inroute captures decode |
 | M6 | Release: CI, portable exe, README | v0.1.0 |
@@ -746,3 +746,34 @@ voice mode.
 - Click a column's name to sort by it (names A–Z with numbers in order,
   counts and times largest first, last heard most recent first); click
   again to reverse. Kept per table in egui's memory.
+
+## 20. DAB and DAB+ (2026-10-30)
+
+- **Crates:** DecDAB's `decdab-core`, `-dsp`, `-fec`, `-fic`, `-msc`,
+  `-ofdm`, `-codecs` and `-data` copied under their own names (as the
+  DVB-T crates were), less DecDAB's FDK binding, its MP3 recorder and the
+  OFDM probes (they read DecDAB's I/O crate). The plug-in
+  (`declab-decoders/src/dab.rs`) follows DecDAB's engine: the host hands
+  over 2.048 MS/s, the FIC gives the services, the chosen one's
+  sub-channel goes to sound and PAD.
+- **AAC by libxaac** (Apache-2.0), DecSAT's binding (`decsat-xaac-sys`,
+  the `third_party/libxaac` submodule at DecSAT's commit) and wrapper.
+  DecSAT feeds ADTS; for DAB+ that decoded 1024-sample frames whatever the
+  frame-length flag said, so DAB+ runs libxaac's MP4 mode: the superframe's
+  AudioSpecificConfig (960 frames, SBR/PS explicit) through INIT_PROCESS,
+  then access units bare until it reports ready (as its test app does).
+  Checked against DecDAB's FDK on Classic FM (11D, HE-AAC v2): correlation
+  0.9993, 28.5 dB between the two, equal levels.
+- **DAB** (MPEG Layer II): DecDAB's own decoder, unchanged.
+- **The service:** the one picked in the list, else the list's first radio
+  service (the one the GUI marks). The FIC fills in over a second or two;
+  a service started on an early picture (seen: an SId mapped to another's
+  sub-channel) restarts when its description changes.
+- **Shown:** card with the ensemble, codec, sub-channel, AUs, RS and a MER
+  gauge (10.5 dB for clean EEP 3-A, DecDAB's figure); the DLS as the
+  service's text; slideshow images as its pictures; the constellation.
+- **CLI:** `--service NAME` picks a service, `--wav PATH` writes the sound
+  (the host's WAV tap; a new rate or channel count starts it over).
+- **Not yet:** SPI/EPG and other packet-mode data, TII, the channel
+  sounder, a Band III scan.
+

@@ -1,0 +1,18 @@
+# made by CasualArclamp
+[package]
+name = "decdab-ofdm"
+description = "DecDAB OFDM: transmission mode I, phase reference, frequency interleaving, sync and DQPSK demodulation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decdab-core = { path = "../decdab-core" }
+decdab-dsp = { path = "../decdab-dsp" }
+num-complex.workspace = true
+rustfft.workspace = true
+
+[dev-dependencies]
+decdab-fec = { path = "../decdab-fec" }

@@ -1,0 +1,14 @@
+# made by CasualArclamp
+[package]
+name = "decdab-msc"
+description = "DecDAB MSC: sub-channel decoding (time deinterleaving, Viterbi, energy dispersal) and DAB+ superframes (Fire code, RS, access units)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decdab-core = { path = "../decdab-core" }
+decdab-fec = { path = "../decdab-fec" }
+decdab-fic = { path = "../decdab-fic" }
