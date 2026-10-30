@@ -718,7 +718,8 @@ TS2) at falling C/N, with C/N measured in 12.5 kHz.
   uses the serving cell's band and offset unless it carries an extension.
   Checked on the real recording: the serving cell lists 10
   neighbours, among them the other cell decoded from the same
-  recording, at the carrier and location area it was found on. Shown in the right panel; a click tunes there
+  recording, at the carrier and location area it was found on. Shown in
+  the right panel; a click tunes there
   (exactly: rounding to 1 kHz would put a TETRA carrier 500 Hz off).
 - **Not decoded:** π/8-D8PSK and QAM (TEDS), the uplink, direct mode,
   advanced-link LLC, MM, and MLE beyond D-NWRK-BROADCAST and the PDU type.
