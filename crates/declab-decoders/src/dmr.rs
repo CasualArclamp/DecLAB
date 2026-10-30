@@ -88,6 +88,65 @@ pub(crate) fn gate() -> crate::gate_panel::Gate {
     }
 }
 
+/// Hints at the kind of system, from the feature set IDs (FID, TS 102
+/// 361-2 annex C: 0x10 Motorola, 0x06 Motorola Connect Plus, 0x08/0x68
+/// Hytera) and the PDUs seen.
+#[derive(Default, Clone, Copy)]
+struct SystemKind {
+    motorola: bool,
+    /// Motorola's CSBK opcode 62, Capacity Plus's site status (seen on a
+    /// real Capacity Plus rest channel).
+    capacity_plus: bool,
+    connect_plus: bool,
+    hytera: bool,
+    /// ETSI Tier III trunking PDUs (C_ALOHA, C_BCAST, grants).
+    tier3: bool,
+}
+
+impl SystemKind {
+    fn fid(&mut self, fid: u8, opcode: Option<u8>) {
+        match fid {
+            0x10 => {
+                self.motorola = true;
+                if opcode == Some(62) {
+                    self.capacity_plus = true;
+                }
+            }
+            0x06 => self.connect_plus = true,
+            0x08 | 0x68 => self.hytera = true,
+            _ => {}
+        }
+    }
+
+    /// For the card's title: "MOTOTRBO Capacity Plus", "Tier III", ….
+    fn name(&self) -> Option<&'static str> {
+        Some(match *self {
+            SystemKind {
+                capacity_plus: true,
+                ..
+            } => "MOTOTRBO Capacity Plus",
+            SystemKind {
+                connect_plus: true, ..
+            } => "MOTOTRBO Connect Plus",
+            // Motorola's own PDUs on an ETSI Tier III system.
+            SystemKind {
+                motorola: true,
+                tier3: true,
+                ..
+            } => "MOTOTRBO Capacity Max",
+            SystemKind { motorola: true, .. } => "MOTOTRBO",
+            SystemKind {
+                hytera: true,
+                tier3: true,
+                ..
+            } => "Hytera Tier III",
+            SystemKind { hytera: true, .. } => "Hytera",
+            SystemKind { tier3: true, .. } => "Tier III",
+            _ => return None,
+        })
+    }
+}
+
 /// A call in progress on one slot.
 struct Call {
     lc: FullLc,
@@ -105,6 +164,8 @@ struct Dmr {
     /// steady repeats are logged once.
     last_csbk: Vec<Csbk>,
     system: Option<String>,
+    /// What the signalling says about the system (manufacturer, trunking).
+    kind: SystemKind,
     /// LRRP location reports decoded.
     locations: u64,
     heard: HeardList,
@@ -148,6 +209,7 @@ impl Dmr {
             calls: [None, None],
             last_csbk: Vec::new(),
             system: None,
+            kind: SystemKind::default(),
             locations: 0,
             heard: HeardList::default(),
             recent: VecDeque::new(),
@@ -208,6 +270,9 @@ impl Dmr {
     }
 
     fn start_call(&mut self, slot: u8, lc: FullLc, out: &mut Sink) {
+        if let FullLc::Other { fid, .. } = lc {
+            self.kind.fid(fid, None);
+        }
         let s = slot as usize;
         if self.calls[s]
             .as_ref()
@@ -264,6 +329,10 @@ impl Dmr {
     }
 
     fn csbk(&mut self, slot: u8, csbk: Csbk, out: &mut Sink) {
+        match csbk {
+            Csbk::Other { opcode, fid, .. } => self.kind.fid(fid, Some(opcode)),
+            _ => self.kind.tier3 = true,
+        }
         // Grants are news every time; for the rest, only a change is.
         let same_kind = |a: &Csbk, b: &Csbk| std::mem::discriminant(a) == std::mem::discriminant(b);
         let grant = matches!(csbk, Csbk::Grant { .. });
@@ -291,6 +360,9 @@ impl Dmr {
                 match Lrrp::parse(&u.payload) {
                     Some(l) => {
                         self.locations += 1;
+                        // LRRP is Motorola's protocol (MOTOTRBO's location
+                        // service); Hytera's is its own.
+                        self.kind.motorola = true;
                         self.heard.position(self.now_s, &h.src.to_string());
                         self.note(
                             format!("{} {}", slot_name(slot), h.src),
@@ -374,6 +446,8 @@ impl Dmr {
                     slot, data_type, ..
                 } => out.log(format!("{}: data burst {data_type:?}", slot_name(slot))),
                 Event::Mbc { slot, header, .. } => {
+                    // Its first block is a CSBK: opcode, then FID.
+                    self.kind.fid(header[1], Some(header[0] & 0x3f));
                     out.log(format!("{}: MBC {}", slot_name(slot), Csbk::parse(&header)));
                 }
                 Event::Idle { .. } | Event::DataHeader { .. } => {}
@@ -443,7 +517,10 @@ impl Dmr {
         }
         text.extend(self.recent.iter().cloned());
         out.card = Some(Card {
-            title: format!("DMR · {src}"),
+            title: match self.kind.name() {
+                Some(k) => format!("DMR · {src} · {k}"),
+                None => format!("DMR · {src}"),
+            },
             headline,
             gauge: source.map(|_| Gauge {
                 label: "eye SNR".into(),
@@ -518,6 +595,7 @@ impl Decoder for Dmr {
     fn reset(&mut self) {
         self.rx.reset();
         self.heard.clear();
+        self.kind = SystemKind::default();
         self.calls = [None, None];
         self.playing = None;
         self.sym_hist.clear();

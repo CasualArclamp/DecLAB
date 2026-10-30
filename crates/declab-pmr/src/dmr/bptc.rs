@@ -41,6 +41,112 @@ fn info_positions() -> impl Iterator<Item = usize> {
     })
 }
 
+/// Crossings tried by [`crossing`] (the least reliable), and the most flips.
+const CROSSING_CANDIDATES: usize = 24;
+const CROSSING_FLIPS: usize = 4;
+
+/// Plain hard decoding from the channel's decisions: rows, then columns,
+/// single errors each, a few rounds. The soft pass can lose a pattern this
+/// clears at once: an error the channel was sure of (a glitch) makes Chase
+/// prefer flipping weaker bits instead.
+fn hard(first: &[u32; 13]) -> Option<[u32; 13]> {
+    let (row, col) = (fec::hamming_15_11(), fec::hamming_13_9());
+    let col_word =
+        |w: &[u32; 13], c: usize| (0..13).fold(0u32, |x, r| (x << 1) | ((w[r] >> (14 - c)) & 1));
+    let mut w = *first;
+    for _ in 0..4 {
+        for word in w.iter_mut().take(9) {
+            if let Some(fixed) = row.correct1(*word) {
+                *word = fixed;
+            }
+        }
+        for c in 0..15 {
+            let cw = col_word(&w, c);
+            if let Some(fixed) = col.correct1(cw) {
+                for (r, word) in w.iter_mut().enumerate() {
+                    let bit = (fixed >> (12 - r)) & 1;
+                    *word = (*word & !(1 << (14 - c))) | (bit << (14 - c));
+                }
+            }
+        }
+        if w[..9].iter().all(|&x| row.syndrome(x) == 0)
+            && (0..15).all(|c| col.syndrome(col_word(&w, c)) == 0)
+        {
+            // Accepted only within the code's reach (distance 9).
+            let flips: u32 = w.iter().zip(first).map(|(a, b)| (a ^ b).count_ones()).sum();
+            return (flips <= 4).then_some(w);
+        }
+    }
+    None
+}
+
+/// The (196,96) product code's fallback when the iterations fail: an error
+/// sits where a failing row crosses a failing column (rows 9–12 carry only
+/// column parity, so they are always candidates). The least reliable
+/// crossings are flipped, fewest first, and the cheapest set (sum of |LLR|)
+/// that clears every row and column wins. The code's distance is 9, so up
+/// to 4 errors have one answer, and no more are tried. Seen on a real MOTOTRBO repeater (2026-10-30): idle and data
+/// bursts with 3–5 clustered bit errors the iterations left failing, one
+/// in ten at 22 dB, and with them LRRP blocks.
+fn crossing(first: &[u32; 13], soft: &[f32; 196]) -> Option<[u32; 13]> {
+    let (row, col) = (fec::hamming_15_11(), fec::hamming_13_9());
+    let col_word =
+        |w: &[u32; 13], c: usize| (0..13).fold(0u32, |x, r| (x << 1) | ((w[r] >> (14 - c)) & 1));
+    let ok = |w: &[u32; 13]| {
+        w[..9].iter().all(|&x| row.syndrome(x) == 0)
+            && (0..15).all(|c| col.syndrome(col_word(w, c)) == 0)
+    };
+    let rows: Vec<usize> = (0..9)
+        .filter(|&r| row.syndrome(first[r]) != 0)
+        .chain(9..13)
+        .collect();
+    let cols: Vec<usize> = (0..15)
+        .filter(|&c| col.syndrome(col_word(first, c)) != 0)
+        .collect();
+    // (reliability, row, column), least reliable first.
+    let mut cand: Vec<(f32, usize, usize)> = rows
+        .iter()
+        .flat_map(|&r| {
+            cols.iter()
+                .map(move |&c| (soft[1 + 15 * r + c].abs(), r, c))
+        })
+        .collect();
+    cand.sort_by(|a, b| a.0.total_cmp(&b.0));
+    cand.truncate(CROSSING_CANDIDATES);
+    let n = cand.len();
+    let mut best: Option<(f32, [u32; 13])> = None;
+    for k in 1..=CROSSING_FLIPS.min(n) {
+        // Rust note: `idx` walks every k-subset of 0..n in order
+        // (0,1,…,k−1), (0,1,…,k), … like nested loops of any depth.
+        let mut idx: Vec<usize> = (0..k).collect();
+        loop {
+            let mut w = *first;
+            let mut cost = 0.0;
+            for &i in &idx {
+                let (rel, r, c) = cand[i];
+                w[r] ^= 1 << (14 - c);
+                cost += rel;
+            }
+            if ok(&w) && best.as_ref().is_none_or(|b| cost < b.0) {
+                best = Some((cost, w));
+            }
+            // The next subset: the rightmost index that can move, then the
+            // ones after it packed behind.
+            let Some(j) = (0..k).rev().find(|&j| idx[j] < n - k + j) else {
+                break;
+            };
+            idx[j] += 1;
+            for m in j + 1..k {
+                idx[m] = idx[m - 1] + 1;
+            }
+        }
+        if best.is_some() {
+            break;
+        }
+    }
+    best.map(|b| b.1)
+}
+
 /// Encode 12 bytes (96 bits) into the 196 bits sent, in sending order.
 pub fn encode_196(data: &[u8; 12]) -> [u8; 196] {
     let mut bits = Vec::with_capacity(96);
@@ -158,7 +264,7 @@ pub fn decode_196(llr: &[f32; 196]) -> Option<([u8; 12], u32)> {
     let rows_ok = w[..9].iter().all(|&x| row.syndrome(x) == 0);
     let cols_ok = (0..15).all(|c| col.syndrome(col_word(&w, c)) == 0);
     if !(rows_ok && cols_ok) {
-        return None;
+        w = hard(&first).or_else(|| crossing(&first, &soft))?;
     }
     let fixed: u32 = w
         .iter()
@@ -333,6 +439,26 @@ mod tests {
         let (out, fixed) = decode_196(&llr).unwrap();
         assert_eq!(out, data);
         assert_eq!(fixed, 6);
+    }
+
+    /// Four confident errors, one to a row and column: the shape a radio's
+    /// glitch left in real idle and LRRP bursts, which the soft pass alone
+    /// did not clear (Chase flipped weaker bits instead).
+    #[test]
+    fn bptc196_confident_errors() {
+        let data = [
+            0xff, 0x83, 0xdf, 0x17, 0x32, 0x09, 0x4e, 0xd1, 0xe7, 0xcd, 0x8a, 0x91,
+        ];
+        let tx = encode_196(&data);
+        let mut llr: [f32; 196] = llr_of(&tx).try_into().unwrap();
+        // Matrix (row, column) of each error, sent at interleave(index).
+        for (r, c) in [(5, 8), (6, 6), (7, 4), (8, 2)] {
+            let i = interleave(1 + 15 * r + c);
+            llr[i] *= -4.0;
+        }
+        let (out, fixed) = decode_196(&llr).unwrap();
+        assert_eq!(out, data);
+        assert_eq!(fixed, 4);
     }
 
     #[test]

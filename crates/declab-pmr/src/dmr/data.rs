@@ -357,6 +357,9 @@ pub enum Rate {
 #[derive(Clone, Default)]
 pub struct Assembler {
     header: Option<DataHeader>,
+    /// The header's own CRC failed (see [`Assembler::provisional`]): the
+    /// packet is only passed on if its CRC-32 checks.
+    provisional: bool,
     data: Vec<u8>,
     left: u8,
     serial: u8,
@@ -367,6 +370,7 @@ impl Assembler {
     pub fn header(&mut self, h: DataHeader) {
         let collect = matches!(h.format, Format::Unconfirmed | Format::Confirmed) && h.blocks > 0;
         self.header = collect.then_some(h);
+        self.provisional = false;
         self.data.clear();
         self.left = h.blocks;
         self.serial = 0;
@@ -375,6 +379,16 @@ impl Assembler {
 
     pub fn abandon(&mut self) {
         self.header = None;
+    }
+
+    /// A header whose CRC-16 failed although its BPTC needed no correction.
+    /// Seen on a real MOTOTRBO repeater (2026-10-30): every LRRP data
+    /// header failed its CRC (with any mask) while the packets after them
+    /// passed their CRC-32 and the addresses matched the IP ones. Such a
+    /// header is followed, and its packet kept only if the CRC-32 passes.
+    pub fn provisional(&mut self, h: DataHeader) {
+        self.header(h);
+        self.provisional = true;
     }
 
     /// One block's decoded bytes (12 for rate ½, 18 for rate ¾). A packet
@@ -411,6 +425,9 @@ impl Assembler {
         let calc = crc32(body);
         let rev = [calc[3], calc[2], calc[1], calc[0]];
         let crc_ok = crc == calc || crc == rev;
+        if self.provisional && !crc_ok {
+            return None;
+        }
         let keep = body.len().saturating_sub(usize::from(h.pad));
         Some(Packet {
             header: h,
@@ -456,6 +473,35 @@ mod tests {
             llr[i] *= -0.5;
         }
         assert_eq!(trellis12_decode(&llr).0, data);
+    }
+
+    /// A header taken on trust (its CRC-16 failed) yields its packet only if
+    /// the packet's CRC-32 passes.
+    #[test]
+    fn provisional_header_needs_the_packet_crc() {
+        let h = DataHeader {
+            group: false,
+            format: Format::Unconfirmed,
+            sap: sap::IP,
+            pad: 0,
+            dst: 10_000,
+            src: 10_209,
+            blocks: 1,
+        };
+        let mut block = [0x45u8, 0, 0, 0, 1, 2, 3, 4, 0, 0, 0, 0];
+        let crc = crc32(&block[..8]);
+        block[8..].copy_from_slice(&crc);
+        let mut a = Assembler::default();
+        a.provisional(h);
+        let p = a.block(&block, Rate::Half).expect("CRC-32 good: kept");
+        assert!(p.crc_ok);
+        assert_eq!(p.data, block[..8]);
+        block[2] ^= 1;
+        a.provisional(h);
+        assert!(a.block(&block, Rate::Half).is_none(), "CRC-32 bad: dropped");
+        // Trusted, the same packet is passed on, marked bad.
+        a.header(h);
+        assert!(!a.block(&block, Rate::Half).expect("kept").crc_ok);
     }
 
     #[test]

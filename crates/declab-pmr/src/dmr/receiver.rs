@@ -80,6 +80,9 @@ const EMB_DIST: u32 = 2;
 const VOICE_ERRORS: u32 = 12;
 /// Bursts in a row that fail before the receiver hunts again.
 const LOST_AFTER: u32 = 12;
+/// Locked, a SYNC missing where one is due is looked for this many samples
+/// either side (300 = 12.5 ms: less than half a burst, so the slot holds).
+const RESYNC: i32 = 300;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -163,6 +166,8 @@ pub struct Stats {
     pub sync_snr_db: f32,
     /// SYNCs and bursts the SNR gate turned away.
     pub gated: u64,
+    /// Bursts found again after a timing jump (samples lost).
+    pub resyncs: u64,
     /// What the receiver is locked to.
     pub source: Option<Source>,
 }
@@ -477,6 +482,27 @@ impl Receiver {
         }
         let expect_voice = self.slots[slot as usize].voice_next.is_some_and(|l| l > 0);
         let need = if expect_voice { OVERRIDE } else { TRACK };
+        // Samples lost (a radio's dropped USB transfer) move every burst
+        // after them: a burst that should carry a SYNC and has none near
+        // the prediction is looked for further out, at the acquisition
+        // threshold. Seen on a real recording: a 3 ms jump cost 0.4 s.
+        if best.0.abs() < need && !expect_voice {
+            // Wait until the whole window is in.
+            if !self.have(tau + f64::from(RESYNC) + 3.0) {
+                return false;
+            }
+            for &c in cands {
+                for d in -RESYNC..=RESYNC {
+                    let r = self.correlate(c, tau.round() + f64::from(d));
+                    if r.abs() >= ACQUIRE && r.abs() > best.0.abs() {
+                        best = (r, c, tau.round() + f64::from(d));
+                    }
+                }
+            }
+            if best.0.abs() >= ACQUIRE {
+                self.stats.resyncs += 1;
+            }
+        }
         let sync = if best.0.abs() >= need {
             let voice = best.0 > 0.0;
             tau = self.refine(best.1, best.2, voice);
@@ -832,12 +858,16 @@ impl Receiver {
                     }
                 }
             }
-            (DataType::DataHeader, Some((d, _))) => {
+            (DataType::DataHeader, Some((d, corr))) => {
                 self.slots[s].voice_next = None;
+                let header = DataHeader::parse(d[..10].try_into().expect("10 bytes"));
                 if DataHeader::crc_ok(&d) {
-                    let header = DataHeader::parse(d[..10].try_into().expect("10 bytes"));
                     self.slots[s].data.header(header);
                     self.events.push(Event::DataHeader { slot, cc, header });
+                } else if corr == 0 {
+                    // Clean bits, failing CRC: see `Assembler::provisional`.
+                    self.stats.crc_fail += 1;
+                    self.slots[s].data.provisional(header);
                 } else {
                     self.stats.crc_fail += 1;
                     self.slots[s].data.abandon();

@@ -480,6 +480,49 @@ fn clock(s: f64) -> String {
     }
 }
 
+/// How a heard table is sorted: by column `col`, the column's natural way
+/// (names A–Z, counts and times largest first, last heard most recent
+/// first) or, clicked again, the other way. Kept in egui's memory per table.
+#[derive(Clone, Copy, PartialEq)]
+struct SortBy {
+    col: usize,
+    reversed: bool,
+}
+
+/// A table's header row of clickable column names (the sorted one marked
+/// ▼/▲); returns how to sort. `last` is the default column.
+fn sort_header(ui: &mut Ui, table: &str, cols: &[(&str, bool)], last: usize) -> SortBy {
+    let id = ui.id().with(("heard_sort", table));
+    let mut by = ui.data(|d| d.get_temp::<SortBy>(id)).unwrap_or(SortBy { col: last, reversed: false });
+    for (i, &(name, right)) in cols.iter().enumerate() {
+        let mark = match (by.col == i, by.reversed) {
+            (true, false) => " ▼",
+            (true, true) => " ▲",
+            _ => "",
+        };
+        let text = RichText::new(format!("{name}{mark}")).color(if by.col == i { AMBER } else { GREY });
+        let label = egui::Label::new(text).sense(Sense::click());
+        let r = if right {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(label)).inner
+        } else {
+            ui.add(label)
+        };
+        if r.on_hover_text("sort").clicked() {
+            by = if by.col == i { SortBy { col: i, reversed: !by.reversed } } else { SortBy { col: i, reversed: false } };
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(id, by));
+    ui.end_row();
+    by
+}
+
+/// "TG 2350" as ("TG ", 2350), so TG 9 sorts before TG 2350.
+fn natural(s: &str) -> (String, u64) {
+    let i = s.find(|c: char| c.is_ascii_digit()).unwrap_or(s.len());
+    let n = s[i..].chars().take_while(char::is_ascii_digit).collect::<String>();
+    (s[..i].to_string(), n.parse().unwrap_or(0))
+}
+
 /// Digital voice: the talkgroups and radios heard, two tables (mockup A),
 /// and between them the nearby cells the network announces. The one on
 /// the air is green, encrypted ones grey with a lock. Returns a nearby
@@ -522,11 +565,23 @@ fn heard(ui: &mut Ui, h: &declab_api::Heard) -> Option<f64> {
         ui.label(RichText::new("none yet").color(GREY));
     } else {
         egui::Grid::new("heard_groups").striped(false).spacing(vec2(14.0, 2.0)).show(ui, |ui| {
-            for (t, right) in [("TG", false), ("slot", false), ("calls", true), ("radios", true), ("air time", true), ("last", true)] {
-                cell(ui, t.into(), GREY, right);
-            }
-            ui.end_row();
-            for g in &h.groups {
+            let cols = [("TG", false), ("slot", false), ("calls", true), ("radios", true), ("air time", true), ("last", true)];
+            let by = sort_header(ui, "groups", &cols, 5);
+            let mut rows: Vec<&declab_api::HeardGroup> = h.groups.iter().collect();
+            // Rust note: `sort_by` is stable, so equal keys keep the
+            // decoder's order (most recent first).
+            rows.sort_by(|a, b| {
+                let o = match by.col {
+                    0 => natural(&a.name).cmp(&natural(&b.name)),
+                    1 => a.slot.cmp(&b.slot),
+                    2 => b.calls.cmp(&a.calls),
+                    3 => b.radios.cmp(&a.radios),
+                    4 => b.air_s.total_cmp(&a.air_s),
+                    _ => b.last_s.total_cmp(&a.last_s),
+                };
+                if by.reversed { o.reverse() } else { o }
+            });
+            for g in rows {
                 let c = colour(g.live, g.encrypted);
                 cell(ui, format!("{}{}{}", dot(g.live), g.name, lock(g.encrypted)), c, false);
                 cell(ui, g.slot.clone(), c, false);
@@ -559,11 +614,22 @@ fn heard(ui: &mut Ui, h: &declab_api::Heard) -> Option<f64> {
         ui.label(RichText::new("none yet").color(GREY));
     } else {
         egui::Grid::new("heard_radios").striped(false).spacing(vec2(14.0, 2.0)).show(ui, |ui| {
-            for (t, right) in [("radio", false), ("last TG", false), ("calls", true), ("talk time", true), ("position", false), ("last", true)] {
-                cell(ui, t.into(), GREY, right);
-            }
-            ui.end_row();
-            for r in &h.radios {
+            let cols = [("radio", false), ("last TG", false), ("calls", true), ("talk time", true), ("position", false), ("last", true)];
+            let by = sort_header(ui, "radios", &cols, 5);
+            let mut rows: Vec<&declab_api::HeardRadio> = h.radios.iter().collect();
+            rows.sort_by(|a, b| {
+                let o = match by.col {
+                    0 => natural(&a.id).cmp(&natural(&b.id)),
+                    1 => natural(&a.group).cmp(&natural(&b.group)),
+                    2 => b.calls.cmp(&a.calls),
+                    3 => b.talk_s.total_cmp(&a.talk_s),
+                    // With a fix first, the most recent first.
+                    4 => b.position_s.unwrap_or(f64::NEG_INFINITY).total_cmp(&a.position_s.unwrap_or(f64::NEG_INFINITY)),
+                    _ => b.last_s.total_cmp(&a.last_s),
+                };
+                if by.reversed { o.reverse() } else { o }
+            });
+            for r in rows {
                 let c = colour(r.live, r.encrypted);
                 cell(ui, format!("{}{}", dot(r.live), r.id), c, false);
                 cell(ui, format!("{}{}", r.group, lock(r.encrypted)), c, false);

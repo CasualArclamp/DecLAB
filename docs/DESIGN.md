@@ -515,9 +515,35 @@ TS2) at falling C/N, with C/N measured in 12.5 kHz.
 - **Rate 1 data** is not decoded.
 - **Header compression:** the network number is configured in the radios,
   not sent, so compressed headers show 12.x.x.x addresses.
-- **Simulation only:** everything is tested against the built-in modulator,
-  which was written from the same reading of the spec. A real capture (the
-  RTL-SDR or the Airspy on a DMR repeater or hotspot) is the next check.
+- **Real signals (2026-10-30, a user's 25 s Airspy recording in the UHF PMR band):**
+  a MOTOTRBO Capacity Plus rest channel (CSBK opcode 62, FID 0x10), a
+  Tier II repeater carrying LRRP, and a radio talking (MS-sourced voice).
+  `dmr_file` prints every event of a 24 kS/s file. What it showed:
+  - Every LRRP data header failed its CRC-16, with any mask, though its
+    BPTC needed no correction and the packets after it passed their
+    CRC-32 with addresses matching the IP ones. Such a header is now
+    followed provisionally and its packet kept only on a good CRC-32
+    (`Assembler::provisional`). The cause is not known.
+  - The BPTC (196,96) decoder gave up on bursts with 3–4 confident errors
+    (one to a row and column: an Airspy sample slip's glitch). A plain hard
+    row/column pass and, failing that, a search over the failing rows'
+    and columns' crossings (≤ 4 flips, the code's reach) now follow the
+    soft pass. Idle bursts failing at 22 dB: 67 → 37.
+  - The recording drops samples (about 20 jumps in 25 s, one of 3 ms):
+    a burst due a SYNC with none within ±3 samples is now looked for
+    ±300 samples (`RESYNC`, at the acquisition threshold), as TETRA does.
+    The radio's voice: 381 → 432 frames.
+  - LRRP packets assembled: 0 → 3 of the 7 sent (the others lost blocks
+    to glitches; unconfirmed data has no retry).
+  - Tried and dropped: holding the discriminator through out-of-range
+    turns (glitches) cost 2–3 dB in the sweeps (it holds FM clicks too);
+    a robust noise update let noise flywheel on as voice after a carrier
+    went. The sweep is unchanged by what stayed (82 % voice at 4 dB; the
+    91 % above predates later changes).
+- **System name** in the card's title from the FIDs seen (0x10 Motorola,
+  opcode 62 Capacity Plus, 0x06 Connect Plus, 0x08/0x68 Hytera), ETSI
+  Tier III PDUs (with Motorola's too: Capacity Max) and LRRP (Motorola's
+  protocol): "DMR · repeater · MOTOTRBO Capacity Plus".
 
 ## 15. NXDN48 (2026-10-29)
 
@@ -717,3 +743,6 @@ voice mode.
   encrypted MAC signalling (which may be groups as well as radios).
 - The list clears on a retune (the decoder's reset) and follows the mode
   Digital voice has detected.
+- Click a column's name to sort by it (names A–Z with numbers in order,
+  counts and times largest first, last heard most recent first); click
+  again to reverse. Kept per table in egui's memory.
