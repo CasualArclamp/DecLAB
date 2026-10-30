@@ -686,5 +686,34 @@ TS2) at falling C/N, with C/N measured in 12.5 kHz.
 - **Encryption:** speech is muted when the call's MAC signalling was
   encrypted, end-to-end encryption was granted, or traffic appears on a
   cell offering air-interface encryption with no clear set-up heard.
+- **Nearby cells:** D-NWRK-BROADCAST (MLE type 010, table 18.2) and its
+  "neighbour cell information for CA" elements (table 18.64: an O-bit,
+  then a P-bit before each optional part). Each neighbour's main carrier
+  uses the serving cell's band and offset unless it carries an extension.
+  Checked on the real recording: the serving cell lists 10
+  neighbours, among them the other cell decoded from the same
+  recording, at the carrier and location area it was found on. Shown in the right panel; a click tunes there
+  (exactly: rounding to 1 kHz would put a TETRA carrier 500 Hz off).
 - **Not decoded:** π/8-D8PSK and QAM (TEDS), the uplink, direct mode,
-  advanced-link LLC, MM and MLE beyond their PDU type.
+  advanced-link LLC, MM, and MLE beyond D-NWRK-BROADCAST and the PDU type.
+
+## 19. Heard list (2026-10-30)
+
+The user chose mockup A of five (the "DecLAB UI mockups" canvas): two
+tables in the right panel, talkgroups over radios, for every Digital
+voice mode.
+
+- `Sink::heard` carries a whole `Heard` list; `declab-decoders/src/heard.rs`
+  keeps it the same way for DMR, NXDN, P25 and TETRA. A mode says when a
+  call starts and ends (its own call tracking) and adds the speech it
+  decodes: 60 ms a DMR burst or TETRA slot, 20 ms an AMBE+2/IMBE frame.
+  Air time is counted from speech, not the clock: a file hands the decoder
+  blocks of 65 536 samples (2.7 s at 24 kS/s), too coarse to time calls by.
+- A call is a transmission (DMR's and P25's PTT, TETRA's floor grant).
+  Groups are "TG n" or "private n"; TETRA tells them apart by the basic
+  service's communication type (clause 14.8.2).
+- Radios seen without talking are listed too: DMR LRRP positions, TETRA
+  status and SDS senders, and, on an encrypted cell, the addresses in its
+  encrypted MAC signalling (which may be groups as well as radios).
+- The list clears on a retune (the decoder's reset) and follows the mode
+  Digital voice has detected.

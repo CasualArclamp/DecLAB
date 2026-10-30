@@ -16,6 +16,8 @@
 
 use std::collections::VecDeque;
 
+use crate::heard::HeardList;
+
 use declab_api::{
     Audio, Block, Card, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq, Lock,
     Sink,
@@ -105,6 +107,7 @@ struct Dmr {
     system: Option<String>,
     /// LRRP location reports decoded.
     locations: u64,
+    heard: HeardList,
     recent: VecDeque<(String, String)>,
     now_s: f64,
     since_report: usize,
@@ -146,6 +149,7 @@ impl Dmr {
             last_csbk: Vec::new(),
             system: None,
             locations: 0,
+            heard: HeardList::default(),
             recent: VecDeque::new(),
             now_s: 0.0,
             since_report: 0,
@@ -223,11 +227,29 @@ impl Dmr {
             frames: 0,
             errors: 0,
         });
+        if let Some((name, src, enc)) = self.heard_call(slot) {
+            self.heard
+                .start(self.now_s, &name, slot_name(slot), Some(&src), enc);
+        }
+    }
+
+    /// The slot's call for the heard list: its group, who, encrypted.
+    fn heard_call(&self, slot: u8) -> Option<(String, String, bool)> {
+        let (src, dst, group, opts) = self.calls[slot as usize].as_ref()?.lc.call()?;
+        let name = if group {
+            format!("TG {dst}")
+        } else {
+            format!("private {dst}")
+        };
+        Some((name, src.to_string(), opts.privacy()))
     }
 
     fn end_call(&mut self, slot: u8, out: &mut Sink) {
         if self.playing.is_some_and(|(p, _)| p == slot) {
             self.playing = None;
+        }
+        if let Some((name, ..)) = self.heard_call(slot) {
+            self.heard.end(&name);
         }
         if let Some(c) = self.calls[slot as usize].take() {
             let ber = 100.0 * c.errors as f64 / (c.frames * 46).max(1) as f64;
@@ -269,6 +291,7 @@ impl Dmr {
                 match Lrrp::parse(&u.payload) {
                     Some(l) => {
                         self.locations += 1;
+                        self.heard.position(self.now_s, &h.src.to_string());
                         self.note(
                             format!("{} {}", slot_name(slot), h.src),
                             format!("{l}{crc}"),
@@ -320,6 +343,12 @@ impl Dmr {
                         c.frames += 3;
                         c.errors += frames.iter().map(|f| u64::from(f.errors)).sum::<u64>();
                         c.last_s = self.now_s;
+                    }
+                    if let Some((name, src, enc)) = self.heard_call(slot) {
+                        // A burst is three 20 ms frames.
+                        let now = self.now_s;
+                        self.heard
+                            .talk(now, &name, slot_name(slot), Some(&src), enc, 0.06);
                     }
                 }
                 Event::Csbk { slot, csbk, .. } => self.csbk(slot, csbk, out),
@@ -482,11 +511,13 @@ impl Decoder for Dmr {
         if self.since_report as f64 >= block.tuning.sample_rate / 10.0 {
             self.since_report = 0;
             self.report(out);
+            self.heard.report(self.now_s, out);
         }
     }
 
     fn reset(&mut self) {
         self.rx.reset();
+        self.heard.clear();
         self.calls = [None, None];
         self.playing = None;
         self.sym_hist.clear();

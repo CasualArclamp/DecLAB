@@ -5,6 +5,7 @@
 //! `cargo run --release -p declab-pmr --example tetra_file -- IN.cf32`
 
 use declab_pmr::fsk4::Iq;
+use declab_pmr::tetra::mac::Signal;
 use declab_pmr::tetra::{Event, Receiver};
 
 fn main() -> std::io::Result<()> {
@@ -31,6 +32,14 @@ fn main() -> std::io::Result<()> {
         for e in ev.drain(..) {
             match e {
                 Event::Traffic { tn, .. } => println!("    traffic tn {tn}"),
+                Event::Signal {
+                    signal: Some(Signal::NwrkBroadcast { neighbours }),
+                    ..
+                } => {
+                    for n in neighbours {
+                        println!("    neighbour {n:?}");
+                    }
+                }
                 Event::Signal { tn, .. } => println!("    signal tn {tn}"),
                 e => println!("    {e:?}"),
             }

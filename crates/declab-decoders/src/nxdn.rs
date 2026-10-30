@@ -10,6 +10,7 @@
 //! Scope "Symbols": the soft symbols of the latest frames, four bands.
 
 use std::collections::VecDeque;
+use crate::heard::HeardList;
 
 use declab_api::{
     Audio, Block, Card, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq, Lock,
@@ -104,6 +105,7 @@ struct Nxdn {
     call: Option<Call>,
     recent: VecDeque<(String, String)>,
     now_s: f64,
+    heard: HeardList,
     since_report: usize,
     sym_hist: VecDeque<f32>,
     vocoder: Ambe2Decoder,
@@ -125,6 +127,7 @@ impl Nxdn {
             call: None,
             recent: VecDeque::new(),
             now_s: 0.0,
+            heard: HeardList::default(),
             since_report: 0,
             sym_hist: VecDeque::new(),
             vocoder: Ambe2Decoder::new(),
@@ -161,9 +164,26 @@ impl Nxdn {
             frames: 0,
             errors: 0,
         });
+        if let Some((name, src)) = self.heard_call() {
+            self.heard.start(self.now_s, &name, "", Some(&src), false);
+        }
+    }
+
+    /// The call for the heard list: its group and who.
+    fn heard_call(&self) -> Option<(String, String)> {
+        let (src, dst, group) = self.call.as_ref()?.msg.call()?;
+        let name = if group {
+            format!("TG {dst}")
+        } else {
+            format!("private {dst}")
+        };
+        Some((name, src.to_string()))
     }
 
     fn end_call(&mut self, out: &mut Sink) {
+        if let Some((name, _)) = self.heard_call() {
+            self.heard.end(&name);
+        }
         if let Some(c) = self.call.take() {
             let ber = 100.0 * c.errors as f64 / (c.frames * 46).max(1) as f64;
             out.log(format!(
@@ -180,6 +200,12 @@ impl Nxdn {
             c.frames += frames.len() as u64;
             c.errors += frames.iter().map(|f| u64::from(f.errors)).sum::<u64>();
             c.last_s = self.now_s;
+        }
+        if let Some((name, src)) = self.heard_call() {
+            // 20 ms a frame.
+            let speech = 0.02 * frames.len() as f64;
+            self.heard
+                .talk(self.now_s, &name, "", Some(&src), false, speech);
         }
         self.pcm8.clear();
         let mut buf = [0f32; ambe2::FRAME];
@@ -318,11 +344,13 @@ impl Decoder for Nxdn {
         if self.since_report as f64 >= block.tuning.sample_rate / 10.0 {
             self.since_report = 0;
             self.report(out);
+            self.heard.report(self.now_s, out);
         }
     }
 
     fn reset(&mut self) {
         self.rx.reset();
+        self.heard.clear();
         self.call = None;
         self.sym_hist.clear();
     }

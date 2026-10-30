@@ -706,7 +706,14 @@ impl App {
         } else {
             1e3
         };
-        self.chan_hz = (hz / snap).round() * snap;
+        self.tune_exact((hz / snap).round() * snap);
+    }
+
+    /// Tune the channel to exactly `hz` (a TETRA carrier sits 6.25 or
+    /// 12.5 kHz off the 25 kHz raster: rounding to 1 kHz would cost it
+    /// 500 Hz).
+    fn tune_exact(&mut self, hz: f64) {
+        self.chan_hz = hz;
         // Off the edge of a radio's span: retune to it.
         if self.live
             && (self.chan_hz - self.center_hz).abs() > self.rate() / 2.0 - self.bandwidth_hz
@@ -1513,7 +1520,7 @@ impl eframe::App for App {
                                     has_big,
                                 );
                                 if let Some(id) = pick {
-                                    picked = Some(id);
+                                    picked = Some(panels::Pick::Service(id));
                                 }
                             })
                         },
@@ -1538,10 +1545,10 @@ impl eframe::App for App {
                                 {
                                     Some(m) => self.big_rows = panels::big_waterfall(ui, m).max(64),
                                     None => {
-                                        if let Some(id) =
+                                        if let Some(p) =
                                             panels::services(ui, &self.view, self.selected_service)
                                         {
-                                            picked = Some(id);
+                                            picked = Some(p);
                                         }
                                     }
                                 }
@@ -1549,11 +1556,15 @@ impl eframe::App for App {
                         },
                     );
                 });
-                if let Some(id) = picked {
-                    self.selected_service = Some(id);
-                    if let Some(h) = &self.host {
-                        h.command(declab_api::Command::SelectService(id));
+                match picked {
+                    Some(panels::Pick::Service(id)) => {
+                        self.selected_service = Some(id);
+                        if let Some(h) = &self.host {
+                            h.command(declab_api::Command::SelectService(id));
+                        }
                     }
+                    Some(panels::Pick::Tune(hz)) => self.tune_exact(hz),
+                    None => {}
                 }
             });
 

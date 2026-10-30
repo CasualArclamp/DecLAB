@@ -211,6 +211,7 @@ impl Decoder for Voice {
                 out.measurements.append(&mut s.measurements);
                 out.scopes.append(&mut s.scopes);
                 out.card = s.card.take();
+                out.heard = s.heard.take();
             }
             None if reported => {
                 out.lock = Lock::Searching;
@@ -319,6 +320,8 @@ mod tests {
             generation: 0,
         };
         let (mut log, mut sound) = (Vec::new(), 0usize);
+        // Every (group, radio) pair the heard lists showed.
+        let mut heard: Vec<(String, String)> = Vec::new();
         for (n, chunk) in iq.chunks(7_200).enumerate() {
             let block = Block {
                 iq: chunk,
@@ -331,6 +334,22 @@ mod tests {
             d.process(&block, &mut sink);
             log.append(&mut sink.log);
             sound += sink.audio.iter().map(|a| a.samples.len()).sum::<usize>();
+            if let Some(h) = sink.heard {
+                for r in h.radios {
+                    if !heard.contains(&(r.group.clone(), r.id.clone())) {
+                        heard.push((r.group, r.id));
+                    }
+                }
+            }
+        }
+        for (g, r) in [
+            ("TG 91", "2345678"),
+            ("TG 77", "1234"),
+            ("TG 9", "4321"),
+            ("TG 101", "1234567"),
+            ("TG 9001", "4000123"),
+        ] {
+            assert!(heard.contains(&(g.into(), r.into())), "{g} {r}: {heard:?}");
         }
         let pos = |s: &str| {
             log.iter()

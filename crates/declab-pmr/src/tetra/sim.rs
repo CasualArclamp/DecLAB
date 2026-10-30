@@ -188,7 +188,9 @@ pub fn call(cell: &mut Cell, gssi: u32, from: u32, frames: usize) -> (Vec<u8>, u
         Some(chan),
         Signal::Setup {
             call: 77,
-            service: 0,
+            // Basic service (clause 14.8.2): 000 speech TCH/S, 0 clear,
+            // 01 point-to-multipoint (a group call), 00.
+            service: 0b0000_0100,
             priority: 0,
             calling: Some(from),
         },

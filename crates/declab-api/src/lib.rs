@@ -156,6 +156,69 @@ pub struct Service {
     pub kind: String,
 }
 
+/// The talkgroups and radios heard on a digital voice signal since it was
+/// tuned, sent whole when it changes. Times are the decoder's stream time
+/// (seconds since the source started), so a file plays back as it was.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Heard {
+    /// Stream time of this list; ages are `now_s - last_s`.
+    pub now_s: f64,
+    /// Stream time of the first entry.
+    pub since_s: f64,
+    /// Most recently heard first.
+    pub groups: Vec<HeardGroup>,
+    pub radios: Vec<HeardRadio>,
+    /// Neighbouring cells or sites the network announces (TETRA's
+    /// D-NWRK-BROADCAST), by number.
+    pub cells: Vec<NearbyCell>,
+}
+
+/// A neighbouring cell: where it is, to tune to.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NearbyCell {
+    /// "cell 2".
+    pub name: String,
+    /// Its main carrier (downlink), Hz.
+    pub freq_hz: f64,
+    /// "LA 1204", and anything unusual about it.
+    pub detail: String,
+}
+
+/// A talkgroup (or an individual call's destination, "private 2345012").
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HeardGroup {
+    /// "TG 2350", "private 2345012".
+    pub name: String,
+    /// Where it was heard ("TS1"), or empty.
+    pub slot: String,
+    pub calls: u32,
+    /// Distinct radios heard talking on it.
+    pub radios: u32,
+    /// Time on the air, seconds.
+    pub air_s: f64,
+    pub last_s: f64,
+    /// On the air now.
+    pub live: bool,
+    pub encrypted: bool,
+}
+
+/// A radio (unit, subscriber).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HeardRadio {
+    pub id: String,
+    /// The group it last talked on, or how it was seen ("status", "SDS",
+    /// "encrypted signalling").
+    pub group: String,
+    /// Calls it talked in (0 when only seen in signalling).
+    pub calls: u32,
+    pub talk_s: f64,
+    /// Stream time of its last position report, if any.
+    pub position_s: Option<f64>,
+    pub last_s: f64,
+    pub live: bool,
+    pub encrypted: bool,
+}
+
 /// A bar like the margin bar of DecDVB-T's and DecSAT's cards: a reading on
 /// a fixed scale, ticked where the decoder needs it to be.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -238,6 +301,8 @@ pub struct Sink {
     pub text: Vec<(u32, String)>,
     /// The services list, sent whole whenever it changes.
     pub services: Option<Vec<Service>>,
+    /// Talkgroups and radios heard (digital voice), sent whole.
+    pub heard: Option<Heard>,
     pub measurements: Vec<Measurement>,
     /// The card, when the decoder has one to show (else the GUI makes one
     /// from the measurements).
@@ -280,6 +345,7 @@ impl Sink {
         self.pictures.clear();
         self.text.clear();
         self.services = None;
+        self.heard = None;
         self.measurements.clear();
         self.card = None;
         self.constellation.clear();

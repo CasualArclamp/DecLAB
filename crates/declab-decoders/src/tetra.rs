@@ -11,12 +11,13 @@
 //! clear call set-up heard for it.
 
 use std::collections::VecDeque;
+use crate::heard::HeardList;
 
 use declab_api::{
     Audio, Block, Card, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq, Lock,
-    Sink,
+    NearbyCell, Sink,
 };
-use declab_pmr::tetra::mac::{self, Address, ChanAlloc, Signal, Sync, SysInfo};
+use declab_pmr::tetra::mac::{self, Address, ChanAlloc, Neighbour, Signal, Sync, SysInfo};
 use declab_pmr::tetra::receiver::{RATE, SNR_GATE_DB};
 use declab_pmr::tetra::{Event, Receiver};
 use declab_pmr::vocoder::Upsample6;
@@ -80,6 +81,8 @@ pub(crate) fn gate() -> crate::gate_panel::Gate {
 
 struct Call {
     id: u16,
+    /// For the heard list: "TG 9001", "private 4000123".
+    group: String,
     to: Option<u32>,
     from: Option<u32>,
     usage_marker: Option<u8>,
@@ -96,6 +99,8 @@ struct Tetra {
     sync: Option<Sync>,
     sysinfo: Option<SysInfo>,
     calls: Vec<Call>,
+    /// Neighbour cells from D-NWRK-BROADCAST, by cell identifier.
+    neighbours: Vec<Neighbour>,
     /// The timeslot whose speech is being played, and when it last spoke.
     playing: Option<(u8, f64)>,
     codec: Result<Acelp, String>,
@@ -103,6 +108,7 @@ struct Tetra {
     recent: VecDeque<(String, String)>,
     last_other: Vec<String>,
     now_s: f64,
+    heard: HeardList,
     since_report: usize,
     points: VecDeque<Iq>,
     up: Upsample6,
@@ -125,12 +131,14 @@ impl Tetra {
             sync: None,
             sysinfo: None,
             calls: Vec::new(),
+            neighbours: Vec::new(),
             playing: None,
             codec: Acelp::load(),
             codec_noted: false,
             recent: VecDeque::new(),
             last_other: Vec::new(),
             now_s: 0.0,
+            heard: HeardList::default(),
             since_report: 0,
             points: VecDeque::new(),
             up: Upsample6::new(),
@@ -146,6 +154,64 @@ impl Tetra {
         self.recent.truncate(RECENT);
     }
 
+    /// A call's speech to the heard list: its group, from whoever has the
+    /// floor.
+    fn heard_talk(&mut self, id: u16, speech_s: f64) {
+        let Some(c) = self.calls.iter().find(|c| c.id == id) else {
+            return;
+        };
+        let slot = c.timeslot.map_or(String::new(), |t| format!("TS{}", t + 1));
+        let from = c.from.map(|f| f.to_string());
+        self.heard.talk(
+            self.now_s,
+            &c.group,
+            &slot,
+            from.as_deref(),
+            c.encrypted,
+            speech_s,
+        );
+    }
+
+    /// The neighbours to the heard list, once SYSINFO gives the band.
+    fn nearby(&mut self) {
+        let Some(si) = &self.sysinfo else { return };
+        let sync = &self.sync;
+        let cells = self
+            .neighbours
+            .iter()
+            .map(|n| {
+                let mut detail = n.la.map_or(String::new(), |la| format!("LA {la}"));
+                let mut add = |s: String| {
+                    if !detail.is_empty() {
+                        detail.push_str(" · ");
+                    }
+                    detail.push_str(&s);
+                };
+                // Another network's cell (the same is left out, table 18.64).
+                if let Some(mcc) = n.mcc.filter(|&m| sync.as_ref().is_none_or(|s| s.mcc != m)) {
+                    add(format!("MCC {mcc}"));
+                }
+                if let Some(mnc) = n.mnc.filter(|&m| sync.as_ref().is_none_or(|s| s.mnc != m)) {
+                    add(format!("MNC {mnc}"));
+                }
+                if !n.synchronized {
+                    add("not synchronised".into());
+                }
+                if let Some(l) = ["", "load low", "load medium", "load high"].get(n.load as usize)
+                    && !l.is_empty()
+                {
+                    add((*l).into());
+                }
+                NearbyCell {
+                    name: format!("cell {}", n.cell),
+                    freq_hz: n.carrier_hz(si),
+                    detail,
+                }
+            })
+            .collect();
+        self.heard.set_cells(cells);
+    }
+
     fn call_mut(&mut self, id: u16) -> Option<&mut Call> {
         self.calls.iter_mut().find(|c| c.id == id)
     }
@@ -153,6 +219,7 @@ impl Tetra {
     fn end_call(&mut self, id: u16, why: &str, out: &mut Sink) {
         if let Some(i) = self.calls.iter().position(|c| c.id == id) {
             let c = self.calls.remove(i);
+            self.heard.end(&c.group);
             out.log(format!(
                 "end of call {} to {} ({why}) after {:.1} s, {} traffic slots",
                 c.id,
@@ -178,6 +245,10 @@ impl Tetra {
         let to = address.ssi();
         let Some(signal) = signal else {
             if encrypted {
+                if let Some(t) = to {
+                    self.heard
+                        .seen(self.now_s, &t.to_string(), "encrypted signalling");
+                }
                 let s = format!("encrypted signalling to {}", ssi(to));
                 if !self.last_other.contains(&s) {
                     self.last_other.push(s.clone());
@@ -189,7 +260,12 @@ impl Tetra {
         };
         let now = self.now_s;
         match signal {
-            Signal::Setup { call, calling, .. } => {
+            Signal::Setup {
+                call,
+                calling,
+                service,
+                ..
+            } => {
                 let usage_marker = match address {
                     Address::SsiUsageMarker(_, u) => Some(u),
                     _ => None,
@@ -215,8 +291,24 @@ impl Tetra {
                     format!("call {call} to {} from {}{ts}", ssi(to), ssi(calling)),
                     out,
                 );
+                // Basic service information (clause 14.8.2): bits 3–2 the
+                // communication type, 00 point-to-point.
+                let group = match (service >> 2 & 3, to) {
+                    (0, Some(t)) => format!("private {t}"),
+                    (_, Some(t)) => format!("TG {t}"),
+                    (_, None) => format!("call {call}"),
+                };
+                let slot = timeslot.map_or(String::new(), |t| format!("TS{}", t + 1));
+                self.heard.start(
+                    now,
+                    &group,
+                    &slot,
+                    calling.map(|c| c.to_string()).as_deref(),
+                    encrypted,
+                );
                 self.calls.push(Call {
                     id: call,
+                    group,
                     to,
                     from: calling,
                     usage_marker,
@@ -233,12 +325,19 @@ impl Tetra {
                 party,
                 ..
             } => {
+                // A new talker takes the floor: a transmission of its own.
+                let mut started = None;
                 if let Some(c) = self.call_mut(call) {
                     c.last_s = now;
                     c.encrypted |= e2e || encrypted;
-                    if party.is_some() {
+                    if party.is_some() && party != c.from {
                         c.from = party;
+                        started = Some((c.group.clone(), c.timeslot, c.encrypted));
                     }
+                }
+                if let (Some((group, ts, enc)), Some(p)) = (started, party) {
+                    let slot = ts.map_or(String::new(), |t| format!("TS{}", t + 1));
+                    self.heard.start(now, &group, &slot, Some(&p.to_string()), enc);
                 }
                 let tag = if e2e { " (end-to-end encrypted)" } else { "" };
                 self.note(format!("call {call}: {} talking{tag}", ssi(party)), out);
@@ -253,10 +352,25 @@ impl Tetra {
                     c.last_s = now;
                 }
             }
+            Signal::NwrkBroadcast { neighbours } => {
+                // A cell sends its list in parts: each neighbour replaces
+                // the one with its identifier.
+                for n in neighbours {
+                    match self.neighbours.iter_mut().find(|m| m.cell == n.cell) {
+                        Some(m) => *m = n,
+                        None => self.neighbours.push(n),
+                    }
+                }
+                self.neighbours.sort_by_key(|n| n.cell);
+                self.nearby();
+            }
             Signal::Release { call, cause } => {
                 self.end_call(call, &format!("released, cause {cause}"), out);
             }
             Signal::Status { from, status } => {
+                if let Some(f) = from {
+                    self.heard.seen(now, &f.to_string(), "status");
+                }
                 self.note(
                     format!("status {status:#06x} from {} to {}", ssi(from), ssi(to)),
                     out,
@@ -268,6 +382,9 @@ impl Tetra {
                 data,
                 bits,
             } => {
+                if let Some(f) = from {
+                    self.heard.seen(now, &f.to_string(), "SDS");
+                }
                 let body = sds_text(kind, &data, bits);
                 self.note(
                     format!("SDS from {} to {}: {body}", ssi(from), ssi(to)),
@@ -293,6 +410,8 @@ impl Tetra {
         if let Some(i) = call_i {
             self.calls[i].slots += 1;
             self.calls[i].last_s = now;
+            // A slot carries two 30 ms frames.
+            self.heard_talk(self.calls[i].id, 0.06);
         }
         // One timeslot is played: the first to speak, until it falls quiet.
         match self.playing {
@@ -364,7 +483,11 @@ impl Tetra {
                             out,
                         );
                     }
+                    let first = self.sysinfo.is_none();
                     self.sysinfo = Some(si);
+                    if first {
+                        self.nearby();
+                    }
                 }
                 Event::Signal {
                     tn,
@@ -550,12 +673,16 @@ impl Decoder for Tetra {
         if self.since_report as f64 >= block.tuning.sample_rate / 10.0 {
             self.since_report = 0;
             self.report(out);
+            self.heard.report(self.now_s, out);
         }
     }
 
     fn reset(&mut self) {
         self.rx.reset();
+        self.heard.clear();
         self.calls.clear();
+        self.neighbours.clear();
+        self.sysinfo = None;
         self.playing = None;
         self.points.clear();
     }

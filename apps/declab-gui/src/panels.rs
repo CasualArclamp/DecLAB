@@ -429,7 +429,14 @@ fn shown_service(view: &DecoderView, selected: Option<u32>) -> Option<u32> {
     selected.or(view.services.first().map(|s| s.id))
 }
 
-pub fn services(ui: &mut Ui, view: &DecoderView, selected: Option<u32>) -> Option<u32> {
+/// What a click in the services panel asks for.
+pub enum Pick {
+    Service(u32),
+    /// Tune the channel here (a nearby cell's carrier), Hz.
+    Tune(f64),
+}
+
+pub fn services(ui: &mut Ui, view: &DecoderView, selected: Option<u32>) -> Option<Pick> {
     let mut pick = None;
     // Everything scrolls: a multiplex has a dozen services or more, and
     // the box must not grow out of the panel.
@@ -440,15 +447,19 @@ pub fn services(ui: &mut Ui, view: &DecoderView, selected: Option<u32>) -> Optio
             ui.add(egui::Label::new(RichText::new(t).color(Color32::WHITE)).wrap());
             ui.add_space(6.0);
         }
-        ui.label(RichText::new("Services").strong());
-        if view.services.is_empty() {
-            ui.label(RichText::new("none announced").color(GREY));
+        if let Some(h) = &view.heard {
+            pick = heard(ui, h).map(Pick::Tune);
+        } else {
+            ui.label(RichText::new("Services").strong());
+            if view.services.is_empty() {
+                ui.label(RichText::new("none announced").color(GREY));
+            }
         }
         for s in &view.services {
             let name = if s.name.is_empty() { format!("[{}]", s.id) } else { s.name.clone() };
             let text = format!("{name:<24} {}", s.kind);
             if ui.selectable_label(shown == Some(s.id), RichText::new(text)).clicked() {
-                pick = Some(s.id);
+                pick = Some(Pick::Service(s.id));
             }
         }
         if let Some(last) = view.log.back() {
@@ -457,6 +468,115 @@ pub fn services(ui: &mut Ui, view: &DecoderView, selected: Option<u32>) -> Optio
         }
     });
     pick
+}
+
+/// Seconds as m:ss (h:mm:ss past an hour).
+fn clock(s: f64) -> String {
+    let s = s.max(0.0) as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
+/// Digital voice: the talkgroups and radios heard, two tables (mockup A),
+/// and between them the nearby cells the network announces. The one on
+/// the air is green, encrypted ones grey with a lock. Returns a nearby
+/// cell's frequency when it is clicked.
+fn heard(ui: &mut Ui, h: &declab_api::Heard) -> Option<f64> {
+    let mut tune = None;
+    let ago = |last: f64, live: bool| if live { "now".to_string() } else { clock(h.now_s - last) };
+    let head = |ui: &mut Ui, title: &str, note: String| {
+        // Beside the title, not right-aligned: in the scroll area the right
+        // edge is the content's, which clipped it.
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(title).color(AMBER));
+            ui.add_space(8.0);
+            ui.label(RichText::new(note).color(GREY).size(12.0));
+        });
+    };
+    // A table's header row, then its rows; numbers right-aligned.
+    let cell = |ui: &mut Ui, text: String, colour: Color32, right: bool| {
+        let t = RichText::new(text).color(colour);
+        if right {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(t));
+        } else {
+            ui.label(t);
+        }
+    };
+    let colour = |live: bool, enc: bool| {
+        if live {
+            GREEN
+        } else if enc {
+            GREY
+        } else {
+            Color32::from_gray(230)
+        }
+    };
+    let lock = |enc: bool| if enc { " 🔒" } else { "" };
+    let dot = |live: bool| if live { "● " } else { "" };
+
+    head(ui, "Talkgroups", format!("{} heard in {}", h.groups.len(), clock(h.now_s - h.since_s)));
+    if h.groups.is_empty() {
+        ui.label(RichText::new("none yet").color(GREY));
+    } else {
+        egui::Grid::new("heard_groups").striped(false).spacing(vec2(14.0, 2.0)).show(ui, |ui| {
+            for (t, right) in [("TG", false), ("slot", false), ("calls", true), ("radios", true), ("air time", true), ("last", true)] {
+                cell(ui, t.into(), GREY, right);
+            }
+            ui.end_row();
+            for g in &h.groups {
+                let c = colour(g.live, g.encrypted);
+                cell(ui, format!("{}{}{}", dot(g.live), g.name, lock(g.encrypted)), c, false);
+                cell(ui, g.slot.clone(), c, false);
+                cell(ui, g.calls.to_string(), c, true);
+                cell(ui, g.radios.to_string(), c, true);
+                cell(ui, clock(g.air_s), c, true);
+                cell(ui, ago(g.last_s, g.live), c, true);
+                ui.end_row();
+            }
+        });
+    }
+    if !h.cells.is_empty() {
+        ui.add_space(8.0);
+        head(ui, "Nearby cells", "click a frequency to tune there".into());
+        egui::Grid::new("heard_cells").spacing(vec2(14.0, 2.0)).show(ui, |ui| {
+            for c in &h.cells {
+                cell(ui, c.name.clone(), Color32::from_gray(230), false);
+                let f = RichText::new(format!("{:.4} MHz", c.freq_hz / 1e6)).color(AMBER);
+                if ui.link(f).on_hover_text("tune here").clicked() {
+                    tune = Some(c.freq_hz);
+                }
+                cell(ui, c.detail.clone(), GREY, false);
+                ui.end_row();
+            }
+        });
+    }
+    ui.add_space(8.0);
+    head(ui, "Radios", format!("{} heard", h.radios.len()));
+    if h.radios.is_empty() {
+        ui.label(RichText::new("none yet").color(GREY));
+    } else {
+        egui::Grid::new("heard_radios").striped(false).spacing(vec2(14.0, 2.0)).show(ui, |ui| {
+            for (t, right) in [("radio", false), ("last TG", false), ("calls", true), ("talk time", true), ("position", false), ("last", true)] {
+                cell(ui, t.into(), GREY, right);
+            }
+            ui.end_row();
+            for r in &h.radios {
+                let c = colour(r.live, r.encrypted);
+                cell(ui, format!("{}{}", dot(r.live), r.id), c, false);
+                cell(ui, format!("{}{}", r.group, lock(r.encrypted)), c, false);
+                cell(ui, r.calls.to_string(), c, true);
+                cell(ui, if r.calls > 0 { clock(r.talk_s) } else { String::new() }, c, true);
+                let pos = r.position_s.map_or(String::new(), |p| format!("fix {} ago", clock(h.now_s - p)));
+                cell(ui, pos, Color32::from_rgb(138, 154, 168), false);
+                cell(ui, ago(r.last_s, r.live), c, true);
+                ui.end_row();
+            }
+        });
+    }
+    tune
 }
 
 /// The status bar.

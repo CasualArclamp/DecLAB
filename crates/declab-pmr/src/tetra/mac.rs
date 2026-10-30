@@ -208,6 +208,107 @@ impl SysInfo {
     }
 }
 
+/// A neighbour cell from D-NWRK-BROADCAST: the "neighbour cell information
+/// for CA" element, clause 18.5.17 table 18.64. The optional parts left
+/// out are, per its notes, the same as the serving cell's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Neighbour {
+    /// Cell identifier CA (5 bits).
+    pub cell: u8,
+    /// Cell reselection types supported (2 bits).
+    pub reselect: u8,
+    pub synchronized: bool,
+    /// Cell load CA (2 bits): 0 unknown, 1 low, 2 medium, 3 high.
+    pub load: u8,
+    pub main_carrier: u16,
+    /// Main carrier number extension (clause 18.5.11): frequency band,
+    /// offset, duplex spacing, reverse operation.
+    pub extension: Option<(u8, u8, u8, bool)>,
+    pub mcc: Option<u16>,
+    pub mnc: Option<u16>,
+    pub la: Option<u16>,
+}
+
+impl Neighbour {
+    /// Its main carrier's downlink frequency; band and offset from the
+    /// serving cell's SYSINFO unless the element carries its own.
+    pub fn carrier_hz(&self, serving: &SysInfo) -> f64 {
+        let (band, offset) = self
+            .extension
+            .map_or((serving.band, serving.offset), |e| (e.0, e.1));
+        super::carrier_hz(band, self.main_carrier, offset)
+    }
+
+    fn parse(r: &mut Bits) -> Option<Neighbour> {
+        let mut n = Neighbour {
+            cell: r.take(5)? as u8,
+            reselect: r.take(2)? as u8,
+            synchronized: r.flag()?,
+            load: r.take(2)? as u8,
+            main_carrier: r.take(12)? as u16,
+            extension: None,
+            mcc: None,
+            mnc: None,
+            la: None,
+        };
+        // The type 2 elements: an O-bit, then a P-bit before each.
+        if r.flag()? {
+            let opt = |r: &mut Bits, len: usize| -> Option<Option<u32>> {
+                Some(if r.flag()? { Some(r.take(len)?) } else { None })
+            };
+            n.extension = opt(r, 10)?.map(|e| {
+                (
+                    (e >> 6) as u8,
+                    (e >> 4 & 3) as u8,
+                    (e >> 1 & 7) as u8,
+                    e & 1 == 1,
+                )
+            });
+            n.mcc = opt(r, 10)?.map(|v| v as u16);
+            n.mnc = opt(r, 14)?.map(|v| v as u16);
+            n.la = opt(r, 14)?.map(|v| v as u16);
+            // Maximum MS transmit power, minimum RX access level,
+            // subscriber class, BS service details, timeshare cell or
+            // security parameters, TDMA frame offset: read past.
+            for len in [3, 4, 16, 12, 5, 6] {
+                opt(r, len)?;
+            }
+        }
+        Some(n)
+    }
+
+    fn write(&self, w: &mut Writer) {
+        w.put(self.cell.into(), 5)
+            .put(self.reselect.into(), 2)
+            .put(self.synchronized.into(), 1)
+            .put(self.load.into(), 2)
+            .put(self.main_carrier.into(), 12);
+        let any = self.extension.is_some() || self.mcc.is_some() || self.mnc.is_some() || self.la.is_some();
+        w.put(any.into(), 1);
+        if !any {
+            return;
+        }
+        let opt = |w: &mut Writer, v: Option<u32>, len: usize| match v {
+            Some(v) => {
+                w.put(1, 1).put(v, len);
+            }
+            None => {
+                w.put(0, 1);
+            }
+        };
+        let ext = self.extension.map(|(b, o, d, r)| {
+            u32::from(b) << 6 | u32::from(o) << 4 | u32::from(d) << 1 | u32::from(r)
+        });
+        opt(w, ext, 10);
+        opt(w, self.mcc.map(u32::from), 10);
+        opt(w, self.mnc.map(u32::from), 14);
+        opt(w, self.la.map(u32::from), 14);
+        for _ in 0..6 {
+            w.put(0, 1);
+        }
+    }
+}
+
 /// ACCESS-ASSIGN, the AACH's 14 bits, clause 21.4.7.2 tables 21.82/21.83.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccessAssign {
@@ -615,6 +716,9 @@ pub enum Signal {
     Cmce(u8),
     /// MM (protocol discriminator 001), by PDU type.
     Mm(u8),
+    /// D-NWRK-BROADCAST (MLE type 010, clause 18.4.1.4.1 table 18.2): the
+    /// neighbour cells.
+    NwrkBroadcast { neighbours: Vec<Neighbour> },
     /// MLE (101), by PDU type.
     Mle(u8),
     /// Another protocol discriminator.
@@ -668,9 +772,35 @@ pub fn parse_sdu(sdu: &[u8]) -> Option<Signal> {
     match pd {
         0b010 => cmce(&mut r),
         0b001 => Some(Signal::Mm(r.take(4)? as u8)),
-        0b101 => Some(Signal::Mle(r.take(3)? as u8)),
+        0b101 => mle(&mut r),
         p => Some(Signal::Other(p as u8)),
     }
+}
+
+/// MLE downlink PDUs, clause 18.5.20 PDU types: D-NWRK-BROADCAST read,
+/// the rest by type.
+fn mle(r: &mut Bits) -> Option<Signal> {
+    let t = r.take(3)? as u8;
+    if t != 0b010 {
+        return Some(Signal::Mle(t));
+    }
+    // Cell re-select parameters (16), cell load CA (2).
+    r.take(16)?;
+    r.take(2)?;
+    let mut neighbours = Vec::new();
+    if r.flag()? {
+        // TETRA network time (48), then the number of neighbour cells.
+        if r.flag()? {
+            r.take(24)?;
+            r.take(24)?;
+        }
+        if r.flag()? {
+            for _ in 0..r.take(3)? {
+                neighbours.push(Neighbour::parse(r)?);
+            }
+        }
+    }
+    Some(Signal::NwrkBroadcast { neighbours })
 }
 
 /// CMCE downlink PDUs, table 14.66 types.
@@ -772,6 +902,16 @@ fn cmce(r: &mut Bits) -> Option<Signal> {
 /// A TM-SDU for a CMCE PDU in BL-UDATA, for the simulator.
 pub fn write_signal(s: &Signal) -> Vec<u8> {
     let mut w = Writer::default();
+    if let Signal::NwrkBroadcast { neighbours } = s {
+        // BL-UDATA, MLE, D-NWRK-BROADCAST, re-select parameters and load
+        // zero, no network time, the neighbours.
+        w.put(0b0010, 4).put(0b101, 3).put(0b010, 3).put(0, 16).put(0, 2);
+        w.put(1, 1).put(0, 1).put(1, 1).put(neighbours.len() as u32, 3);
+        for n in neighbours {
+            n.write(&mut w);
+        }
+        return w.0;
+    }
     w.put(0b0010, 4).put(0b010, 3);
     let party = |w: &mut Writer, p: Option<u32>| match p {
         Some(s) => {
@@ -900,6 +1040,7 @@ pub fn signal_name(s: &Signal) -> String {
             .get(*t as usize)
             .map_or_else(|| format!("CMCE {t}"), |n| (*n).to_string()),
         Signal::Mm(t) => format!("MM type {t}"),
+        Signal::NwrkBroadcast { .. } => "D-NWRK-BROADCAST".into(),
         Signal::Mle(t) => format!("MLE type {t}"),
         Signal::Other(p) => format!("protocol {p}"),
         Signal::Setup { .. } => "D-SETUP".into(),
@@ -1052,5 +1193,54 @@ mod tests {
     #[test]
     fn null_pdu() {
         assert_eq!(parse_block(&write_null(124)), vec![Pdu::Null]);
+    }
+
+    /// D-NWRK-BROADCAST with two neighbours, one with only the mandatory
+    /// part (as seen on a real cell, which sent LA alone as well).
+    #[test]
+    fn neighbours_round_trip() {
+        let a = Neighbour {
+            cell: 2,
+            reselect: 0,
+            synchronized: true,
+            load: 0,
+            main_carrier: 3604,
+            extension: None,
+            mcc: None,
+            mnc: None,
+            la: Some(1204),
+        };
+        let b = Neighbour {
+            cell: 9,
+            synchronized: false,
+            load: 3,
+            main_carrier: 3792,
+            la: None,
+            ..a
+        };
+        let s = Signal::NwrkBroadcast {
+            neighbours: vec![a, b],
+        };
+        assert_eq!(parse_sdu(&write_signal(&s)), Some(s));
+        // 390.1125 MHz on the serving cell's band 3, offset +12.5 kHz.
+        let si = SysInfo {
+            main_carrier: 3620,
+            band: 3,
+            offset: 3,
+            duplex: 0,
+            reverse: false,
+            common_scch: 0,
+            tx_max: 5,
+            rx_min: 3,
+            access_param: 7,
+            timeout: 3,
+            hyperframe_or_cck: (false, 0),
+            option_flag: 2,
+            option: 0,
+            la: 1207,
+            subscriber_class: 13,
+            services: 3431,
+        };
+        assert!((a.carrier_hz(&si) - 390.1125e6).abs() < 1.0);
     }
 }

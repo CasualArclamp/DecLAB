@@ -13,6 +13,7 @@ mod dmr;
 mod dvbt;
 #[cfg(feature = "ui")]
 mod gate_panel;
+mod heard;
 mod level;
 mod nxdn;
 mod p25;

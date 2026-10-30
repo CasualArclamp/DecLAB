@@ -9,6 +9,7 @@
 //! decoded.
 
 use std::collections::{HashMap, VecDeque};
+use crate::heard::HeardList;
 
 use declab_api::{
     Audio, Block, Card, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq, Lock,
@@ -98,6 +99,7 @@ struct P25 {
     system: Option<String>,
     recent: VecDeque<(String, String)>,
     now_s: f64,
+    heard: HeardList,
     since_report: usize,
     sym_hist: VecDeque<f32>,
     vocoder: ImbeDecoder,
@@ -122,6 +124,7 @@ impl P25 {
             system: None,
             recent: VecDeque::new(),
             now_s: 0.0,
+            heard: HeardList::default(),
             since_report: 0,
             sym_hist: VecDeque::new(),
             vocoder: ImbeDecoder::new(),
@@ -156,9 +159,27 @@ impl P25 {
             errors: 0,
             encrypted,
         });
+        if let Some((name, src, enc)) = self.heard_call() {
+            self.heard.start(self.now_s, &name, "", Some(&src), enc);
+        }
+    }
+
+    /// The call for the heard list: its group, who, encrypted.
+    fn heard_call(&self) -> Option<(String, String, bool)> {
+        let c = self.call.as_ref()?;
+        let (src, dst, group, _) = c.lc.call()?;
+        let name = if group {
+            format!("TG {dst}")
+        } else {
+            format!("private {dst}")
+        };
+        Some((name, src.to_string(), c.encrypted))
     }
 
     fn end_call(&mut self, out: &mut Sink) {
+        if let Some((name, ..)) = self.heard_call() {
+            self.heard.end(&name);
+        }
         if let Some(c) = self.call.take() {
             let ber = 100.0 * c.errors as f64 / (c.frames * 137).max(1) as f64;
             out.log(format!(
@@ -182,6 +203,12 @@ impl P25 {
             c.errors += frames.iter().map(|f| u64::from(f.errors)).sum::<u64>();
             c.last_s = self.now_s;
             c.encrypted = encrypted;
+        }
+        if let Some((name, src, enc)) = self.heard_call() {
+            // 20 ms a frame.
+            let speech = 0.02 * frames.len() as f64;
+            self.heard
+                .talk(self.now_s, &name, "", Some(&src), enc, speech);
         }
         if encrypted {
             return;
@@ -408,11 +435,13 @@ impl Decoder for P25 {
         if self.since_report as f64 >= block.tuning.sample_rate / 10.0 {
             self.since_report = 0;
             self.report(out);
+            self.heard.report(self.now_s, out);
         }
     }
 
     fn reset(&mut self) {
         self.rx.reset();
+        self.heard.clear();
         self.call = None;
         self.sym_hist.clear();
     }
