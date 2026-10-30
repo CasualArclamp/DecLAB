@@ -205,16 +205,22 @@ fn interleave() -> [usize; 98] {
     t
 }
 
-/// Rate ¾ trellis encode: 18 bytes → the 196 bits sent.
-pub fn trellis_encode(data: &[u8; 18]) -> [u8; 196] {
-    let mut bits = Vec::with_capacity(147);
-    to_bits(data, &mut bits);
-    bits.extend([0, 0, 0]);
+/// Table B.7's rate ½ sibling (P25's TSBKs and PDUs; MMDVMHost
+/// `ENCODE_TABLE_12`): the constellation point for (state, dibit); the next
+/// state is the dibit.
+const TRELLIS12: [[u8; 4]; 4] = [[0, 15, 12, 3], [4, 11, 8, 7], [13, 2, 1, 14], [9, 6, 5, 10]];
+
+/// Encode `bits` (`per` bits a step: 3 for rate ¾, 2 for rate ½, the flush
+/// step included) through the machine `point(state, input)` into the 196
+/// bits sent.
+fn trellis_encode_with(bits: &[u8], per: usize, point: impl Fn(usize, usize) -> u8) -> [u8; 196] {
     let mut enc = [0u8; 98];
     let mut state = 0usize;
     for k in 0..49 {
-        let t = (bits[3 * k] << 2 | bits[3 * k + 1] << 1 | bits[3 * k + 2]) as usize;
-        let (a, b) = POINTS[TRELLIS[state][t] as usize];
+        let t = bits[per * k..per * k + per]
+            .iter()
+            .fold(0usize, |v, &b| (v << 1) | usize::from(b));
+        let (a, b) = POINTS[point(state, t) as usize];
         enc[2 * k] = dibit(a);
         enc[2 * k + 1] = dibit(b);
         state = t;
@@ -228,9 +234,14 @@ pub fn trellis_encode(data: &[u8; 18]) -> [u8; 196] {
     out
 }
 
-/// Rate ¾ trellis decode from the 196 bits' LLRs (sending order): 18 bytes
-/// and how many tribits the path disagreed with the slicer on.
-pub fn trellis_decode(llr: &[f32; 196]) -> ([u8; 18], u32) {
+/// Soft Viterbi over a machine of `states` states (the input is the next
+/// state): the 49 inputs, and how many steps the path disagreed with the
+/// slicer on.
+fn trellis_decode_with(
+    llr: &[f32; 196],
+    states: usize,
+    point: impl Fn(usize, usize) -> u8,
+) -> ([u8; 49], u32) {
     let ilv = interleave();
     // Encoder-order LLR pairs.
     let mut enc = [[0f32; 2]; 98];
@@ -248,12 +259,12 @@ pub fn trellis_decode(llr: &[f32; 196]) -> ([u8; 18], u32) {
     let mut from = [[0u8; 8]; 49];
     for k in 0..49 {
         let mut next = [f32::MIN; 8];
-        for s in 0..8 {
+        for s in 0..states {
             if metric[s] == f32::MIN {
                 continue;
             }
-            for t in 0..8 {
-                let (a, b) = POINTS[TRELLIS[s][t] as usize];
+            for t in 0..states {
+                let (a, b) = POINTS[point(s, t) as usize];
                 let m = metric[s] + score(enc[2 * k], a) + score(enc[2 * k + 1], b);
                 if m > next[t] {
                     next[t] = m;
@@ -263,29 +274,63 @@ pub fn trellis_decode(llr: &[f32; 196]) -> ([u8; 18], u32) {
         }
         metric = next;
     }
-    // The flush tribit leaves the machine in state 0.
-    let mut tribits = [0u8; 49];
+    // The flush step leaves the machine in state 0.
+    let mut inputs = [0u8; 49];
     let mut s = 0usize;
     for k in (0..49).rev() {
-        tribits[k] = s as u8;
+        inputs[k] = s as u8;
         s = from[k][s] as usize;
     }
+    let mut state = 0usize;
+    let mut bad = 0;
+    for (k, &t) in inputs.iter().enumerate() {
+        let (a, b) = POINTS[point(state, t as usize) as usize];
+        if score(enc[2 * k], a) < 0.0 || score(enc[2 * k + 1], b) < 0.0 {
+            bad += 1;
+        }
+        state = t as usize;
+    }
+    (inputs, bad)
+}
+
+/// Rate ¾ trellis encode: 18 bytes → the 196 bits sent.
+pub fn trellis_encode(data: &[u8; 18]) -> [u8; 196] {
+    let mut bits = Vec::with_capacity(147);
+    to_bits(data, &mut bits);
+    bits.extend([0, 0, 0]);
+    trellis_encode_with(&bits, 3, |s, t| TRELLIS[s][t])
+}
+
+/// Rate ¾ trellis decode from the 196 bits' LLRs (sending order): 18 bytes
+/// and how many tribits the path disagreed with the slicer on.
+pub fn trellis_decode(llr: &[f32; 196]) -> ([u8; 18], u32) {
+    let (tribits, bad) = trellis_decode_with(llr, 8, |s, t| TRELLIS[s][t]);
     let mut bits = Vec::with_capacity(144);
     for &t in &tribits[..48] {
         bits.extend([(t >> 2) & 1, (t >> 1) & 1, t & 1]);
     }
     let mut out = [0u8; 18];
     super::bptc::to_bytes(&bits, &mut out);
-    // Disagreements with the hard decisions, as a quality figure.
-    let mut state = 0usize;
-    let mut bad = 0;
-    for (k, &t) in tribits.iter().enumerate() {
-        let (a, b) = POINTS[TRELLIS[state][t as usize] as usize];
-        if score(enc[2 * k], a) < 0.0 || score(enc[2 * k + 1], b) < 0.0 {
-            bad += 1;
-        }
-        state = t as usize;
+    (out, bad)
+}
+
+/// Rate ½ trellis encode (P25 TSBKs): 12 bytes → the 196 bits sent.
+pub fn trellis12_encode(data: &[u8; 12]) -> [u8; 196] {
+    let mut bits = Vec::with_capacity(98);
+    to_bits(data, &mut bits);
+    bits.extend([0, 0]);
+    trellis_encode_with(&bits, 2, |s, t| TRELLIS12[s][t])
+}
+
+/// Rate ½ trellis decode: 12 bytes and the steps that disagreed.
+pub fn trellis12_decode(llr: &[f32; 196]) -> ([u8; 12], u32) {
+    let (dibits, bad) = trellis_decode_with(llr, 4, |s, t| TRELLIS12[s][t]);
+    let mut bits = Vec::with_capacity(96);
+    for &d in &dibits[..48] {
+        bits.extend([(d >> 1) & 1, d & 1]);
     }
+    let mut out = [0u8; 12];
+    super::bptc::to_bytes(&bits, &mut out);
     (out, bad)
 }
 
@@ -400,6 +445,17 @@ mod tests {
         let (out, bad) = trellis_decode(&llr);
         assert_eq!(out, data);
         assert!(bad > 0);
+    }
+
+    #[test]
+    fn trellis12_round_trip_through_errors() {
+        let data: [u8; 12] = std::array::from_fn(|i| (i * 53 + 7) as u8);
+        let tx = trellis12_encode(&data);
+        let mut llr: [f32; 196] = std::array::from_fn(|i| if tx[i] == 0 { 2.0 } else { -2.0 });
+        for i in [4, 30, 31, 90, 150, 191] {
+            llr[i] *= -0.5;
+        }
+        assert_eq!(trellis12_decode(&llr).0, data);
     }
 
     #[test]

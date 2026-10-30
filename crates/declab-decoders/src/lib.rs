@@ -8,15 +8,16 @@
 use declab_api::DecoderFactory;
 
 mod analog;
-mod dvbt;
 mod analog_rds;
 mod dmr;
-mod level;
-mod nxdn;
-mod pagers;
-mod voice;
+mod dvbt;
 #[cfg(feature = "ui")]
 mod gate_panel;
+mod level;
+mod nxdn;
+mod p25;
+mod pagers;
+mod voice;
 
 use analog::Mode;
 

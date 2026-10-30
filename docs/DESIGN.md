@@ -129,7 +129,8 @@ DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
 | V1 | RTL-SDR source; DMR Tier I/II/III + packet data + LRRP (`declab-pmr`, `dmr` plug-in), weak-signal receiver | ✅ 2026-10-29 in simulation only: no real DMR capture yet. AMBE+2 vocoder (port of mbelib) plays 2026-10-29 |
 | V2 | NXDN48 conventional voice (`nxdn` plug-in), SNR gate in DMR and NXDN | ✅ 2026-10-29 in simulation only; NXDN trunking (CAC), data calls and NXDN96 not yet |
 | V2b | One "Digital voice" decoder detecting DMR, NXDN48 and NXDN96; NXDN96 | ✅ 2026-10-29 in simulation only; NXDN96 voice is half-rate (EHR) only |
-| V3–V4 | P25, then TETRA | |
+| V3 | P25 phase 1 in Digital voice: conventional calls (HDU, LDU1/2, TDU, TDULC), control channel TSBKs, IMBE vocoder (port of mbelib) | ✅ 2026-10-29 in simulation only; phase 2 (TDMA) and encrypted voice not decoded |
+| V4 | TETRA | |
 | later | DLL plug-ins; DVB-C (port of `Documents\DecSAT\dvbc_decode.py`); modulators |
 
 ## 4. Notes from M1a (2026-10-27)
@@ -595,3 +596,29 @@ TS2) at falling C/N, with C/N measured in 12.5 kHz.
   pass its garbage voice on. Voice is now emitted only from frames that
   check out (a CRC passed, or the Golay words came out near).
 
+## 17. P25 phase 1 and IMBE (2026-10-29)
+
+- **Inside Digital voice** as a fourth mode beside DMR, NXDN48 and NXDN96.
+  Frame layouts follow TIA-102.BAAA as MMDVMHost, DSD and SDRTrunk read it:
+  - Sync 0x5575F5FF77FF (48 bits); NID = NAC (12) + DUID (4) as BCH(63,16)
+    plus a parity bit, decoded soft by ML over the 4096 NACs (or the known
+    one once locked).
+  - Status symbols at raw bits 70/71 of every 72 are stripped first
+    (`p25::stripped`).
+  - HDU: Golay(18,6) words around RS(36,20). LDU1 link control: Hamming
+    (10,6) around RS(24,12); LDU2 encryption sync: RS(24,16). TDULC:
+    Golay(24,12) around RS(24,12). TSDU: rate-½ trellis (the DMR one) +
+    CRC-CCITT per TSBK. RS is decoded errors-only (Berlekamp–Massey).
+  - TSBKs decoded: grants, identifier updates (channel → MHz), RFSS, network
+    and adjacent status; others shown by opcode.
+- **IMBE (7200×4400)** ported from mbelib (ISC) as `vocoder/imbe.rs`,
+  sharing the synthesiser in `vocoder/mbe.rs` with AMBE+2. The frame FEC
+  (Golay(23,12) ×4, Hamming(15,11) ×3, PN over 114 bits) and DSD's
+  interleave are in `p25/imbe_frame.rs`. Encrypted calls (ALGID ≠ 0x80)
+  are muted and shown as encrypted.
+- **Sweep** (`p25_sweep`): best cut-off 3.5 kHz (hunting 5.5 kHz). At 5 dB
+  C/N in 12.5 kHz: voice 83 %, link control 100 %, TSBKs 87 %. Two minutes
+  of noise: best fit 0.5 dB, 0 events with the 6 dB gate (the long sync
+  barely correlates with noise). Under 1 % of a core.
+- **GUI check:** `p25_make` writes a call and a control channel; the card
+  shows the NAC, the system/site line, the grant in MHz, and plays the call.

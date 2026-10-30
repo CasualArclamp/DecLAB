@@ -4,12 +4,18 @@
 //! - [`ambe2`]: AMBE+2 3600×2450 (DMR, NXDN, P25 phase 2), ported from
 //!   mbelib.
 //!
-//! P25 phase 1's IMBE will come here too (mbelib has it as well).
+//! - [`imbe`]: IMBE 7200×4400 (P25 phase 1), ported from mbelib.
+//!
+//! Both share mbelib's synthesiser (`mbe.rs`).
 
 pub mod ambe2;
 mod ambe_tables;
+pub mod imbe;
+mod imbe_tables;
+mod mbe;
 
 pub use ambe2::{Ambe2Decoder, FrameKind};
+pub use imbe::ImbeDecoder;
 
 /// 8 kHz speech to 48 kHz, ×6 through a polyphase low-pass (3.6 kHz,
 /// Blackman-windowed sinc), so the host's linear resampler has no images

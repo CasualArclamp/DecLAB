@@ -21,11 +21,13 @@ cargo run --release -p declab-gui -- --radio airspy --freq 546M --chan 546M --de
 cargo run --release -p declab-gui -- ..\DecPagers\out\sim_pagers_153.000MHz_1Msps.cs8 --decoder pagers --chan 153.15M --screenshot out/x.png --after 10   # pagers (make the file with `decpagers sim`)
 cargo run -p declab-gui --example make_icon   # redraws apps/declab-gui/assets/icon.ico and icon-256.png (preview out/icon-preview.png)
 cargo run --release -p declab-pmr --example dmr_make -- out/sim_dmr.cf32 15   # simulated DMR repeater: call, Tier III CSBKs, LRRP
-cargo run --release -p declab-gui -- out/sim_dmr.cf32 --rate 48000 --decoder voice --screenshot out/x.png --after 8   # Digital voice: DMR, NXDN48, NXDN96 detected by itself
+cargo run --release -p declab-gui -- out/sim_dmr.cf32 --rate 48000 --decoder voice --screenshot out/x.png --after 8   # Digital voice: DMR, NXDN48, NXDN96, P25 detected by itself
 cargo run --release -p declab-pmr --example dmr_sweep -- 4 800   # DMR sensitivity vs C/N (and CPU)
 cargo run --release -p declab-pmr --example nxdn_make -- out/sim_nxdn.cf32 12 [96]   # simulated NXDN48 (or NXDN96) calls
 cargo run --release -p declab-gui -- out/sim_nxdn.cf32 --rate 48000 --decoder voice --screenshot out/x.png --after 6
 cargo run --release -p declab-pmr --example nxdn_sweep -- 4 800 - [96]   # NXDN48 (or 96) sensitivity, SNR gate on noise, CPU
+cargo run --release -p declab-pmr --example p25_make -- out/sim_p25.cf32 14   # simulated P25 call and control channel (then --decoder voice)
+cargo run --release -p declab-pmr --example p25_sweep -- 4 300   # P25 sensitivity, SNR gate on noise, CPU
 cargo run --release -p declab-cli -- run voice --radio rtlsdr --freq 439.5M --gain 40.2 --card
 cargo run --release -p declab-cli -- list
 cargo run --release -p declab-cli -- selftest level
