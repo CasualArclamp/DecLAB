@@ -130,7 +130,7 @@ DecLAB is GPL-3.0-or-later, so DAB+ should move to libxaac.
 | V2 | NXDN48 conventional voice (`nxdn` plug-in), SNR gate in DMR and NXDN | ✅ 2026-10-29 in simulation only; NXDN trunking (CAC), data calls and NXDN96 not yet |
 | V2b | One "Digital voice" decoder detecting DMR, NXDN48 and NXDN96; NXDN96 | ✅ 2026-10-29 in simulation only; NXDN96 voice is half-rate (EHR) only |
 | V3 | P25 phase 1 in Digital voice: conventional calls (HDU, LDU1/2, TDU, TDULC), control channel TSBKs, IMBE vocoder (port of mbelib) | ✅ 2026-10-29 in simulation only; phase 2 (TDMA) and encrypted voice not decoded |
-| V4 | TETRA | |
+| V4 | TETRA downlink in Digital voice: cell, calls, status, SDS; π/4-DQPSK coherent receiver; ACELP speech via a separate library | ✅ 2026-10-30 in simulation only; speech needs `tetra_acelp.dll` (private, not GPL); π/8-D8PSK, QAM and the uplink not decoded |
 | later | DLL plug-ins; DVB-C (port of `Documents\DecSAT\dvbc_decode.py`); modulators |
 
 ## 4. Notes from M1a (2026-10-27)
@@ -622,3 +622,54 @@ TS2) at falling C/N, with C/N measured in 12.5 kHz.
   barely correlates with noise). Under 1 % of a core.
 - **GUI check:** `p25_make` writes a call and a control channel; the card
   shows the NAC, the system/site line, the grant in MHz, and plays the call.
+
+## 18. TETRA (2026-10-30)
+
+- **Spec:** ETSI EN 300 392-2 V3.8.1 (downloaded with the user's OK), the
+  authority for every layout: modulation clause 5, coding clause 8, bursts
+  9.4.4, MAC 21.4, MLE 18.4, CMCE 14.7.
+- **Receiver** (`declab-pmr/src/tetra`), 72 kS/s, four samples a symbol:
+  - Hunts for the 19-symbol synchronization training sequence with a
+    normalised correlator on z[n]·z*[n−4] (magnitude, so an offset only
+    turns it); locks when the fit passes the SNR gate and the BSCH passes
+    its CRC. The SYNC gives TN/FN/MN and the colour code that scrambles the
+    rest.
+  - Locked, every 255 symbols is a slot (continuous downlink), classified
+    by its training (normal 1, normal 2, synchronization, plus training 3 at
+    the edges). The fit drives timing (early/late) and acquisition AFC.
+  - **Coherent detection** for low SNR: the π/4 step taken out leaves QPSK;
+    the carrier phase comes from the fourth power over ±20 symbols in two
+    passes (the first pass's slope taken out); log-MAP over the
+    differential encoding gives the LLRs. With no prior on transitions the
+    BCJR collapses to a sum over neighbouring symbol pairs (exact, cheap).
+    About 2 dB better than differential detection at Es/N0 6–10 dB
+    (`detectors_ber`). The AFC follows the phase track's slope over the
+    whole slot: the training's ~30 symbols were too noisy to ramp across a
+    slot (it cost whole slots at 11 dB).
+  - Locked slots are held to the gate less 6 dB (noise fits at about
+    −12 dB), which moved the knee by about 2 dB.
+- **Channels:** BSCH, AACH (Reed-Muller (30,14), Chase-II over a coset
+  table), SCH/HD, BNCH, STCH, SCH/F (RCPC 2/3 soft Viterbi + CRC), TCH/S
+  passed on as descrambled soft bits. MAC-RESOURCE, MAC-FRAG/END
+  reassembly, SYSINFO, ACCESS-ASSIGN, basic-link LLC, CMCE D-SETUP,
+  D-CONNECT, D-TX GRANTED/CEASED, D-RELEASE, D-STATUS, D-SDS-DATA. The
+  colour-code scrambler takes e(1) as the MCC's MSB (figure 23.5 is an image
+  in the text; to be confirmed on a real cell).
+- **Sweep** (`tetra_sweep`, 4 seeds, 500 Hz off, C/N in 25 kHz): everything
+  100 % down to 8 dB; at 6 dB SYNC 99 %, signalling 100 %, raw traffic BER
+  2.4 %; at 5 dB SYNC 96 %, signalling 92 %, BER 4.4 %; at 4 dB SYNC 69 %.
+  Two minutes of noise: 53 000 candidates, the best fit 0.0 dB, one passing
+  the BSCH CRC by chance; with the 3 dB gate, no events. CPU 0.8 % locked,
+  0.7 % hunting.
+- **Digital voice** now takes 72 kS/s (25 kHz): TETRA reads it as is, the
+  4FSK modes after one shared decimation by 3 (9 kHz low-pass, 49 taps).
+- **Speech:** ETSI EN 300 395-2's reference C code (downloaded with the
+  user's OK) is ETSI-licensed, so its Rust port lives in a separate private
+  crate, `..\DecTETRA-acelp`, built as `tetra_acelp.dll` and loaded at run
+  time (`declab_pmr::vocoder::acelp`). Without it TETRA decodes in full and
+  says "codec not installed". The portable build copies it when built.
+- **Encryption:** speech is muted when the call's MAC signalling was
+  encrypted, end-to-end encryption was granted, or traffic appears on a
+  cell offering air-interface encryption with no clear set-up heard.
+- **Not decoded:** π/8-D8PSK and QAM (TEDS), the uplink, direct mode,
+  advanced-link LLC, MM and MLE beyond their PDU type.

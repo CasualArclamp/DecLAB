@@ -30,6 +30,18 @@ try {
         $mb = (Get-Item (Join-Path $out $exe)).Length / 1MB
         Write-Host ("{0,-16} {1,6:N1} MB" -f $exe, $mb)
     }
+    # TETRA speech: the ACELP codec is a separate, privately built library
+    # (ETSI's code is not GPL), in ..\DecTETRA-acelp. Built here with the
+    # same static C runtime as the exes, and copied next to them.
+    $acelpToml = Join-Path (Split-Path -Parent $root) "DecTETRA-acelp/Cargo.toml"
+    if (Test-Path $acelpToml) {
+        cargo build --release --target $triple --manifest-path $acelpToml
+        if ($LASTEXITCODE -ne 0) { throw "tetra_acelp build failed ($LASTEXITCODE)" }
+        Copy-Item (Join-Path $env:CARGO_TARGET_DIR "$triple/release/tetra_acelp.dll") $out -Force
+        Write-Host "tetra_acelp.dll built and copied (TETRA speech)"
+    } else {
+        Write-Host "DecTETRA-acelp not found: TETRA speech will not play"
+    }
     Write-Host "written to $out"
 } finally {
     Pop-Location

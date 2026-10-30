@@ -7,7 +7,11 @@
 //! - [`imbe`]: IMBE 7200×4400 (P25 phase 1), ported from mbelib.
 //!
 //! Both share mbelib's synthesiser (`mbe.rs`).
+//!
+//! - [`acelp`]: TETRA's ACELP, loaded at run time from a separate library
+//!   (ETSI's code is not GPL).
 
+pub mod acelp;
 pub mod ambe2;
 mod ambe_tables;
 pub mod imbe;

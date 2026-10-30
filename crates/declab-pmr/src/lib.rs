@@ -20,4 +20,5 @@ pub mod fec;
 pub mod fsk4;
 pub mod nxdn;
 pub mod p25;
+pub mod tetra;
 pub mod vocoder;

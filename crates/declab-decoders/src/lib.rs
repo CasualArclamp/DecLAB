@@ -17,6 +17,7 @@ mod level;
 mod nxdn;
 mod p25;
 mod pagers;
+mod tetra;
 mod voice;
 
 use analog::Mode;
