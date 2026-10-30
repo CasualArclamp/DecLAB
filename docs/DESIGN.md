@@ -654,13 +654,28 @@ TS2) at falling C/N, with C/N measured in 12.5 kHz.
   reassembly, SYSINFO, ACCESS-ASSIGN, basic-link LLC, CMCE D-SETUP,
   D-CONNECT, D-TX GRANTED/CEASED, D-RELEASE, D-STATUS, D-SDS-DATA. The
   colour-code scrambler takes e(1) as the MCC's MSB (figure 23.5 is an image
-  in the text; to be confirmed on a real cell).
+  in the text; confirmed on a real cell, below).
 - **Sweep** (`tetra_sweep`, 4 seeds, 500 Hz off, C/N in 25 kHz): everything
   100 % down to 8 dB; at 6 dB SYNC 99 %, signalling 100 %, raw traffic BER
   2.4 %; at 5 dB SYNC 96 %, signalling 92 %, BER 4.4 %; at 4 dB SYNC 69 %.
   Two minutes of noise: 53 000 candidates, the best fit 0.0 dB, one passing
   the BSCH CRC by chance; with the 3 dB gate, no events. CPU 0.8 % locked,
   0.7 % hunting.
+- **Real signal** (2026-10-30, a user's 10 MS/s recording in the TETRA band,
+  13 carriers): two cells of one network, eye SNR 11–19 dB, SYNC, SYSINFO and
+  signalling with ~1 % CRC fails; the signalling is encrypted. The
+  recording had five gaps of ~8.2k samples (lost before the recorder: the
+  same jump on both cells), each of which cost nine slots and a re-hunt.
+  So a bad slot now looks for its training ±300 samples (a lost 8192-sample
+  transfer is 59 samples at 10 MS/s, 246 at 2.4 MS/s) at the acquisition
+  gate, and carries on numbered as before: 0 lock losses, 0 bad slots on
+  the main carrier (was 36). No change in the sweep; CPU 0.95 % locked
+  (+0.13 %, the searches in bad slots). `tetra_file` prints a 72 kS/s
+  file's fit slot by slot.
+- **Scope:** the symbols after the phase track and the π/4 removal, so
+  four steady QPSK points (diagonals); the raw star turned with any
+  residual offset on a real signal. Differential mode shows the
+  derotated differential products.
 - **Digital voice** now takes 72 kS/s (25 kHz): TETRA reads it as is, the
   4FSK modes after one shared decimation by 3 (9 kHz low-pass, 49 taps).
 - **Speech:** ETSI EN 300 395-2's reference C code (downloaded with the

@@ -30,6 +30,7 @@ cargo run --release -p declab-pmr --example p25_make -- out/sim_p25.cf32 14   # 
 cargo run --release -p declab-pmr --example p25_sweep -- 4 300   # P25 sensitivity, SNR gate on noise, CPU
 cargo run --release -p declab-pmr --example tetra_make -- out/sim_tetra.cf32 12   # simulated TETRA cell and call (then --rate 72000 --decoder voice)
 cargo run --release -p declab-pmr --example tetra_sweep -- 4 500 [diff]   # TETRA sensitivity, gate on noise, CPU (diff: differential detection)
+cargo run --release -p declab-pmr --example tetra_file -- IN.cf32   # a 72 kS/s TETRA carrier's fit slot by slot (lock losses, re-alignments)
 cargo run --release -p declab-cli -- run voice --radio rtlsdr --freq 439.5M --gain 40.2 --card
 cargo run --release -p declab-cli -- list
 cargo run --release -p declab-cli -- selftest level

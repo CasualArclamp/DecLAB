@@ -58,6 +58,12 @@ const TIMING_GAIN: f64 = 0.3;
 const COARSE_STEP: f32 = 0.1;
 /// Samples demodulated at a time: a quarter slot.
 const AFC_SLICE: usize = 255;
+/// Locked, a bad slot's training is looked for this many samples either
+/// side: a radio that loses a USB transfer shifts the slots by its length
+/// (8192 samples is 59 here at 10 MS/s, 246 at 2.4 MS/s). Seen on a real
+/// recording: five gaps of ~8.2k samples in 9 s, each of which lost the
+/// lock for nine slots and up to a multiframe of hunting.
+const RESYNC: f64 = 300.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -94,6 +100,8 @@ pub struct Stats {
     pub candidates: u64,
     pub gated: u64,
     pub crc_fail: u64,
+    /// Slot timing found again after a jump (samples lost).
+    pub resyncs: u64,
     pub blocks_ok: u64,
     pub traffic_slots: u64,
     /// The latest slot's training fit, eye SNR (dB), and the offset.
@@ -310,7 +318,7 @@ impl Receiver {
         }
         // Keep a little history behind whatever is needed next.
         let keep_from = match &self.lock {
-            Some(l) => (l.t0 as u64).saturating_sub(16),
+            Some(l) => (l.t0 - RESYNC - 16.0).max(0.0) as u64,
             None => self.scan.saturating_sub(SLOT as u64 + 64),
         };
         if keep_from > self.base + 4 * SLOT as u64 {
@@ -460,7 +468,7 @@ impl Receiver {
         if (t0 + SLOT + 2.0 * SPS as f64 + 4.0) as u64 >= self.end() {
             return false;
         }
-        let (tn, frame) = (l.tn, l.frame);
+        let (tn, frame, misses) = (l.tn, l.frame, l.misses);
         // Classify by the best of the three training patterns.
         let fits = [Burst::Full, Burst::Half, Burst::Sync].map(|b| self.fit(t0, b));
         let fit = fits
@@ -490,6 +498,18 @@ impl Receiver {
             self.afc(self.slope.unwrap_or(fit.step));
             self.slot(tn, frame, &fit, &llr);
         } else {
+            // Samples lost? Look for the training either side; found, this
+            // slot is decoded again from where it now is.
+            if misses < LOST_AFTER {
+                if (t0 + RESYNC + SLOT + 2.0 * SPS as f64 + 4.0) as u64 >= self.end() {
+                    return false;
+                }
+                if let Some(t) = self.resync(t0) {
+                    self.stats.resyncs += 1;
+                    self.lock.as_mut().expect("locked").t0 = t;
+                    return true;
+                }
+            }
             self.stats.slots_bad += 1;
         }
         let lost = {
@@ -514,6 +534,40 @@ impl Receiver {
             self.frag = Default::default();
         }
         true
+    }
+
+    /// The slot's start within ±[`RESYNC`] of `t0` whose training fits as
+    /// well as acquisition asks (the gate, not the tracking margin): every
+    /// other sample, then the best one's neighbours.
+    fn resync(&self, t0: f64) -> Option<f64> {
+        let lo = (self.base as f64 + 2.0 + SPS as f64).max(t0 - RESYNC);
+        let best_of = |t: f64| {
+            [Burst::Full, Burst::Half, Burst::Sync]
+                .map(|b| self.fit(t, b))
+                .into_iter()
+                .max_by(|a, b| a.quality.total_cmp(&b.quality))
+                .expect("three fits")
+        };
+        let mut best: Option<(f64, Fit)> = None;
+        let mut t = lo;
+        while t <= t0 + RESYNC {
+            // A shift of a few samples is the timing loop's, not a jump.
+            if (t - t0).abs() > 2.0 {
+                let f = best_of(t);
+                if best.as_ref().is_none_or(|(_, b)| f.quality > b.quality) {
+                    best = Some((t, f));
+                }
+            }
+            t += 2.0;
+        }
+        let (mut bt, mut bf) = best?;
+        for t in [bt - 1.0, bt + 1.0] {
+            let f = best_of(t);
+            if f.quality > bf.quality {
+                (bt, bf) = (t, f);
+            }
+        }
+        (bf.quality >= ACQUIRE && bf.snr_db >= self.snr_gate_db).then_some(bt)
     }
 
     fn afc(&mut self, step: f32) {
@@ -572,9 +626,6 @@ impl Receiver {
         let s: Vec<Iq> = (0..=SLOT_SYMBOLS)
             .map(|k| self.at(t0 + (k * SPS) as f64))
             .collect();
-        if let Some(tap) = &mut self.tap {
-            tap.extend_from_slice(&s[1..]);
-        }
         if self.coherent {
             // The carrier phase is followed symbol by symbol; its slope over
             // the slot is the AFC's error (all 255 symbols, where the
@@ -591,11 +642,23 @@ impl Receiver {
                 .enumerate()
                 .map(|(k, &z)| z * Complex32::from_polar(1.0, -pre * k as f32))
                 .collect();
-            let (llr, slope) = coherent(&s);
+            let (llr, slope, derot) = coherent(&s);
             self.slope = Some(slope + pre);
+            if let Some(tap) = &mut self.tap {
+                // After the phase track and the π/4 removal: QPSK on the
+                // axes, turned by π/4 to the usual four diagonal points.
+                let r = rot(1);
+                tap.extend(derot[1..].iter().map(|&x| x * r));
+            }
             llr
         } else {
             self.slope = None;
+            if let Some(tap) = &mut self.tap {
+                // The differential products, derotated by the fit's step:
+                // the transitions, at the four odd multiples of π/4.
+                let r = Complex32::from_polar(1.0, -fit.step);
+                tap.extend((1..s.len()).map(|k| s[k] * s[k - 1].conj() * r));
+            }
             differential(&s, fit)
         }
     }
@@ -850,7 +913,7 @@ const PHASE_WINDOW: usize = 20;
 /// symbol likelihoods into bit LLRs. Against differential detection this
 /// avoids multiplying two noisy symbols: about 2 dB at Es/N0 6–10 dB
 /// (`detectors_ber`).
-fn coherent(s: &[Iq]) -> (Vec<f32>, f32) {
+fn coherent(s: &[Iq]) -> (Vec<f32>, f32, Vec<Iq>) {
     let n = s.len();
     let u0: Vec<Iq> = s
         .iter()
@@ -917,7 +980,7 @@ fn coherent(s: &[Iq]) -> (Vec<f32>, f32) {
         out.push(llr(t[0] + t[1], t[2] + t[3]));
         out.push(llr(t[0] + t[3], t[1] + t[2]));
     }
-    (out, total_slope)
+    (out, total_slope, derot)
 }
 
 #[cfg(test)]

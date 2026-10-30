@@ -402,7 +402,8 @@ impl Tetra {
             (true, false) => Lock::Locked,
             (true, true) => Lock::Synced,
         };
-        // The symbols, scaled to their RMS: the eight-point π/4-DQPSK star.
+        // The symbols after the phase track and π/4 removal, scaled to their
+        // RMS: four QPSK points.
         self.points.extend(self.rx.take_tap());
         let over = self.points.len().saturating_sub(POINTS);
         self.points.drain(..over);
@@ -457,7 +458,13 @@ impl Tetra {
                     st.multiframe
                 ),
             ),
-            pair("slots", format!("{} ({} bad)", st.slots, st.slots_bad)),
+            pair(
+                "slots",
+                format!(
+                    "{} ({} bad, {} re-aligned)",
+                    st.slots, st.slots_bad, st.resyncs
+                ),
+            ),
             pair(
                 "signalling",
                 format!("{} blocks ({} CRC fails)", st.blocks_ok, st.crc_fail),
