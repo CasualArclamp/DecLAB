@@ -697,6 +697,7 @@ dependencies = [
  "decdvbt-ts",
  "declab-api",
  "declab-core",
+ "declab-decoders",
  "declab-dsp",
  "declab-io",
  "rustfft",

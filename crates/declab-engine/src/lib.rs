@@ -17,5 +17,5 @@ pub mod meter;
 pub mod spectrum;
 pub mod waterfall;
 
-pub use host::{ChannelInfo, DecoderView, Host, HostOptions, Row, Stats};
+pub use host::{ChannelInfo, DecoderView, Host, HostOptions, MAX_VFOS, Row, Stats, VfoId};
 pub use hub::{CarouselLink, CarouselState, Outputs, TsHub, TsView};

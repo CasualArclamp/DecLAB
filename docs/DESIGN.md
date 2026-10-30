@@ -778,3 +778,54 @@ voice mode.
 - **Not yet:** SPI/EPG and other packet-mode data, TII, the channel
   sounder, a Band III scan.
 
+
+## 21. Multi VFO (2026-10-30)
+
+Engine and GUI done; the CLI still runs one decoder.
+
+- **A VFO** is one channel cut out of the radio's stream plus a decoder on it
+  and everything that decoder makes. `Host` holds a list of them (at most
+  `MAX_VFOS` = 8); each has its own worker thread, down-converter (`Chain`),
+  `DecoderView`, panel messages, small waterfalls, `TsHub` (so its own
+  services, guide and outputs), TS and WAV files, and audio output. Ids
+  (`VfoId`) are never reused.
+- **The source thread** hands each block to every worker (`Arc<Vec<Iq>>`,
+  shared, not copied) and keeps a lost-sample count per worker. A live radio
+  drops blocks for a slow VFO only; a file waits for the slowest one.
+- **API:** `add_vfo(factory, hz, bw)`, `remove_vfo`, `vfo_ids`, and
+  `set_vfo_channel[_at]`, `vfo_command`, `vfo_view`, `take_vfo_custom`,
+  `take_vfo_waterfall_rows`, `vfo_ts_view`, `vfo_epg`, `set_vfo_outputs`,
+  `write_vfo_audio`, `write_vfo_ts`, `set_vfo_gain`. The methods without
+  `_vfo` act on the **primary** (first) VFO, so the CLI, the GUI and the TV
+  windows are unchanged. `set_decoder(Some(f))` replaces the focused VFO in place.
+- **Retuning the radio:** a decoder's `retune_by_hz` moves the radio only
+  from the primary VFO; any other VFO shifts its own channel. When the
+  primary is removed the next VFO takes over.
+- **Sound:** every VFO plays; the OS mixes them. `set_volume` is the master,
+  `set_vfo_gain` mutes or trims one. (A GUI may prefer to play only the
+  selected VFO.)
+- **Test:** `crates/declab-engine/tests/multi_vfo.rs` runs two WFM VFOs on
+  the synthetic band (94.5 and 100.3 MHz, 600 and 300 Hz tones) and checks
+  each WAV holds its own station's tone.
+- **Focus:** the methods without `_vfo` act on the *focused* VFO
+  (`set_focus`, the first until told); `set_decoder(Some(f))` swaps the
+  focused VFO's decoder in place, keeping its position (and giving it a new
+  id). Only the first VFO ever retunes the radio.
+- **GUI (layout B of the mockups, with a collapsible rail):** `vfo.rs`. The
+  rail down the left lists the VFOs as cards (number, decoder, frequency,
+  lock and headline, CPU, level meter, speaker, remove); `«` collapses it to
+  a column of numbered discs, `»` opens it (kept in prefs as `vfo_rail`). The
+  App's own fields (`dec`, `chan_hz`, `view`, `scope`...) always hold the
+  *selected* VFO, so the card, Settings and TV windows are unchanged; the
+  others wait in `Slot`s and are swapped in on selection (`stash`/`load_slot`).
+  On the band: click a channel to select it, a plain click retunes the
+  selected one, ctrl+click adds a VFO (same decoder as the selected, muted),
+  edges and body drag the selected channel as before; the wheel changes the
+  selected VFO's decoder. Other VFOs' views are refreshed every 15 frames.
+  `--vfo ID@FREQ` (repeatable) and `--rail-closed` set it up for screenshots.
+- **Limits:** the last VFO cannot be removed; settings panels are shared by
+  decoder type (two WFM VFOs show one panel, its values sent to whichever is
+  selected); only the selected VFO is saved in prefs; the rail's "drag a row
+  to reorder" from the mockup is not built; CLI `--vfo` not yet.
+- **Next:** per-VFO settings and prefs, reordering, CLI `--vfo`, a shared
+  first-stage decimator when VFOs are close together.

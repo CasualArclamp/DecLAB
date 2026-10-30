@@ -43,8 +43,10 @@ pub struct BandInput<'a> {
     pub levels: (f32, f32),
     /// The waterfall texture and its texture coordinates (newest row on top).
     pub waterfall: Option<(TextureId, Rect)>,
-    /// The decoder's channel: centre, width, colour and label.
+    /// The selected VFO's channel: centre, width, colour and label.
     pub channel: Option<(f64, f64, Color32, String)>,
+    /// The other VFOs' channels, drawn lighter; a click inside one selects it.
+    pub others: Vec<Other>,
     /// A drag is moving the band: say so over it.
     pub moving: Option<String>,
     /// Take no input (the wheel is open).
@@ -53,9 +55,23 @@ pub struct BandInput<'a> {
     pub idle_text: &'a str,
 }
 
+/// Another VFO's channel on the band.
+pub struct Other {
+    /// Its place in the app's VFO list, handed back by [`Action::Select`].
+    pub slot: usize,
+    pub hz: f64,
+    pub bandwidth_hz: f64,
+    pub colour: Color32,
+    pub label: String,
+}
+
 /// What the pointer did.
 pub enum Action {
     Tune(f64),
+    /// A click inside another VFO's channel: select it (its `Other::slot`).
+    Select(usize),
+    /// Ctrl+click on empty band: a new VFO here.
+    Add(f64),
     /// An edge of the channel was dragged: this bandwidth, Hz.
     Bandwidth(f64),
     /// The channel was dragged here (its centre, Hz).
@@ -210,6 +226,32 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
         painter.text(wf.center(), Align2::CENTER_CENTER, inp.idle_text, FontId::monospace(13.0), Color32::GRAY);
     }
 
+    // The other VFOs' channels: lighter than the selected one's.
+    for o in &inp.others {
+        let (xa, xb) = (x_of(o.hz - o.bandwidth_hz / 2.0), x_of(o.hz + o.bandwidth_hz / 2.0));
+        let (xa, xb) = if xb - xa < 3.0 { (x_of(o.hz) - 1.5, x_of(o.hz) + 1.5) } else { (xa, xb) };
+        if xb < plot_l || xa > plot_r {
+            continue;
+        }
+        let (ca, cb) = (xa.max(plot_l), xb.min(plot_r));
+        painter.rect_filled(
+            Rect::from_min_max(pos2(ca, spec.top()), pos2(cb, wf.bottom())),
+            CornerRadius::ZERO,
+            o.colour.gamma_multiply(0.07),
+        );
+        let edge = Stroke::new(1.0, o.colour.gamma_multiply(0.8));
+        for x in [xa, xb] {
+            if (plot_l..=plot_r).contains(&x) {
+                painter.line_segment([pos2(x, spec.top()), pos2(x, wf.bottom())], edge);
+            }
+        }
+        let galley = painter.layout_no_wrap(o.label.clone(), font.clone(), o.colour);
+        let c = ((ca + cb) / 2.0).clamp(plot_l + galley.size().x / 2.0 + 4.0, plot_r - galley.size().x / 2.0 - 4.0);
+        let r = Rect::from_center_size(pos2(c, spec.top() + 12.0), galley.size() + egui::vec2(10.0, 4.0));
+        painter.rect(r, CornerRadius::same(3), Color32::from_rgb(20, 20, 20), Stroke::new(1.0, o.colour.gamma_multiply(0.8)), egui::StrokeKind::Inside);
+        painter.galley(r.min + egui::vec2(5.0, 2.0), galley, o.colour);
+    }
+
     // The decoder's channel: its band shaded, its edges in its colour, a label.
     if let Some((hz, bw, colour, label)) = &inp.channel {
         let (xa, xb) = (x_of(hz - bw / 2.0), x_of(hz + bw / 2.0));
@@ -239,7 +281,7 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
     painter.text(
         pos2(plot_r - 6.0, wf.bottom() - 6.0),
         Align2::RIGHT_BOTTOM,
-        "left click: tune · drag edges: bandwidth · middle-drag: move band · middle click: decoders · scroll: zoom",
+        "click: tune · click a channel: select · ctrl+click: add a VFO · drag edges: bandwidth · middle-drag: move band · middle click: decoders · scroll: zoom",
         FontId::monospace(11.0),
         Color32::from_gray(160),
     );
@@ -353,7 +395,15 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
         && let Some(p) = resp.interact_pointer_pos()
         && in_plot(p)
     {
-        actions.push(Action::Tune(hz_of(p.x)));
+        let hz = hz_of(p.x);
+        // Inside another VFO's channel (and not the selected one's): select it.
+        let selected = edges.is_some_and(|(_, _, xa, xb)| p.x >= xa && p.x <= xb);
+        let hit = inp.others.iter().find(|o| (hz - o.hz).abs() <= (o.bandwidth_hz / 2.0).max(60e3));
+        match hit {
+            Some(o) if !selected => actions.push(Action::Select(o.slot)),
+            _ if ui.input(|i| i.modifiers.command) => actions.push(Action::Add(hz)),
+            _ => actions.push(Action::Tune(hz)),
+        }
     }
     if resp.dragged_by(PointerButton::Middle) {
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
@@ -408,6 +458,7 @@ mod tests {
                     levels: (-90.0, -40.0),
                     waterfall: None,
                     channel: channel.map(|(hz, bw)| (hz, bw, Color32::WHITE, String::new())),
+                    others: Vec::new(),
                     moving: None,
                     inert,
                     idle_text: "",
@@ -542,6 +593,68 @@ mod tests {
     fn a_left_drag_on_the_empty_band_does_nothing() {
         let a = run_with(drag(x(95e6), x(96e6)), false, Some((98e6, 1e6)));
         assert!(a.iter().all(|a| matches!(a, Action::Zoom { .. })), "{} actions", a.len());
+    }
+
+    /// A click at `hz` with other VFOs on the band, ctrl held or not.
+    fn click_among(hz: f64, others: &[(usize, f64, f64)], ctrl: bool, selected: Option<(f64, f64)>) -> Vec<Action> {
+        let spectrum = vec![-80.0f32; 1024];
+        let mut sim = Sim::new(W, 600.0);
+        // egui learns of held keys from an event.
+        let held = egui::Modifiers { ctrl, command: ctrl, ..egui::Modifiers::default() };
+        let px = x(hz);
+        let mut out = Vec::new();
+        for events in [vec![egui::Event::ModifiersChanged(held)], vec![moved(px, 300.0)], vec![button(px, 300.0, PointerButton::Primary, true)], vec![button(px, 300.0, PointerButton::Primary, false)], vec![]] {
+            sim.frame(events, |ui| {
+                let inp = BandInput {
+                    spectrum_db: &spectrum,
+                    row_center_hz: 98e6,
+                    row_rate: 10e6,
+                    wf_center_hz: 98e6,
+                    wf_rate: 10e6,
+                    view_center_hz: 98e6,
+                    view_span_hz: 10e6,
+                    levels: (-90.0, -40.0),
+                    waterfall: None,
+                    channel: selected.map(|(h, b)| (h, b, Color32::WHITE, String::new())),
+                    others: others
+                        .iter()
+                        .map(|&(slot, hz, bw)| Other { slot, hz, bandwidth_hz: bw, colour: Color32::WHITE, label: String::new() })
+                        .collect(),
+                    moving: None,
+                    inert: false,
+                    idle_text: "",
+                };
+                out.extend(show(ui, &inp));
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn a_click_inside_another_vfos_channel_selects_it() {
+        let a = click_among(94.5e6, &[(1, 94.5e6, 200e3), (2, 100.3e6, 200e3)], false, Some((98.8e6, 200e3)));
+        let sel: Vec<usize> = a.iter().filter_map(|a| if let Action::Select(i) = a { Some(*i) } else { None }).collect();
+        assert_eq!(sel, vec![1]);
+        assert!(!a.iter().any(|a| matches!(a, Action::Tune(_) | Action::Add(_))));
+    }
+
+    #[test]
+    fn a_click_on_empty_band_tunes_and_ctrl_click_adds_a_vfo() {
+        let others = [(1, 94.5e6, 200e3)];
+        let a = click_among(96.0e6, &others, false, Some((98.8e6, 200e3)));
+        assert!(a.iter().any(|a| matches!(a, Action::Tune(h) if (h - 96.0e6).abs() < 20e3)));
+        assert!(!a.iter().any(|a| matches!(a, Action::Add(_) | Action::Select(_))));
+        let a = click_among(96.0e6, &others, true, Some((98.8e6, 200e3)));
+        assert!(a.iter().any(|a| matches!(a, Action::Add(h) if (h - 96.0e6).abs() < 20e3)));
+        assert!(!a.iter().any(|a| matches!(a, Action::Tune(_))));
+    }
+
+    #[test]
+    fn a_click_inside_the_selected_channel_still_tunes() {
+        // Where the selected VFO's channel overlaps another's, the selected one wins.
+        let a = click_among(98.8e6, &[(1, 98.85e6, 400e3)], false, Some((98.8e6, 400e3)));
+        assert!(a.iter().any(|a| matches!(a, Action::Tune(_))));
+        assert!(!a.iter().any(|a| matches!(a, Action::Select(_))));
     }
 
     #[test]

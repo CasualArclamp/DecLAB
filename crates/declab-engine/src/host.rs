@@ -48,6 +48,9 @@ const MAX_LOG: usize = 300;
 const MAX_MINI_ROWS: usize = 256;
 /// Panel messages kept for a GUI that has not collected them.
 const MAX_CUSTOM: usize = 64;
+/// VFOs at once. Each costs a down-converter and a thread; the radio's
+/// bandwidth and the machine's cores are the real limits.
+pub const MAX_VFOS: usize = 8;
 
 /// How the host runs.
 #[derive(Debug, Clone, Copy)]
@@ -205,61 +208,101 @@ enum WorkerMsg {
     Stop,
 }
 
+/// Names one VFO (one channel with one decoder on it) for as long as it
+/// lives. Ids are never reused.
+pub type VfoId = u32;
+
 /// State both threads and the GUI share.
 struct Shared {
     rows: Arc<Mutex<VecDeque<Row>>>,
     stats: Mutex<Stats>,
+    /// The queue of every running VFO's worker, for the source thread.
+    workers: Mutex<Vec<(VfoId, SyncSender<WorkerMsg>)>>,
+    /// Blocks dropped because a worker's queue was full.
+    handoff_dropped: Mutex<u64>,
+    /// The master volume; each VFO's own gain multiplies it.
+    volume: AtomicU32,
+    running: AtomicBool,
+    /// Blocks handed to workers and not yet decoded (summed over VFOs).
+    in_flight: AtomicUsize,
+}
+
+/// What one VFO's worker and the GUI share.
+struct VfoShared {
     view: Mutex<DecoderView>,
     custom: Mutex<VecDeque<Box<dyn std::any::Any + Send>>>,
     /// Rows of the decoder's small waterfalls not yet taken by the GUI.
     mini_rows: Mutex<VecDeque<(&'static str, WaterfallRow)>>,
-    /// The running worker's queue, if a decoder is running.
-    worker_tx: Mutex<Option<SyncSender<WorkerMsg>>>,
-    /// Blocks dropped because the worker's queue was full.
-    handoff_dropped: Mutex<u64>,
-    volume: AtomicU32,
     /// Where the decoder's transport stream is written, if anywhere.
     ts_file: Mutex<Option<std::io::BufWriter<std::fs::File>>>,
     /// The decoder's sound to a WAV file (`Host::write_audio`).
     wav_file: Mutex<Option<WavOut>>,
-    running: AtomicBool,
-    /// Blocks handed to the worker and not yet decoded.
-    in_flight: AtomicUsize,
+    /// This VFO's volume against the master (0 mutes it), `f32` bits.
+    gain: AtomicU32,
+    /// The primary VFO may retune the radio when its decoder asks (a
+    /// decoder following a drifting signal); the others only move their own
+    /// channel, since the radio is theirs too.
+    drives_source: AtomicBool,
 }
 
-struct Worker {
+impl VfoShared {
+    fn new(drives_source: bool) -> VfoShared {
+        VfoShared {
+            view: Mutex::new(DecoderView::default()),
+            custom: Mutex::new(VecDeque::new()),
+            mini_rows: Mutex::new(VecDeque::new()),
+            ts_file: Mutex::new(None),
+            wav_file: Mutex::new(None),
+            gain: AtomicU32::new(1.0f32.to_bits()),
+            drives_source: AtomicBool::new(drives_source),
+        }
+    }
+}
+
+/// One VFO: a channel cut out of the wideband stream, a decoder on it, and
+/// everything that decoder produces.
+struct Vfo {
+    id: VfoId,
+    vs: Arc<VfoShared>,
     tx: SyncSender<WorkerMsg>,
     join: JoinHandle<()>,
+    /// Whatever transport stream the decoder makes goes to this hub.
+    hub: TsHub,
+    decoder_id: &'static str,
 }
 
-/// The running host. Dropping it stops both threads and the radio.
+/// The running host. Dropping it stops all threads and the radio.
+///
+/// A host runs any number of VFOs at once (up to [`MAX_VFOS`]), each with its
+/// own down-converter and decoder on its own worker thread, all fed from the
+/// one radio. The methods without `_vfo` in their name act on the **focused**
+/// VFO ([`Host::set_focus`]; the first one until told otherwise), so a caller
+/// that wants one decoder never has to know about the others. Only the first
+/// VFO, the **primary**, may retune the radio.
 pub struct Host {
     shared: Arc<Shared>,
     cmd: Sender<SourceCmd>,
     source_join: Option<JoinHandle<()>>,
-    worker: Option<Worker>,
-    /// The transport stream's hub: whatever TS the decoder makes goes here.
-    hub: TsHub,
+    vfos: Vec<Vfo>,
+    next_id: VfoId,
+    /// The VFO the methods without `_vfo` act on (the first when `None`).
+    focus: Option<VfoId>,
     source_rate: f64,
     live: bool,
 }
 
 impl Host {
-    /// Start reading `source`. No decoder runs until [`Host::set_decoder`].
+    /// Start reading `source`. No decoder runs until [`Host::set_decoder`]
+    /// or [`Host::add_vfo`].
     pub fn start(source: Box<dyn IqSource>, opts: HostOptions) -> Host {
         let source_rate = source.sample_rate();
         let live = source.is_live();
         let shared = Arc::new(Shared {
             rows: Arc::new(Mutex::new(VecDeque::new())),
             stats: Mutex::new(Stats::default()),
-            view: Mutex::new(DecoderView::default()),
-            custom: Mutex::new(VecDeque::new()),
-            mini_rows: Mutex::new(VecDeque::new()),
-            worker_tx: Mutex::new(None),
+            workers: Mutex::new(Vec::new()),
             handoff_dropped: Mutex::new(0),
             volume: AtomicU32::new(0.8f32.to_bits()),
-            ts_file: Mutex::new(None),
-            wav_file: Mutex::new(None),
             running: AtomicBool::new(true),
             in_flight: AtomicUsize::new(0),
         });
@@ -269,15 +312,7 @@ impl Host {
             .name("declab-source".into())
             .spawn(move || source_thread(source, opts, cmd_rx, sh))
             .expect("cannot start the source thread");
-        Host {
-            shared,
-            cmd,
-            source_join: Some(source_join),
-            worker: None,
-            hub: TsHub::start(),
-            source_rate,
-            live,
-        }
+        Host { shared, cmd, source_join: Some(source_join), vfos: Vec::new(), next_id: 0, focus: None, source_rate, live }
     }
 
     pub fn source_rate(&self) -> f64 {
@@ -289,61 +324,233 @@ impl Host {
         self.live
     }
 
-    /// Run `factory`'s decoder (stopping the one running), or none. Its
-    /// channel starts centred, as wide as it asks for.
-    pub fn set_decoder(&mut self, factory: Option<&'static dyn DecoderFactory>) {
-        if let Some(w) = self.worker.take() {
-            *self.shared.worker_tx.lock().unwrap() = None;
-            let _ = w.tx.send(WorkerMsg::Stop);
-            let _ = w.join.join();
-        }
-        *self.shared.view.lock().unwrap() = DecoderView::default();
-        self.shared.custom.lock().unwrap().clear();
-        self.shared.mini_rows.lock().unwrap().clear();
-        let Some(factory) = factory else { return };
+    // ---- VFOs ---------------------------------------------------------
 
+    /// Add a VFO running `factory`'s decoder on the channel at RF frequency
+    /// `hz`, `bandwidth_hz` wide (the channel then stays on that frequency
+    /// across retunes). `None` when [`MAX_VFOS`] are running.
+    pub fn add_vfo(&mut self, factory: &'static dyn DecoderFactory, hz: f64, bandwidth_hz: f64) -> Option<VfoId> {
+        self.spawn_vfo(factory, Target::At(hz), bandwidth_hz)
+    }
+
+    fn spawn_vfo(&mut self, factory: &'static dyn DecoderFactory, target: Target, bandwidth_hz: f64) -> Option<VfoId> {
+        if self.vfos.len() >= MAX_VFOS {
+            return None;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
         let info = factory.info();
         let spec = factory.input(self.source_rate);
+        let vs = Arc::new(VfoShared::new(self.vfos.is_empty()));
         {
-            let mut v = self.shared.view.lock().unwrap();
+            let mut v = vs.view.lock().unwrap();
             v.id = info.id;
             v.name = info.name;
         }
-        let decoder = factory.create();
-        let feeder = self.hub.feeder();
-        // A new decoder: what the hub holds is the old one's stream.
-        feeder.reset();
+        let hub = TsHub::start();
+        let feeder = hub.feeder();
         let (tx, rx) = mpsc::sync_channel(WORKER_QUEUE);
-        let sh = self.shared.clone();
-        let cmd = self.cmd.clone();
+        // The channel is queued before the first block can arrive, so the
+        // worker never builds a down-converter for the wrong place.
+        let _ = tx.send(WorkerMsg::Channel { target, bandwidth_hz });
+        let (sh, vsh, cmd, decoder) = (self.shared.clone(), vs.clone(), self.cmd.clone(), factory.create());
         let join = std::thread::Builder::new()
-            .name("declab-decoder".into())
-            .spawn(move || worker_thread(decoder, spec, rx, sh, cmd, feeder))
+            .name(format!("declab-decoder-{id}"))
+            .spawn(move || worker_thread(decoder, spec, rx, sh, vsh, cmd, feeder))
             .expect("cannot start the decoder thread");
-        *self.shared.worker_tx.lock().unwrap() = Some(tx.clone());
-        self.worker = Some(Worker { tx, join });
+        self.shared.workers.lock().unwrap().push((id, tx.clone()));
+        self.vfos.push(Vfo { id, vs, tx, join, hub, decoder_id: info.id });
+        Some(id)
     }
 
-    /// Move or resize the decoder's channel.
+    /// Stop a VFO and everything it was producing. The next one in line
+    /// becomes the primary if this was.
+    pub fn remove_vfo(&mut self, id: VfoId) {
+        let Some(i) = self.vfos.iter().position(|v| v.id == id) else { return };
+        let v = self.vfos.remove(i);
+        if self.focus == Some(id) {
+            self.focus = None;
+        }
+        self.shared.workers.lock().unwrap().retain(|(w, _)| *w != id);
+        let _ = v.tx.send(WorkerMsg::Stop);
+        let _ = v.join.join();
+        self.mark_primary();
+    }
+
+    /// Only the first VFO may retune the radio.
+    fn mark_primary(&self) {
+        for (i, v) in self.vfos.iter().enumerate() {
+            v.vs.drives_source.store(i == 0, Ordering::Relaxed);
+        }
+    }
+
+    /// The running VFOs, primary first.
+    pub fn vfo_ids(&self) -> Vec<VfoId> {
+        self.vfos.iter().map(|v| v.id).collect()
+    }
+
+    /// The decoder id (`"wfm"`, `"dmr"`...) a VFO runs.
+    pub fn vfo_decoder(&self, id: VfoId) -> Option<&'static str> {
+        self.vfo(id).map(|v| v.decoder_id)
+    }
+
+    fn vfo(&self, id: VfoId) -> Option<&Vfo> {
+        self.vfos.iter().find(|v| v.id == id)
+    }
+
+    /// The focused VFO, or the first.
+    fn focused(&self) -> Option<&Vfo> {
+        self.focus.and_then(|id| self.vfo(id)).or_else(|| self.vfos.first())
+    }
+
+    /// Make the methods without `_vfo` act on this VFO (no change if it is
+    /// not running).
+    pub fn set_focus(&mut self, id: VfoId) {
+        if self.vfo(id).is_some() {
+            self.focus = Some(id);
+        }
+    }
+
+    /// The VFO those methods act on, if any is running.
+    pub fn focused_id(&self) -> Option<VfoId> {
+        self.focused().map(|v| v.id)
+    }
+
+    /// Move or resize a VFO's channel, `offset_hz` from the radio's centre.
+    pub fn set_vfo_channel(&self, id: VfoId, offset_hz: f64, bandwidth_hz: f64) {
+        if let Some(v) = self.vfo(id) {
+            let _ = v.tx.send(WorkerMsg::Channel { target: Target::Offset(offset_hz), bandwidth_hz });
+        }
+    }
+
+    /// Put a VFO's channel at RF frequency `hz` and keep it there across
+    /// retunes (the GUI's way: the channel stays on its station while the
+    /// band is dragged).
+    pub fn set_vfo_channel_at(&self, id: VfoId, hz: f64, bandwidth_hz: f64) {
+        if let Some(v) = self.vfo(id) {
+            let _ = v.tx.send(WorkerMsg::Channel { target: Target::At(hz), bandwidth_hz });
+        }
+    }
+
+    /// Pass a command to a VFO's decoder.
+    pub fn vfo_command(&self, id: VfoId, c: Command) {
+        if let Some(v) = self.vfo(id) {
+            let _ = v.tx.send(WorkerMsg::Command(c));
+        }
+    }
+
+    /// A VFO's volume against the master: 1.0 as is, 0.0 muted.
+    pub fn set_vfo_gain(&self, id: VfoId, gain: f32) {
+        if let Some(v) = self.vfo(id) {
+            v.vs.gain.store(gain.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// What a VFO's decoder has said.
+    pub fn vfo_view(&self, id: VfoId) -> Option<DecoderView> {
+        self.vfo(id).map(|v| v.vs.view.lock().unwrap().clone())
+    }
+
+    /// Messages a VFO's decoder sent for its panel ([`Sink::custom`]).
+    pub fn take_vfo_custom(&self, id: VfoId) -> Vec<Box<dyn std::any::Any + Send>> {
+        self.vfo(id).map_or_else(Vec::new, |v| v.vs.custom.lock().unwrap().drain(..).collect())
+    }
+
+    /// Rows of a VFO's small waterfalls since the last call, by name.
+    pub fn take_vfo_waterfall_rows(&self, id: VfoId) -> Vec<(&'static str, WaterfallRow)> {
+        self.vfo(id).map_or_else(Vec::new, |v| v.vs.mini_rows.lock().unwrap().drain(..).collect())
+    }
+
+    /// A VFO's transport stream as its hub sees it.
+    pub fn vfo_ts_view(&self, id: VfoId) -> Option<TsView> {
+        self.vfo(id).map(|v| v.hub.view())
+    }
+
+    /// The programme guide gathered from a VFO's stream.
+    pub fn vfo_epg(&self, id: VfoId) -> Option<Arc<decdvbt_ts::Epg>> {
+        self.vfo(id).map(|v| v.hub.epg())
+    }
+
+    /// Where a VFO's transport stream goes (file, UDP, HTTP, the player's
+    /// tap, a Red Button carousel).
+    pub fn set_vfo_outputs(&self, id: VfoId, o: Outputs) {
+        if let Some(v) = self.vfo(id) {
+            v.hub.set_outputs(o);
+        }
+    }
+
+    /// Write a VFO's sound to a 16-bit WAV file (`None` closes it). A change
+    /// of rate or channels starts the file over.
+    pub fn write_vfo_audio(&self, id: VfoId, path: Option<PathBuf>) -> std::io::Result<()> {
+        let Some(v) = self.vfo(id) else { return Ok(()) };
+        let mut f = v.vs.wav_file.lock().unwrap();
+        if let Some(old) = f.take() {
+            old.finish()?;
+        }
+        if let Some(p) = path {
+            *f = Some(WavOut { file: std::io::BufWriter::new(std::fs::File::create(p)?), shape: None, bytes: 0 });
+        }
+        Ok(())
+    }
+
+    /// Write a VFO's transport stream to `path` (a `.ts`), or stop.
+    pub fn write_vfo_ts(&self, id: VfoId, path: Option<PathBuf>) -> std::io::Result<()> {
+        let Some(v) = self.vfo(id) else { return Ok(()) };
+        let mut f = v.vs.ts_file.lock().unwrap();
+        if let Some(mut old) = f.take() {
+            use std::io::Write;
+            old.flush()?;
+        }
+        if let Some(p) = path {
+            *f = Some(std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(p)?));
+        }
+        Ok(())
+    }
+
+    // ---- The focused VFO: the single-decoder API ------------------------
+
+    /// Run `factory`'s decoder on the focused VFO's place (stopping the one
+    /// running there), or none (stopping every VFO). The new VFO starts
+    /// centred, as wide as the decoder asks for, and takes the focus.
+    pub fn set_decoder(&mut self, factory: Option<&'static dyn DecoderFactory>) {
+        let Some(f) = factory else {
+            while let Some(id) = self.vfos.first().map(|v| v.id) {
+                self.remove_vfo(id);
+            }
+            return;
+        };
+        let at = self.focused().and_then(|p| self.vfos.iter().position(|v| v.id == p.id));
+        if let Some(i) = at {
+            let id = self.vfos[i].id;
+            self.remove_vfo(id);
+        }
+        let bw = f.input(self.source_rate).bandwidth_hz;
+        if let Some(new) = self.spawn_vfo(f, Target::Offset(0.0), bw) {
+            // Added last; put it where the old one was.
+            let v = self.vfos.pop().expect("just added");
+            self.vfos.insert(at.unwrap_or(0).min(self.vfos.len()), v);
+            self.focus = Some(new);
+            self.mark_primary();
+        }
+    }
+
+    /// Move or resize the focused VFO's channel.
     pub fn set_channel(&self, offset_hz: f64, bandwidth_hz: f64) {
-        if let Some(w) = &self.worker {
-            let _ = w.tx.send(WorkerMsg::Channel { target: Target::Offset(offset_hz), bandwidth_hz });
+        if let Some(v) = self.focused() {
+            self.set_vfo_channel(v.id, offset_hz, bandwidth_hz);
         }
     }
 
-    /// Put the decoder's channel at RF frequency `hz` and keep it there
-    /// across retunes (the GUI's way: the channel stays on its station while
-    /// the band is dragged).
     pub fn set_channel_at(&self, hz: f64, bandwidth_hz: f64) {
-        if let Some(w) = &self.worker {
-            let _ = w.tx.send(WorkerMsg::Channel { target: Target::At(hz), bandwidth_hz });
+        if let Some(v) = self.focused() {
+            self.set_vfo_channel_at(v.id, hz, bandwidth_hz);
         }
     }
 
-    /// Pass a command to the running decoder.
+    /// Pass a command to the focused VFO's decoder.
     pub fn command(&self, c: Command) {
-        if let Some(w) = &self.worker {
-            let _ = w.tx.send(WorkerMsg::Command(c));
+        if let Some(v) = self.focused() {
+            self.vfo_command(v.id, c);
         }
     }
 
@@ -361,48 +568,31 @@ impl Host {
         let _ = self.cmd.send(SourceCmd::FrontEnd(s));
     }
 
-    /// Write the decoder's transport stream to `path` (a `.ts`), or stop.
-    /// Write the decoder's sound to a 16-bit WAV file (`None` closes it). A
-    /// change of rate or channels starts the file over.
     pub fn write_audio(&self, path: Option<PathBuf>) -> std::io::Result<()> {
-        let mut f = self.shared.wav_file.lock().unwrap();
-        if let Some(old) = f.take() {
-            old.finish()?;
-        }
-        if let Some(p) = path {
-            *f = Some(WavOut { file: std::io::BufWriter::new(std::fs::File::create(p)?), shape: None, bytes: 0 });
-        }
-        Ok(())
+        self.focused().map_or(Ok(()), |v| self.write_vfo_audio(v.id, path))
     }
 
     pub fn write_ts(&self, path: Option<PathBuf>) -> std::io::Result<()> {
-        let mut f = self.shared.ts_file.lock().unwrap();
-        if let Some(mut old) = f.take() {
-            use std::io::Write;
-            old.flush()?;
-        }
-        if let Some(p) = path {
-            *f = Some(std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(p)?));
-        }
-        Ok(())
+        self.focused().map_or(Ok(()), |v| self.write_vfo_ts(v.id, path))
     }
 
-    /// Where the decoder's transport stream goes (file, UDP, HTTP, the
-    /// player's tap, a Red Button carousel).
     pub fn set_outputs(&self, o: Outputs) {
-        self.hub.set_outputs(o);
+        if let Some(v) = self.focused() {
+            v.hub.set_outputs(o);
+        }
     }
 
-    /// The transport stream as the hub sees it (services, PIDs, rate…).
+    /// The focused VFO's transport stream as the hub sees it.
     pub fn ts_view(&self) -> TsView {
-        self.hub.view()
+        self.focused().map_or_else(TsView::default, |v| v.hub.view())
     }
 
-    /// The programme guide gathered from the stream.
-    pub fn epg(&self) -> std::sync::Arc<decdvbt_ts::Epg> {
-        self.hub.epg()
+    /// The programme guide gathered from the focused VFO's stream.
+    pub fn epg(&self) -> Arc<decdvbt_ts::Epg> {
+        self.focused().map_or_else(|| Arc::new(decdvbt_ts::Epg::new()), |v| v.hub.epg())
     }
 
+    /// The master volume, over every VFO.
     pub fn set_volume(&self, v: f32) {
         self.shared.volume.store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
@@ -415,18 +605,19 @@ impl Host {
         self.shared.stats.lock().unwrap().clone()
     }
 
+    /// What the focused VFO's decoder has said (empty with none running).
     pub fn view(&self) -> DecoderView {
-        self.shared.view.lock().unwrap().clone()
+        self.focused().map_or_else(DecoderView::default, |v| v.vs.view.lock().unwrap().clone())
     }
 
-    /// Messages the decoder sent for its panel ([`Sink::custom`]).
-    /// Rows of the decoder's small waterfalls since the last call, by name.
+    /// Rows of the focused VFO's small waterfalls since the last call.
     pub fn take_waterfall_rows(&self) -> Vec<(&'static str, WaterfallRow)> {
-        self.shared.mini_rows.lock().unwrap().drain(..).collect()
+        self.focused().map_or_else(Vec::new, |v| self.take_vfo_waterfall_rows(v.id))
     }
 
+    /// Messages the focused VFO's decoder sent for its panel ([`Sink::custom`]).
     pub fn take_custom(&self) -> Vec<Box<dyn std::any::Any + Send>> {
-        self.shared.custom.lock().unwrap().drain(..).collect()
+        self.focused().map_or_else(Vec::new, |v| self.take_vfo_custom(v.id))
     }
 
     /// Whether the source thread is still going (false once a file has ended
@@ -435,7 +626,7 @@ impl Host {
         self.shared.running.load(Ordering::Relaxed)
     }
 
-    /// The source has ended and the decoder has had every block of it.
+    /// The source has ended and the decoders have had every block of it.
     pub fn finished(&self) -> bool {
         !self.running() && self.shared.in_flight.load(Ordering::Acquire) == 0
     }
@@ -443,7 +634,7 @@ impl Host {
 
 impl Drop for Host {
     fn drop(&mut self) {
-        // The worker first: it may be blocked handing a retune to the source.
+        // The workers first: one may be blocked handing a retune to the source.
         self.set_decoder(None);
         let _ = self.cmd.send(SourceCmd::Stop);
         if let Some(j) = self.source_join.take() {
@@ -508,7 +699,8 @@ fn source_thread(
     let mut recorder: Option<(PathBuf, IqFileWriter, u64)> = None;
     let mut pool: Vec<Arc<Vec<Iq>>> = Vec::new();
     let mut samples = 0u64;
-    let mut dropped_before = 0u64;
+    // Samples each VFO's queue refused since it last took a block.
+    let mut dropped_before: HashMap<VfoId, u64> = HashMap::new();
     // Real-time pacing of a file: the wall time its samples should take.
     let mut pace_start = Instant::now();
     let mut paced_samples = 0u64;
@@ -609,21 +801,24 @@ fn source_thread(
             meter.time(Stage::Spectrum, || w.push(&buf, center, generation));
         }
 
-        // Hand over. A radio never waits; a file does.
-        let meta = BlockMeta { center_hz: center, sample_rate: rate, generation, dropped_before, live };
-        let tx = sh.worker_tx.lock().unwrap().clone();
-        if let Some(tx) = tx {
-            meter.time(Stage::Handoff, || {
+        // Hand over to every VFO's worker. A radio never waits; a file does
+        // (for the slowest worker).
+        let workers: Vec<_> = sh.workers.lock().unwrap().clone();
+        dropped_before.retain(|id, _| workers.iter().any(|(w, _)| w == id));
+        meter.time(Stage::Handoff, || {
+            for (id, tx) in &workers {
+                let lost = dropped_before.entry(*id).or_insert(0);
+                let meta = BlockMeta { center_hz: center, sample_rate: rate, generation, dropped_before: *lost, live };
                 let msg = WorkerMsg::Block(buf.clone(), meta);
-                // Counted before sending, so the worker never sees it go
+                // Counted before sending, so a worker never sees it go
                 // below zero; taken back if the block is dropped.
                 sh.in_flight.fetch_add(1, Ordering::AcqRel);
                 if live {
                     match tx.try_send(msg) {
-                        Ok(()) => dropped_before = 0,
+                        Ok(()) => *lost = 0,
                         Err(TrySendError::Full(_)) => {
                             sh.in_flight.fetch_sub(1, Ordering::AcqRel);
-                            dropped_before += n as u64;
+                            *lost += n as u64;
                             *sh.handoff_dropped.lock().unwrap() += 1;
                         }
                         Err(TrySendError::Disconnected(_)) => {
@@ -633,8 +828,8 @@ fn source_thread(
                 } else if tx.send(msg).is_err() {
                     sh.in_flight.fetch_sub(1, Ordering::AcqRel);
                 }
-            });
-        }
+            }
+        });
         pool.push(buf);
         samples += n as u64;
 
@@ -772,6 +967,7 @@ fn worker_thread(
     spec: InputSpec,
     rx: Receiver<WorkerMsg>,
     sh: Arc<Shared>,
+    vs: Arc<VfoShared>,
     cmd: Sender<SourceCmd>,
     feeder: Feeder,
 ) {
@@ -845,7 +1041,7 @@ fn worker_thread(
                     if let Some(n) = note {
                         sink.log(n);
                     }
-                    sh.view.lock().unwrap().channel = c.info;
+                    vs.view.lock().unwrap().channel = c.info;
                     chain = Some((meta.sample_rate, c));
                 }
                 let (_, ch) = chain.as_mut().expect("built above");
@@ -872,7 +1068,7 @@ fn worker_thread(
         // Empty the sink.
         if let Some(d) = sink.retune_by_hz.take() {
             match target {
-                Target::Offset(0.0) => {
+                Target::Offset(0.0) if vs.drives_source.load(Ordering::Relaxed) => {
                     let _ = cmd.send(SourceCmd::RetuneBy(d));
                 }
                 Target::Offset(o) => target = Target::Offset(o + d),
@@ -882,8 +1078,10 @@ fn worker_thread(
         if !sink.audio.is_empty() {
             // The sound thread opens the device; nothing here waits for it.
             let a = audio.get_or_insert_with(AudioOut::spawn);
-            a.set_volume(f32::from_bits(sh.volume.load(Ordering::Relaxed)));
-            let mut wav = sh.wav_file.lock().unwrap();
+            a.set_volume(
+                f32::from_bits(sh.volume.load(Ordering::Relaxed)) * f32::from_bits(vs.gain.load(Ordering::Relaxed)),
+            );
+            let mut wav = vs.wav_file.lock().unwrap();
             for chunk in sink.audio.drain(..) {
                 if let Some(w) = wav.as_mut() {
                     w.push(chunk.sample_rate, chunk.channels, &chunk.samples);
@@ -893,7 +1091,7 @@ fn worker_thread(
         }
         let audio_status = audio.as_ref().and_then(AudioOut::status);
         if !sink.waterfalls.is_empty() {
-            let mut q = sh.mini_rows.lock().unwrap();
+            let mut q = vs.mini_rows.lock().unwrap();
             q.extend(sink.waterfalls.drain(..));
             // A GUI that is not collecting (minimised) keeps a few seconds.
             while q.len() > MAX_MINI_ROWS {
@@ -901,13 +1099,13 @@ fn worker_thread(
             }
         }
         if !sink.custom.is_empty() {
-            let mut q = sh.custom.lock().unwrap();
+            let mut q = vs.custom.lock().unwrap();
             q.extend(sink.custom.drain(..));
             while q.len() > MAX_CUSTOM {
                 q.pop_front();
             }
         }
-        let mut v = sh.view.lock().unwrap();
+        let mut v = vs.view.lock().unwrap();
         if audio_status.is_some() {
             v.audio = audio_status;
         }
@@ -924,7 +1122,7 @@ fn worker_thread(
         if !sink.ts.is_empty() {
             v.ts_packets += sink.ts.len() as u64;
             feeder.feed(sink.ts.iter().flatten().copied().collect());
-            if let Some(f) = sh.ts_file.lock().unwrap().as_mut() {
+            if let Some(f) = vs.ts_file.lock().unwrap().as_mut() {
                 use std::io::Write;
                 for p in &sink.ts {
                     let _ = f.write_all(p);

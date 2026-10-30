@@ -31,6 +31,7 @@ mod settings;
 #[cfg(test)]
 mod sim;
 mod ts_viewer;
+mod vfo;
 mod tv;
 mod waterfall;
 mod wheel;
@@ -40,7 +41,7 @@ use std::time::{Duration, Instant};
 
 use declab_api::{DecoderFactory, Family, Panel};
 use declab_engine::meter::CpuGauge;
-use declab_engine::{DecoderView, Host, HostOptions, Stats};
+use declab_engine::{DecoderView, Host, HostOptions, MAX_VFOS, Stats};
 use declab_io::{IqFileReader, IqSource, format_from_path, name_hint};
 use eframe::egui::{self, Color32, RichText};
 use waterfall::{History, RingImage};
@@ -74,6 +75,11 @@ struct Options {
     /// `--optimise`: run the Airspy gain optimiser once the radio is up (it
     /// changes the gains, and the result is kept in the preferences).
     optimise: bool,
+    /// `--vfo ID@FREQ` (repeatable): more VFOs, besides the one `--decoder`
+    /// and `--chan` give.
+    vfos: Vec<(String, f64)>,
+    /// `--rail-closed`: start with the VFO list collapsed.
+    rail_closed: bool,
     screenshot: Option<PathBuf>,
     after: f64,
 }
@@ -120,6 +126,12 @@ impl Options {
                 "--scope" => o.scope = Some(value("a scope name")?),
                 "--settings" => o.settings = true,
                 "--optimise" | "--optimize" => o.optimise = true,
+                "--vfo" => {
+                    let v = value("ID@FREQ")?;
+                    let (id, hz) = v.split_once('@').ok_or("--vfo: ID@FREQ, like wfm@94.5M")?;
+                    o.vfos.push((id.to_string(), parse_hz(hz)?));
+                }
+                "--rail-closed" => o.rail_closed = true,
                 "--play" => {
                     o.play = Some(
                         value("a service id")?
@@ -283,6 +295,13 @@ struct App {
     source_rate: f64,
     error: Option<String>,
 
+    /// The VFOs, in the host's order; `cur` is the selected one, whose live
+    /// values are the fields below (`dec`, `chan_hz`, `bandwidth_hz`, `scope`,
+    /// `selected_service`, `view`). See `vfo.rs`.
+    slots: Vec<vfo::Slot>,
+    cur: usize,
+    /// The VFO list down the left is open (else a strip of numbered discs).
+    rail_open: bool,
     /// Index into `declab_decoders::ALL`.
     dec: usize,
     /// Every decoder's settings panel (None: it has none), by index into
@@ -395,6 +414,9 @@ impl App {
             live: false,
             source_rate: 0.0,
             error: None,
+            slots: Vec::new(),
+            cur: 0,
+            rail_open: prefs::get(&p, "vfo_rail") != Some("0") && !opts.rail_closed,
             dec,
             panels: declab_decoders::ALL
                 .iter()
@@ -458,6 +480,16 @@ impl App {
             opts,
         };
         app.choose_decoder(dec);
+        let first = app.slot_from_app(1);
+        app.slots.push(first);
+        for (id, hz) in app.opts.vfos.clone() {
+            match declab_decoders::ALL.iter().position(|f| f.info().id == id) {
+                Some(d) => {
+                    app.push_slot(d, hz, true);
+                }
+                None => eprintln!("--vfo: no decoder {id:?}"),
+            }
+        }
         if app.settings_open {
             app.settings_page = Some(app.dec);
         }
@@ -466,6 +498,146 @@ impl App {
             app.start();
         }
         app
+    }
+
+    // ---- VFOs ----------------------------------------------------------
+
+    /// A slot holding the selected VFO's live values.
+    fn slot_from_app(&self, n: usize) -> vfo::Slot {
+        vfo::Slot {
+            n,
+            colour: vfo::COLOURS[(n - 1) % vfo::COLOURS.len()],
+            vid: None,
+            muted: false,
+            dec: self.dec,
+            chan_hz: self.chan_hz,
+            bandwidth_hz: self.bandwidth_hz,
+            scope: self.scope.clone(),
+            selected_service: self.selected_service,
+            view: DecoderView::default(),
+        }
+    }
+
+    /// Write the selected VFO's live values into its slot (before another
+    /// is swapped in, or the host started).
+    fn stash(&mut self) {
+        let Some(s) = self.slots.get_mut(self.cur) else { return };
+        s.dec = self.dec;
+        s.chan_hz = self.chan_hz;
+        s.bandwidth_hz = self.bandwidth_hz;
+        s.scope = self.scope.clone();
+        s.selected_service = self.selected_service;
+        s.view = self.view.clone();
+    }
+
+    /// Make slot `i` the selected VFO: its values become the live ones and
+    /// the host's single-decoder calls follow it.
+    fn load_slot(&mut self, i: usize) {
+        let s = &self.slots[i];
+        self.cur = i;
+        self.dec = s.dec;
+        self.chan_hz = s.chan_hz;
+        self.bandwidth_hz = s.bandwidth_hz;
+        self.scope = s.scope.clone();
+        self.selected_service = s.selected_service;
+        self.view = s.view.clone();
+        // The old VFO's waterfalls and stream are not this one's.
+        self.minis.clear();
+        self.tv.reset();
+        if let (Some(h), Some(v)) = (&mut self.host, self.slots[i].vid) {
+            h.set_focus(v);
+        }
+    }
+
+    fn select_slot(&mut self, i: usize) {
+        if i == self.cur || i >= self.slots.len() {
+            return;
+        }
+        self.stash();
+        self.load_slot(i);
+        self.save_prefs();
+    }
+
+    /// A new slot for decoder `dec` at `hz` (on the running host too), muted
+    /// if asked. Returns its index.
+    fn push_slot(&mut self, dec: usize, hz: f64, muted: bool) -> usize {
+        let f = declab_decoders::ALL[dec];
+        let bw = f.input(self.rate()).bandwidth_hz;
+        let n = (1..=MAX_VFOS).find(|k| !self.slots.iter().any(|s| s.n == *k)).unwrap_or(1);
+        let vid = self.host.as_mut().and_then(|h| h.add_vfo(f, hz, bw));
+        if let (Some(h), Some(v)) = (&self.host, vid) {
+            if muted {
+                h.set_vfo_gain(v, 0.0);
+            }
+            if let Some(Some(p)) = self.panels.get(dec) {
+                for c in p.settings() {
+                    h.vfo_command(v, c);
+                }
+            }
+        }
+        self.slots.push(vfo::Slot {
+            n,
+            colour: vfo::COLOURS[(n - 1) % vfo::COLOURS.len()],
+            vid,
+            muted,
+            dec,
+            chan_hz: hz,
+            bandwidth_hz: bw,
+            scope: f.default_scope().to_string(),
+            selected_service: None,
+            view: DecoderView::default(),
+        });
+        self.slots.len() - 1
+    }
+
+    /// Somewhere in the radio's span clear of the other VFOs.
+    fn free_spot(&self) -> f64 {
+        let rate = self.rate();
+        let clear = |hz: f64| self.slots.iter().all(|s| (s.chan_hz - hz).abs() > s.bandwidth_hz.max(50e3) * 1.5);
+        [0.0, 0.15, -0.15, 0.3, -0.3, 0.05, -0.05, 0.4, -0.4]
+            .iter()
+            .map(|k| self.center_hz + k * rate)
+            .find(|hz| clear(*hz))
+            .unwrap_or(self.center_hz)
+    }
+
+    /// Add a VFO running the selected one's decoder, muted, and select it.
+    fn add_vfo(&mut self, hz: Option<f64>) {
+        if self.slots.len() >= MAX_VFOS {
+            return;
+        }
+        self.stash();
+        let snap = if self.factory().info().id == "wfm" { 100e3 } else { 1e3 };
+        let hz = hz.map_or_else(|| self.free_spot(), |h| (h / snap).round() * snap);
+        let i = self.push_slot(self.dec, hz, true);
+        self.load_slot(i);
+        self.save_prefs();
+    }
+
+    /// Remove VFO `i` (the last one stays).
+    fn remove_slot(&mut self, i: usize) {
+        if self.slots.len() <= 1 || i >= self.slots.len() {
+            return;
+        }
+        if let (Some(h), Some(v)) = (&mut self.host, self.slots[i].vid) {
+            h.remove_vfo(v);
+        }
+        self.slots.remove(i);
+        if i == self.cur {
+            // Its values are gone: the neighbour's become the live ones.
+            self.load_slot(i.min(self.slots.len() - 1));
+        } else if i < self.cur {
+            self.cur -= 1;
+        }
+        self.save_prefs();
+    }
+
+    fn toggle_mute(&mut self, i: usize) {
+        let Some(s) = self.slots.get_mut(i) else { return };
+        s.muted = !s.muted;
+        if let (Some(h), Some(v)) = (&self.host, s.vid) {
+            h.set_vfo_gain(v, if s.muted { 0.0 } else { 1.0 });
+        }
     }
 
     fn factory(&self) -> &'static dyn DecoderFactory {
@@ -584,10 +756,25 @@ impl App {
                 let mut host = Host::start(src, opts);
                 // Screenshot (test) runs are silent.
                 host.set_volume(self.effective_volume());
-                host.set_decoder(Some(self.factory()));
-                host.set_channel_at(self.chan_hz, self.bandwidth_hz);
+                // Every VFO, in order (the first is the one that may retune
+                // the radio), each with its decoder's settings.
+                self.stash();
+                for s in &mut self.slots {
+                    s.vid = host.add_vfo(declab_decoders::ALL[s.dec], s.chan_hz, s.bandwidth_hz);
+                    let Some(v) = s.vid else { continue };
+                    if s.muted {
+                        host.set_vfo_gain(v, 0.0);
+                    }
+                    if let Some(Some(p)) = self.panels.get(s.dec) {
+                        for c in p.settings() {
+                            host.vfo_command(v, c);
+                        }
+                    }
+                }
+                if let Some(v) = self.slots.get(self.cur).and_then(|s| s.vid) {
+                    host.set_focus(v);
+                }
                 self.host = Some(host);
-                self.send_settings();
                 self.history.reset();
                 self.smooth.clear();
                 self.row_rate = 0.0;
@@ -602,6 +789,9 @@ impl App {
         self.opt = None;
         self.tv.reset();
         self.host = None;
+        for s in &mut self.slots {
+            s.vid = None;
+        }
         self.control = Control::None;
         self.source_rate = 0.0;
     }
@@ -621,8 +811,16 @@ impl App {
         self.minis.clear();
         self.tv.reset();
         if let Some(h) = &mut self.host {
+            // The new decoder takes the selected VFO's place (and its id).
             h.set_decoder(Some(f));
             h.set_channel_at(self.chan_hz, self.bandwidth_hz);
+            let vid = h.focused_id();
+            if let Some(s) = self.slots.get_mut(self.cur) {
+                s.vid = vid;
+                if let (true, Some(v)) = (s.muted, vid) {
+                    h.set_vfo_gain(v, 0.0);
+                }
+            }
         }
         self.send_settings();
         self.save_prefs();
@@ -959,6 +1157,7 @@ impl App {
             ("centre", format!("{:.0}", self.center_hz)),
             ("chan", format!("{:.0}", self.chan_hz)),
             ("zoom", format!("{:.3}", self.zoom)),
+            ("vfo_rail", if self.rail_open { "1" } else { "0" }.into()),
             ("volume", format!("{:.2}", self.volume)),
             ("hackrf_rate", format!("{:.0}", self.hack_rate)),
             ("hackrf_amp", if self.hack_amp { "1" } else { "0" }.into()),
@@ -1025,6 +1224,18 @@ impl App {
         }
         self.stats = h.stats();
         self.view = h.view();
+        // The other VFOs: a look every 15 frames for the rail. What their
+        // panels and waterfalls sent is dropped: those belong to the selected
+        // one, and the host keeps only a few seconds anyway.
+        let look = self.frames.is_multiple_of(15);
+        for (i, s) in self.slots.iter_mut().enumerate() {
+            let Some(v) = s.vid.filter(|_| i != self.cur) else { continue };
+            drop(h.take_vfo_custom(v));
+            drop(h.take_vfo_waterfall_rows(v));
+            if look && let Some(view) = h.vfo_view(v) {
+                s.view = view;
+            }
+        }
         let msgs = h.take_custom();
         if let Some(Some(p)) = self.panels.get_mut(self.dec) {
             for m in &msgs {
@@ -1280,6 +1491,8 @@ impl App {
         for a in actions {
             match a {
                 band::Action::Tune(hz) => self.tune_channel(hz),
+                band::Action::Select(i) => self.select_slot(i),
+                band::Action::Add(hz) => self.add_vfo(Some(hz)),
                 band::Action::Bandwidth(bw) => {
                     self.bandwidth_hz = bw.clamp(500.0, self.rate());
                     if let Some(h) = &self.host {
@@ -1432,6 +1645,44 @@ impl eframe::App for App {
         let colour = family_colour(info.family);
         let running = self.host.as_ref().is_some_and(|h| h.running());
 
+        let rows: Vec<vfo::Row> = self
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let (dec, chan, view) = if i == self.cur {
+                    (self.dec, self.chan_hz, &self.view)
+                } else {
+                    (s.dec, s.chan_hz, &s.view)
+                };
+                vfo::Row {
+                    n: s.n,
+                    colour: s.colour,
+                    decoder: declab_decoders::ALL[dec].info().name,
+                    freq_hz: chan,
+                    status: vfo::status_of(view, running),
+                    lock: view.lock,
+                    cpu: view.cpu_percent,
+                    level_db: vfo::level_of(view),
+                    muted: s.muted,
+                    primary: i == 0,
+                    running,
+                }
+            })
+            .collect();
+        let rail_was = self.rail_open;
+        let acts = vfo::rail(ui, &rows, self.cur, &mut self.rail_open, MAX_VFOS);
+        if rail_was != self.rail_open {
+            self.save_prefs();
+        }
+        for a in acts {
+            match a {
+                vfo::Act::Select(i) => self.select_slot(i),
+                vfo::Act::ToggleMute(i) => self.toggle_mute(i),
+                vfo::Act::Remove(i) => self.remove_slot(i),
+                vfo::Act::Add => self.add_vfo(None),
+            }
+        }
         egui::Panel::top("top")
             .frame(
                 egui::Frame::side_top_panel(&ctx.global_style())
@@ -1623,7 +1874,9 @@ impl eframe::App for App {
                     band::waterfall_rows(ui.available_height(), ctx.pixels_per_point()).max(64);
                 self.history.set_capacity(self.wf_rows);
                 let tex = self.ring.update(&ctx, &self.history);
-                let label = format!("{} {:.4}", info.name, self.chan_hz / 1e6);
+                let sel = self.slots.get(self.cur);
+                let label = format!("{} {} {:.4}", sel.map_or(1, |s| s.n), info.name, self.chan_hz / 1e6);
+                let chan_colour = sel.map_or(colour, |s| s.colour);
                 let idle = match (&self.host, &self.error) {
                     (_, Some(e)) => e.clone(),
                     (None, _) => "press Start, or open an IQ file".to_string(),
@@ -1639,7 +1892,20 @@ impl eframe::App for App {
                     view_span_hz: self.span(),
                     levels: self.history.levels(),
                     waterfall: tex,
-                    channel: Some((self.chan_hz, self.bandwidth_hz, colour, label)),
+                    channel: Some((self.chan_hz, self.bandwidth_hz, chan_colour, label)),
+                    others: self
+                        .slots
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != self.cur)
+                        .map(|(i, s)| band::Other {
+                            slot: i,
+                            hz: s.chan_hz,
+                            bandwidth_hz: s.bandwidth_hz,
+                            colour: s.colour,
+                            label: format!("{} {}", s.n, declab_decoders::ALL[s.dec].info().name),
+                        })
+                        .collect(),
                     moving: self
                         .dragging
                         .then(|| format!("moving the band · centre {:.3} MHz", self.view_hz / 1e6)),
