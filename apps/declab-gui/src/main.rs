@@ -49,6 +49,14 @@ use wheel::{Entry, Outcome, Wheel, family_colour};
 
 /// Smallest view span, Hz: zooming stops here.
 const MIN_SPAN_HZ: f64 = 20e3;
+/// The spectrum's FFT size: at least this, and at most this (or the GPU's
+/// widest texture, the waterfall being one), about a bin a pixel across the
+/// view between (finer as it zooms in).
+const FFT_MIN: usize = 4096;
+const FFT_MAX: usize = 16384;
+/// The zoom holds this long before the FFT size follows it, s (a scroll
+/// through several zoom steps asks once).
+const FFT_SETTLE_S: f64 = 0.25;
 /// Frames a second while a source runs: decoders report 60 times a second.
 const FPS: f64 = 60.0;
 /// Retunes while the band is being dragged, at most this often.
@@ -332,6 +340,11 @@ struct App {
     /// The view: its centre, and how far it is zoomed into the source's span.
     view_hz: f64,
     zoom: f64,
+    /// The spectrum's FFT size in use, the one the view asks for, and since
+    /// when it has asked (see `follow_zoom`).
+    fft: usize,
+    fft_want: usize,
+    fft_since: Instant,
     dragging: bool,
     last_retune: Instant,
     wheel: Option<Wheel>,
@@ -468,6 +481,9 @@ impl App {
             scope: opts.scope.clone().unwrap_or_else(|| declab_decoders::ALL[dec].default_scope().to_string()),
             view_hz: center_hz,
             zoom: opts.zoom.or(prefs::num(&p, "zoom")).unwrap_or(1.0),
+            fft: FFT_MIN,
+            fft_want: FFT_MIN,
+            fft_since: Instant::now(),
             dragging: false,
             last_retune: Instant::now(),
             wheel: None,
@@ -689,6 +705,27 @@ impl App {
         self.center_hz as u64
     }
 
+    /// Finer FFT bins as the view zooms in: about one a pixel across the
+    /// view, `px` wide, once the zoom has held still for a moment. The
+    /// waterfall keeps its rows (rescaled) when the size changes.
+    fn follow_zoom(&mut self, px: f64, max_texture: usize) {
+        // The largest power of two the GPU can take as a texture's width.
+        let limit = FFT_MAX.min(max_texture).max(FFT_MIN);
+        let cap = if limit.is_power_of_two() { limit } else { limit.next_power_of_two() / 2 };
+        let want = ((self.zoom * px).ceil() as usize).next_power_of_two().clamp(FFT_MIN, cap);
+        if want != self.fft_want {
+            self.fft_want = want;
+            self.fft_since = Instant::now();
+        }
+        if want != self.fft
+            && self.fft_since.elapsed().as_secs_f64() >= FFT_SETTLE_S
+            && let Some(h) = &self.host
+        {
+            h.set_fft(want);
+            self.fft = want;
+        }
+    }
+
     /// The rate the source runs at, or would.
     fn rate(&self) -> f64 {
         if self.source_rate > 0.0 {
@@ -803,7 +840,7 @@ impl App {
                 self.view_hz = self.center_hz;
                 self.clamp_view();
                 let opts = HostOptions {
-                    fft: 4096,
+                    fft: self.fft,
                     rows_per_s: 30.0,
                     segments_per_row: 12,
                     ..HostOptions::default()
@@ -1976,6 +2013,8 @@ impl eframe::App for App {
                 self.wf_rows =
                     band::waterfall_rows(ui.available_height(), ctx.pixels_per_point()).max(64);
                 self.history.set_capacity(self.wf_rows);
+                let px = f64::from(ui.available_width() * ctx.pixels_per_point());
+                self.follow_zoom(px, ctx.input(|i| i.max_texture_side));
                 let tex = self.ring.update(&ctx, &self.history);
                 let sel = self.slots.get(self.cur);
                 let label = format!("{} {} {:.4}", sel.map_or(1, |s| s.n), info.name, self.chan_hz / 1e6);

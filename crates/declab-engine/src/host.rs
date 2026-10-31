@@ -172,6 +172,8 @@ enum SourceCmd {
     RetuneBy(f64),
     Record(Option<PathBuf>),
     FrontEnd(FrontEndSettings),
+    /// The spectrum's FFT size (see `Host::set_fft`).
+    Fft(usize),
     Stop,
 }
 
@@ -598,6 +600,13 @@ impl Host {
         let _ = self.cmd.send(SourceCmd::Record(path));
     }
 
+    /// The spectrum's FFT size (a power of two, 64 or more): the GUI asks for
+    /// finer bins as the view zooms in. The rows change width from the next.
+    pub fn set_fft(&self, n: usize) {
+        let n = n.next_power_of_two().max(64);
+        let _ = self.cmd.send(SourceCmd::Fft(n));
+    }
+
     pub fn set_front_end(&self, s: FrontEndSettings) {
         let _ = self.cmd.send(SourceCmd::FrontEnd(s));
     }
@@ -763,6 +772,14 @@ fn source_thread(
                     retune(&mut *source, hz, &mut center, &mut generation, &mut waterfall, &mut error)
                 }
                 Ok(SourceCmd::FrontEnd(s)) => front.settings = s,
+                Ok(SourceCmd::Fft(n)) => {
+                    if let Some(w) = &mut waterfall {
+                        // About the same transforming a row whatever the
+                        // size: fewer windows averaged as they grow.
+                        let segments = (opts.segments_per_row as usize * opts.fft / n).max(1) as u32;
+                        w.set_fft(n, segments);
+                    }
+                }
                 Ok(SourceCmd::Record(None)) => {
                     if let Some((_, w, _)) = recorder.take() {
                         let _ = w.finish();

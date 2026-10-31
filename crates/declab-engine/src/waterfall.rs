@@ -58,6 +58,9 @@ enum Msg {
     },
     /// Rows a second (the display's frame rate).
     Rate(f64),
+    /// A new FFT size (the GUI zoomed): the half-made row is dropped; the
+    /// rows held go out as they are, a different width (the GUI rescales).
+    Fft(usize),
     /// Forget the half-made row (a retune: its windows straddle two
     /// tunings). The rows held keep their own centres and go out as paced:
     /// dropping them, and waiting for a new lead, froze the waterfall for a
@@ -71,6 +74,7 @@ pub struct Waterfall {
     join: Option<JoinHandle<()>>,
     fft: usize,
     sample_rate: f64,
+    rows_per_s: f64,
     samples_per_row: u64,
     segments_per_row: u32,
     /// Samples of the current row seen, and windows sent for it.
@@ -99,6 +103,7 @@ impl Waterfall {
             join: Some(join),
             fft,
             sample_rate,
+            rows_per_s,
             samples_per_row: 0,
             segments_per_row: 1,
             seen: 0,
@@ -111,11 +116,31 @@ impl Waterfall {
 
     /// Rows a second, and FFT windows averaged into each.
     pub fn set_rate(&mut self, rows_per_s: f64, segments_per_row: u32) {
+        self.rows_per_s = rows_per_s;
         self.samples_per_row = (self.sample_rate / rows_per_s).max(self.fft as f64) as u64;
         self.segments_per_row = segments_per_row.max(1);
         self.seen = 0;
         self.sent = 0;
         self.send(Msg::Rate(rows_per_s));
+    }
+
+    /// The FFT size and windows a row: finer bins when the view is zoomed
+    /// in. Nothing waits; the next row is the new size.
+    pub fn set_fft(&mut self, fft: usize, segments_per_row: u32) {
+        if fft == self.fft && segments_per_row == self.segments_per_row {
+            return;
+        }
+        self.fft = fft;
+        self.segments_per_row = segments_per_row.max(1);
+        self.samples_per_row = (self.sample_rate / self.rows_per_s).max(fft as f64) as u64;
+        self.seen = 0;
+        self.sent = 0;
+        self.send(Msg::Fft(fft));
+    }
+
+    /// The FFT size in use.
+    pub fn fft(&self) -> usize {
+        self.fft
     }
 
     /// A retune: the half-made row is dropped (see [`Msg::Clear`]).
@@ -230,6 +255,7 @@ fn run(rx: Receiver<Msg>, fft: usize, rows_per_s: f64, out: Arc<Mutex<VecDeque<R
             Ok(Msg::Clear) => {
                 let _ = spec.take_row(&mut row);
             }
+            Ok(Msg::Fft(n)) => spec = Spectrum::new(n),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 // The receive thread has ended (a file's end): the rows held

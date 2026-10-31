@@ -944,3 +944,19 @@ Engine and GUI done; the CLI still runs one decoder.
 - **Tools:** `vfo_probe` (two VFOs on a recording through the real host);
   the CLI now reports blocks a slow decoder dropped.
 
+## 23. Finer spectrum when zoomed in (2026-10-31)
+
+- The spectrum's FFT follows the zoom: about a bin a pixel across the
+  view, from 4096 up to 16384 (or the GPU's widest texture, the waterfall
+  being one): at 10 MS/s 2.4 kHz bins when zoomed out, 610 Hz zoomed in;
+  146 Hz on an RTL-SDR's 2.4 MS/s. It changes once the zoom has held for
+  0.25 s (`follow_zoom`), through `Host::set_fft` to the waterfall thread
+  (`Msg::Fft`); fewer windows are averaged as it grows, so a row costs
+  about the same. Measured: no change in the app's CPU.
+- The waterfall keeps its rows when the size changes: rescaled (nearest
+  bin when growing, the peak when shrinking, so a one-bin carrier keeps
+  its level) instead of starting again (`rows_survive_an_fft_size_change`).
+- Finer still would need a zoom FFT of the view's band alone (the history
+  then kept in view coordinates); the full band at 16384 bins costs about
+  40 MB of history and texture.
+

@@ -136,14 +136,29 @@ impl History {
         }
     }
 
+    /// Bring the rows held to `width` bins (the spectrum's FFT size changed
+    /// as the view zoomed): they are kept, rescaled, not dropped.
+    fn set_width(&mut self, width: usize) {
+        if width == self.width {
+            return;
+        }
+        if self.width == 0 || self.rows.is_empty() {
+            self.reset();
+        } else {
+            for r in self.rows.iter_mut() {
+                *r = rescale(r, width);
+            }
+            // Everything is redrawn.
+            self.epoch += 1;
+        }
+        self.width = width;
+    }
+
     pub fn push(&mut self, row: Vec<f32>) {
         if row.is_empty() {
             return;
         }
-        if row.len() != self.width {
-            self.reset();
-            self.width = row.len();
-        }
+        self.set_width(row.len());
         if self.track {
             // Track floor (20th percentile) and peak (99.5th) with some
             // inertia, so the colours do not pump with every row.
@@ -167,10 +182,14 @@ impl History {
     /// (everything redrawn).
     pub fn push_at(&mut self, mut row: Vec<f32>, center_hz: f64, rate: f64) -> bool {
         let fill = self.floor.unwrap_or(-120.0) - 6.0;
+        // A new FFT size keeps the rows (rescaled); a new rate does not.
         let fresh = match self.anchor {
-            Some((_, r)) => r != rate || row.len() != self.width,
+            Some((_, r)) => r != rate,
             None => true,
         };
+        if !fresh {
+            self.set_width(row.len());
+        }
         if fresh {
             self.push(row);
             self.anchor = Some((center_hz, rate));
@@ -212,6 +231,27 @@ impl History {
             (Some(f), Some(p)) => (f - 3.0, (p + 3.0).max(f + MIN_RANGE_DB)),
             _ => self.manual,
         }
+    }
+}
+
+/// `row` stretched or squeezed to `width` bins over the same span: each
+/// new bin takes the old bin it falls in when growing (interpolating would
+/// shave a one-bin carrier's peak), and the peak of those it covers when
+/// shrinking (a narrow carrier stays visible).
+fn rescale(row: &[f32], width: usize) -> Vec<f32> {
+    let n = row.len();
+    if n == width || n == 0 {
+        return row.to_vec();
+    }
+    if width > n {
+        (0..width).map(|j| row[(j * n / width).min(n - 1)]).collect()
+    } else {
+        (0..width)
+            .map(|j| {
+                let (a, b) = (j * n / width, ((j + 1) * n / width).max(j * n / width + 1));
+                row[a..b.min(n)].iter().copied().fold(f32::MIN, f32::max)
+            })
+            .collect()
     }
 }
 
@@ -337,6 +377,30 @@ fn render<'a>(
 mod tests {
     use super::*;
 
+    /// A new FFT size (the view zoomed) keeps the rows, rescaled, and a
+    /// one-bin carrier survives being squeezed.
+    #[test]
+    fn rows_survive_an_fft_size_change() {
+        let mut h = History::default();
+        h.set_capacity(64);
+        for _ in 0..3 {
+            let mut row = vec![-100.0; 4096];
+            row[1000] = -20.0;
+            h.push_at(row, 100e6, 10e6);
+        }
+        let epoch = h.epoch;
+        h.push_at(vec![-90.0; 16384], 100e6, 10e6);
+        assert_eq!(h.rows.len(), 4);
+        assert!(h.rows.iter().all(|r| r.len() == 16384));
+        assert!(h.epoch > epoch, "a full redraw is due");
+        // The carrier, stretched over four bins, is still there.
+        assert!(h.rows[0][4000..4004].iter().any(|&v| v > -30.0));
+        // Squeezed back to 1024 bins, its peak is kept.
+        h.push_at(vec![-90.0; 1024], 100e6, 10e6);
+        assert_eq!(h.rows.len(), 5);
+        assert!(h.rows[0][250] > -30.0, "{}", h.rows[0][250]);
+    }
+
     #[test]
     fn ring_plan_wraps() {
         assert_eq!(plan(5, 3, 10), (2, vec![(2, 0..3)]));
@@ -398,13 +462,16 @@ mod tests {
     }
 
     #[test]
-    fn width_change_starts_afresh() {
+    fn width_change_keeps_the_rows() {
+        // A new FFT size: the rows held are rescaled, not dropped, and the
+        // texture is redrawn (see `rows_survive_an_fft_size_change`).
         let mut h = History::default();
         h.push(vec![0.0; 100]);
         h.push(vec![0.0; 100]);
         let e = h.epoch;
         h.push(vec![0.0; 200]);
-        assert_eq!(h.rows.len(), 1);
+        assert_eq!(h.rows.len(), 3);
+        assert!(h.rows.iter().all(|r| r.len() == 200));
         assert_ne!(h.epoch, e);
     }
 }
