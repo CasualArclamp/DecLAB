@@ -40,6 +40,7 @@ cargo run --release -p declab-decoders --example sat_make -- out/sim_sat_gse.cf3
 cargo run --release -p declab-cli -- run sat --file out/sim_sat_gse.cf32 --rate 8M --bandwidth 3M --pcap out/x.pcap --ts out/x.ts --set symbol_rate=2000000 --card   # DVB-S/S2/S2X; GSE to PCAP, TS to a file
 cargo run --release -p declab-gui -- out/sim_sat_s2x.cf32 --rate 8M --decoder sat --chan 0 --screenshot out/x.png --after 7
 cargo run --release -p declab-cli --example retune_probe -- FILE voice HZ_A HZ_B 3   # retune a running decoder from one carrier to another mid-file, as a click does; prints the view each 0.25 s
+cargo run --release -p declab-cli --example vfo_probe -- FILE pagers HZ_1 voice HZ_2   # two VFOs on a recording, as the GUI runs them; both views each 0.5 s
 cargo test -p declab-decoders --release relock_after_retune -- --ignored --nocapture   # Digital voice: time to relock after a retune or a drag, each mode pair
 cargo run --release -p declab-cli -- list
 cargo run --release -p declab-cli -- selftest level

@@ -205,6 +205,9 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         if let Some(e) = &s.error {
             println!("    error: {e}");
         }
+        if s.handoff_dropped > 0 {
+            println!("    dropped: {} blocks (a decoder fell behind)", s.handoff_dropped);
+        }
         if host.finished() || seconds.is_some_and(|lim| t0.elapsed().as_secs_f64() >= lim && live)
             || seconds.is_some_and(|lim| !live && s.samples as f64 / s.sample_rate.max(1.0) >= lim)
         {

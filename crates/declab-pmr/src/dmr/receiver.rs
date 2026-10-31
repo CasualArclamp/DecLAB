@@ -369,7 +369,12 @@ impl Receiver {
         while self.scan + 1 < end {
             let t = self.scan;
             self.scan += 1;
-            if t < self.base + (23 * SPS) as u64 {
+            // Only a SYNC with its whole burst (and the CACH) still held
+            // can be decoded (`have`). One found sooner, in the first
+            // ~19 ms after a start or retune, became a candidate that
+            // waited forever for samples from before the start: about half
+            // of all starts never locked, however strong the signal.
+            if (t as f64) < self.base as f64 + (SYNC_END + 12.0) * SPS as f64 + 3.0 {
                 continue;
             }
             let (mut best, mut which) = (0f32, 0usize);
@@ -425,6 +430,12 @@ impl Receiver {
     fn step_candidate(&mut self) -> bool {
         let (tau, source, voice, rho) = self.candidate.expect("called with a candidate");
         if !self.have(tau) {
+            // Its burst's start is gone for good: hunt on past it.
+            if tau - (SYNC_END + 12.0) * SPS as f64 - 2.0 < self.base as f64 {
+                self.candidate = None;
+                self.scan = self.scan.max(tau as u64 + SPS as u64);
+                return true;
+            }
             return false;
         }
         self.candidate = None;

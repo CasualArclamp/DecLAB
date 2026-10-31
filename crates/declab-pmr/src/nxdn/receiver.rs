@@ -273,7 +273,10 @@ impl Receiver {
         while self.scan + 1 < end {
             let t = self.scan;
             self.scan += 1;
-            if t < self.base + (9 * self.sps) as u64 {
+            // Only a sync whose frame is all still held (`have`): one
+            // sooner would wait for samples from before the start (the
+            // DMR receiver's deadlock).
+            if (t as f64) < self.base as f64 + SYNC_END * self.sps as f64 + 3.0 {
                 continue;
             }
             let r = self.correlate(t as f64);
@@ -303,6 +306,12 @@ impl Receiver {
     fn step_candidate(&mut self) -> bool {
         let (tau, rho) = self.candidate.expect("called with a candidate");
         if !self.have(tau) {
+            // Its frame's start is gone for good: hunt on past it.
+            if tau - SYNC_END * self.sps as f64 - 2.0 < self.base as f64 {
+                self.candidate = None;
+                self.scan = self.scan.max(tau as u64 + self.sps as u64);
+                return true;
+            }
             return false;
         }
         self.candidate = None;

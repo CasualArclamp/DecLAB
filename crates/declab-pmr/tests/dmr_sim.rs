@@ -240,3 +240,28 @@ fn decodes_a_tier3_site() {
         assert!(ev.contains(&Event::ShortLc(slc)), "{det:?}");
     }
 }
+
+/// Started at any point in a burst (a VFO opened, a retune), the receiver
+/// locks. A SYNC found in the first ~19 ms, before a whole burst was held,
+/// once became a candidate that waited forever for samples from before the
+/// start: about half of all starts never locked, even at 40 dB.
+#[test]
+fn locks_from_any_start() {
+    let (bits, _, _, _, _) = site();
+    let mut iq = sim::modulate(&bits, RATE, 0.0);
+    sim::add_noise(&mut iq, RATE, 30.0, 300.0, 11);
+    // One burst is 30 ms, 720 samples: start every 20 samples across it.
+    let mut stuck = Vec::new();
+    for start in (0..720).step_by(20) {
+        let mut rx = Receiver::new(Detector::Discriminator);
+        let mut ev = Vec::new();
+        // 0.5 s from the start.
+        for chunk in iq[start..start + 12_000].chunks(2400) {
+            rx.process(chunk, &mut ev);
+        }
+        if rx.locked().is_none() {
+            stuck.push(start);
+        }
+    }
+    assert!(stuck.is_empty(), "no lock within 0.5 s from starts {stuck:?}");
+}

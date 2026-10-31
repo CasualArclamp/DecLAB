@@ -264,7 +264,10 @@ impl Receiver {
                 return true;
             }
             self.scan += 1;
-            if t < self.base + (23 * SPS) as u64 {
+            // Only a sync whose frame is all still held (`have`): one
+            // sooner would wait for samples from before the start (the
+            // DMR receiver's deadlock).
+            if (t as f64) < self.base as f64 + 23.0 * SPS as f64 + 3.0 {
                 continue;
             }
             let r = self.correlate(t as f64);

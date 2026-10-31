@@ -920,3 +920,27 @@ Engine and GUI done; the CLI still runs one decoder.
   ones under the scopes) were cleared on every switch; each VFO now keeps
   its own, and they come back as they were.
 
+## 22. DMR that never locked from some starts (2026-10-31)
+
+- **Report:** a strong DMR carrier (a MOTOTRBO Capacity Plus rest
+  channel, 23 dB eye) sat "searching" in the GUI.
+- **Cause:** the hunt looked for a SYNC from 23 symbols into the stream,
+  but decoding a burst needs the 89 symbols before its SYNC's end (the
+  burst's first half and the CACH). A SYNC found in between became a
+  candidate that waited forever for samples from before the start, and
+  the hunt never ran again. A SYNC comes every 30 ms and the window was
+  ~14 ms wide, so about half of all starts (a VFO opened, every retune
+  that resets the decoder) never locked. Live it looked random: eight
+  runs, two stuck; from a recording, windows starting at 25 or 26 s never
+  locked while ones at 24 or 27 s did.
+- **Fix:** the hunt starts where a burst is whole, and a candidate whose
+  burst start is gone is dropped. NXDN and P25 had a 2-sample version of
+  the same window: fixed alike. Test `locks_from_any_start` (36 starts
+  across a burst, each locks within 0.5 s). Live: eight starts, eight
+  locks.
+- **Not a fault:** a Capacity Plus rest channel moves to another
+  repeater when a call starts, so its carrier can stop (seen at 31 s on
+  the test recording); the decoder then searches until it is back.
+- **Tools:** `vfo_probe` (two VFOs on a recording through the real host);
+  the CLI now reports blocks a slow decoder dropped.
+
