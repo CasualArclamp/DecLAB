@@ -532,6 +532,11 @@ impl Receiver {
             self.stats.locked = false;
             self.scan = t_next as u64;
             self.frag = Default::default();
+            // Hunt afresh, as the 4FSK receivers do: the AFC may have
+            // followed the carrier off (a channel dragged across it), and
+            // left there the next carrier sits outside the hunt's reach.
+            self.afc_step = 0.0;
+            self.stats.offset_hz = 0.0;
         }
         true
     }

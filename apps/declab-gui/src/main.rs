@@ -340,6 +340,11 @@ struct App {
     ring: RingImage,
     /// The decoder's own waterfalls, by name.
     minis: Vec<MiniState>,
+    /// The other VFOs' own waterfalls, by VFO number, kept while another
+    /// is selected (switching back finds them as they were, not empty);
+    /// and which VFO `minis` belongs to.
+    slot_minis: std::collections::HashMap<usize, Vec<MiniState>>,
+    minis_owner: Option<usize>,
     /// The large one's height, physical pixels (its rows).
     big_rows: usize,
     smooth: Vec<f32>,
@@ -469,6 +474,8 @@ impl App {
             history: History::default(),
             ring: RingImage::default(),
             minis: Vec::new(),
+            slot_minis: std::collections::HashMap::new(),
+            minis_owner: None,
             big_rows: 240,
             smooth: Vec::new(),
             row_center: 0.0,
@@ -550,8 +557,18 @@ impl App {
         self.scope = s.scope.clone();
         self.selected_service = s.selected_service;
         self.view = s.view.clone();
-        // The old VFO's waterfalls and stream are not this one's.
-        self.minis.clear();
+        // The old VFO's waterfalls are kept for when it is selected again,
+        // and this one's come back as they were. (Its stream is not this
+        // one's.)
+        let n = s.n;
+        match self.minis_owner.replace(n) {
+            Some(old) if old == n => {}
+            Some(old) => {
+                let mine = self.slot_minis.remove(&n).unwrap_or_default();
+                self.slot_minis.insert(old, std::mem::replace(&mut self.minis, mine));
+            }
+            None => self.minis = self.slot_minis.remove(&n).unwrap_or_default(),
+        }
         self.tv.reset();
         if let (Some(h), Some(v)) = (&mut self.host, self.slots[i].vid) {
             h.set_focus(v);
@@ -631,13 +648,18 @@ impl App {
         if let (Some(h), Some(v)) = (&mut self.host, self.slots[i].vid) {
             h.remove_vfo(v);
         }
+        let gone = self.slots[i].n;
         self.slots.remove(i);
         if i == self.cur {
+            // Its waterfalls go with it.
+            self.minis.clear();
+            self.minis_owner = None;
             // Its values are gone: the neighbour's become the live ones.
             self.load_slot(i.min(self.slots.len() - 1));
         } else if i < self.cur {
             self.cur -= 1;
         }
+        self.slot_minis.remove(&gone);
         self.save_prefs();
     }
 
@@ -1251,6 +1273,10 @@ impl App {
         let Some(h) = &self.host else { return };
         self.tv.poll(h, &name);
         for (name, row) in h.take_waterfall_rows() {
+            // These rows are the selected VFO's.
+            if self.minis_owner.is_none() {
+                self.minis_owner = self.slots.get(self.cur).map(|s| s.n);
+            }
             let i = match self.minis.iter().position(|m| m.name == name) {
                 Some(i) => i,
                 None => {

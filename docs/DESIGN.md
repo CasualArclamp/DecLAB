@@ -901,3 +901,22 @@ Engine and GUI done; the CLI still runs one decoder.
   relay from DecSAT's `decsat-ts`/`decsat-ip` (the crates are here, unwired),
   DVB-S2 ACM statistics per MODCOD, the Identify card, the live GUI on a
   radio (no dish here).
+
+## 21. Relocking after a retune (2026-10-31)
+
+- **Report:** retuning Digital voice to another carrier sometimes never
+  locked, however strong the signal.
+- **Cause:** the host resets a decoder only on a jump of more than half
+  its channel; a drag moves it in small steps so the sound is not muted.
+  While dragged, a locked receiver's AFC follows the carrier off. The 4FSK
+  receivers zero their AFC when they lose lock; TETRA's kept it, so after
+  a drag onto another cell (8 kHz down, in the test) the new cell sat
+  outside its reach and never decoded. Now it hunts afresh too.
+- **Test:** `voice::tests::tetra_relocks_after_a_drag`; the ignored
+  `relock_after_retune` prints every mode pair, with and without a reset
+  and after drags (all relock in 0.1–0.8 s). `retune_probe` (declab-cli)
+  does it through the real host on a recording.
+- **VFO switch:** the decoder's own waterfalls (FM's multiplex, the small
+  ones under the scopes) were cleared on every switch; each VFO now keeps
+  its own, and they come back as they were.
+

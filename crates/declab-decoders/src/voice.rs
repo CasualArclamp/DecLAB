@@ -276,6 +276,155 @@ mod tests {
 
     const RATE: f64 = 72_000.0;
 
+    /// A DMR repeater (colour code `cc`, a call to `tg`) for about `secs`.
+    fn dmr_carrier(cc: u8, tg: u32, secs: f64) -> Vec<declab_pmr::fsk4::Iq> {
+        let mut r = Repeater::new(cc, ShortLc::Null);
+        let idle = dsim::idle_burst(Source::Bs, cc);
+        r.push(&idle);
+        r.push(&idle);
+        let lc = FullLc::GroupVoice {
+            opts: ServiceOptions(0),
+            group: tg,
+            source: 2_345_678,
+        };
+        // A superframe is 360 ms.
+        r.voice_call(&lc, (secs / 0.36) as usize + 1, |rep| dsim::idle_burst(Source::Bs, rep.cc));
+        dsim::modulate(&r.bits, RATE, 0.0)
+    }
+
+    /// A TETRA cell (colour code `cc`) with a call, for about `secs`.
+    fn tetra_carrier(cc: u8, secs: f64) -> Vec<declab_pmr::fsk4::Iq> {
+        let mut cell = declab_pmr::tetra::sim::Cell::new(234, 1234, cc);
+        let (b, _) = declab_pmr::tetra::sim::call(&mut cell, 9001, 4_000_123, (secs / 0.0567) as usize);
+        declab_pmr::tetra::sim::modulate(&b, RATE, 0.0)
+    }
+
+    /// Carrier A then, at once, carrier B `step_hz` away (a retune that the
+    /// host may or may not reset the decoder for): seconds until B is
+    /// recognised (`want` in the log), or `None` within 6 s.
+    fn relock(
+        a: Vec<declab_pmr::fsk4::Iq>,
+        b: Vec<declab_pmr::fsk4::Iq>,
+        step_hz: f64,
+        reset: bool,
+        want: &str,
+        mode: &str,
+        drag_hz: f64,
+    ) -> (Option<f64>, Option<f64>) {
+        let switch = 3.0;
+        let mut iq: Vec<_> = a.into_iter().take((switch * RATE) as usize).collect();
+        // A drag: over the last 1.5 s on A the channel moves, so A seems to
+        // slide by `drag_hz` (the host does not reset for small moves).
+        let n_drag = (1.5 * RATE) as usize;
+        let start = iq.len().saturating_sub(n_drag);
+        let mut ph = 0f64;
+        for (k, z) in iq[start..].iter_mut().enumerate() {
+            let f = drag_hz * k as f64 / n_drag as f64;
+            ph += 2.0 * std::f64::consts::PI * f / RATE;
+            *z *= num_complex::Complex32::from_polar(1.0, ph as f32);
+        }
+        let n0 = iq.len();
+        iq.extend(b.into_iter().take((6.0 * RATE) as usize).enumerate().map(|(k, z)| {
+            z * num_complex::Complex32::from_polar(
+                1.0,
+                (2.0 * std::f64::consts::PI * step_hz * k as f64 / RATE) as f32,
+            )
+        }));
+        declab_pmr::fsk4::add_noise(&mut iq, RATE, 30.0, 12_500.0, 150.0, 9);
+        let mut d = Factory.create();
+        let tuning = Tuning { center_hz: 0.0, sample_rate: RATE, generation: 0 };
+        // When the new carrier's identity is logged (by whichever mode),
+        // and when the card shows its mode, not searching (what the GUI
+        // shows).
+        let (mut heard, mut shown) = (None, None);
+        for (n, chunk) in iq.chunks(7_200).enumerate() {
+            let first = n * 7_200;
+            if reset && first == n0 {
+                d.reset();
+            }
+            let mut sink = Sink::default();
+            d.process(
+                &Block { iq: chunk, tuning, first_sample: first as u64, dropped_before: 0, live: false },
+                &mut sink,
+            );
+            if first < n0 {
+                continue;
+            }
+            let t = (first + chunk.len() - n0) as f64 / RATE;
+            if heard.is_none() && sink.log.iter().any(|l| l.contains(want)) {
+                heard = Some(t);
+            }
+            if let Some(c) = &sink.card
+                && shown.is_none()
+                && c.title.starts_with(mode)
+                && sink.lock != Lock::Searching
+            {
+                shown = Some(t);
+            }
+            if heard.is_some() && shown.is_some() {
+                break;
+            }
+        }
+        (heard, shown)
+    }
+
+    /// A TETRA channel dragged off its carrier (the AFC follows it 8 kHz
+    /// away) and onto another cell: the receiver must hunt afresh. Its AFC
+    /// once stayed where the drag left it, and the new cell never locked.
+    #[test]
+    fn tetra_relocks_after_a_drag() {
+        let (heard, _) = relock(
+            tetra_carrier(17, 4.0),
+            tetra_carrier(5, 4.0),
+            0.0,
+            false,
+            "colour code 5",
+            "TETRA",
+            -8_000.0,
+        );
+        assert!(heard.is_some_and(|t| t < 1.5), "{heard:?}");
+    }
+
+    /// How long a retune to another carrier takes to lock, with and without
+    /// the decoder being reset (the host resets only on a jump of more than
+    /// half the channel). Printed, for looking into relock problems:
+    /// `cargo test -p declab-decoders --release relock_after_retune -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn relock_after_retune() {
+        type Make = Box<dyn Fn() -> (Vec<declab_pmr::fsk4::Iq>, Vec<declab_pmr::fsk4::Iq>)>;
+        let cases: Vec<(&str, Make, &str, &str)> = vec![
+            ("DMR -> DMR", Box::new(|| (dmr_carrier(1, 91, 4.0), dmr_carrier(7, 2350, 7.0))), "group call TG 2350", "DMR"),
+            ("TETRA -> TETRA", Box::new(|| (tetra_carrier(17, 4.0), tetra_carrier(5, 7.0))), "colour code 5", "TETRA"),
+            ("DMR -> TETRA", Box::new(|| (dmr_carrier(1, 91, 4.0), tetra_carrier(5, 7.0))), "colour code 5", "TETRA"),
+            ("TETRA -> DMR", Box::new(|| (tetra_carrier(17, 4.0), dmr_carrier(7, 2350, 7.0))), "group call TG 2350", "DMR"),
+        ];
+        let fmt = |t: Option<f64>| t.map_or("never".to_string(), |t| format!("{t:.2} s"));
+        for (name, make, want, mode) in &cases {
+            for step in [0.0, 1500.0, -3000.0] {
+                for reset in [true, false] {
+                    let (a, b) = make();
+                    let (heard, shown) = relock(a, b, step, reset, want, mode, 0.0);
+                    println!(
+                        "{name:16} step {step:+6.0} Hz  reset {reset:5}  decoded {:8} card {}",
+                        fmt(heard),
+                        fmt(shown)
+                    );
+                }
+            }
+            // A drag onto the new carrier: no reset.
+            for drag in [8_000.0, -8_000.0] {
+                let (a, b) = make();
+                let (heard, shown) = relock(a, b, 0.0, false, want, mode, drag);
+                println!(
+                    "{name:16} drag {drag:+6.0} Hz  no reset    decoded {:8} card {}",
+                    fmt(heard),
+                    fmt(shown)
+                );
+            }
+        }
+    }
+
     #[test]
     fn detects_each_mode_in_turn() {
         // DMR, then NXDN48, then NXDN96, with gaps of noise between.
