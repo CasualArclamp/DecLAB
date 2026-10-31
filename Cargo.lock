@@ -480,7 +480,7 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "decdab-codecs"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decsat-xaac-sys",
  "thiserror 2.0.21",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-core"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "num-complex",
  "thiserror 2.0.21",
@@ -496,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-data"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "flate2",
  "thiserror 2.0.21",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-dsp"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decdab-core",
  "num-complex",
@@ -513,14 +513,14 @@ dependencies = [
 
 [[package]]
 name = "decdab-fec"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decdab-core",
 ]
 
 [[package]]
 name = "decdab-fic"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decdab-core",
  "decdab-fec",
@@ -528,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-msc"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decdab-core",
  "decdab-fec",
@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-ofdm"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decdab-core",
  "decdab-dsp",
@@ -548,14 +548,14 @@ dependencies = [
 
 [[package]]
 name = "decdvbt-audio"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "cpal",
 ]
 
 [[package]]
 name = "decdvbt-core"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "num-complex",
  "thiserror 2.0.21",
@@ -563,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "decdvbt-fec"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decdvbt-core",
  "num-complex",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "decdvbt-mheg"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "ab_glyph",
  "decdvbt-ts",
@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "decdvbt-mod"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decdvbt-core",
  "decdvbt-fec",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "decdvbt-ofdm"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decdvbt-core",
  "num-complex",
@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "decdvbt-rx"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decdvbt-core",
  "decdvbt-fec",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "decdvbt-ts"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decdvbt-core",
  "miniz_oxide 0.8.9",
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "decdvbt-video"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decdvbt-audio",
  "decdvbt-ts",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "declab-api"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "egui",
  "num-complex",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "declab-cli"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "declab-api",
@@ -652,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "declab-core"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "num-complex",
  "thiserror 2.0.21",
@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "declab-decoders"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "decdab-codecs",
  "decdab-data",
@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "declab-dsp"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "declab-core",
  "num-complex",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "declab-engine"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "cpal",
  "decdvbt-ts",
@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "declab-gui"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "decdvbt-audio",
@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "declab-io"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "declab-core",
  "futures-lite",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "declab-pagers"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "declab-core",
  "num-complex",
@@ -749,14 +749,14 @@ dependencies = [
 
 [[package]]
 name = "declab-pmr"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "num-complex",
 ]
 
 [[package]]
 name = "decsat-xaac-sys"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "cc",
 ]

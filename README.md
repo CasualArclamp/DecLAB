@@ -18,6 +18,12 @@ in Rust, all from one portable `.exe`.
 | 📟 **Pagers** | POCSAG and FLEX |
 | 🎙️ **Digital voice** | DMR (Tier I, II and III, LRRP positions), NXDN48, NXDN96, P25 phase 1 and TETRA, detected by itself |
 
+**Several decoders at once.** Run up to eight VFOs on one radio, each with its
+own decoder, sound and settings. The VFO list down the left collapses to a
+strip of numbered discs; click a channel on the band to select it, ctrl+click
+to add one. **Bias tee** for an LNA or active antenna on the Airspy R2,
+HackRF One and RTL-SDR Blog: off at every start, switched on by you.
+
 ## Screenshots
 
 **DVB-T/T2:** the multiplex, its services and the constellation.
