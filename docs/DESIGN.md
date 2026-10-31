@@ -829,3 +829,25 @@ Engine and GUI done; the CLI still runs one decoder.
   to reorder" from the mockup is not built; CLI `--vfo` not yet.
 - **Next:** per-VFO settings and prefs, reordering, CLI `--vfo`, a shared
   first-stage decimator when VFOs are close together.
+
+## 22. Bias tee (2026-10-31, issue 1)
+
+- **All three radios** can power the antenna port: Airspy R2 (GPIO port 1 pin
+  13, 4.5 V), HackRF One (antenna power, 3.3 V) and RTL-SDR Blog dongles
+  (GPIO 0). `bias_tee: bool` in `AirspySettings` / `HackRfSettings` /
+  `RtlSettings` (false by default), applied at open, and
+  `set_bias_tee(bool)` on each `*Control` to switch it live.
+- **Off unless asked, off at the end:** every open without the setting drives
+  the pin low; closing or dropping a source drives it low again (Airspy and
+  HackRF in `Drop`, RTL-SDR in `Rtl2832::close`), so antenna power never
+  outlives the program. Tests: the Airspy start sequence carries a 1 only
+  when asked, the RTL-SDR's GPO writes are all low by default and the last
+  one after close is low, the HackRF default is off. The earlier "never on"
+  tests became these.
+- **GUI:** a "Bias tee" toggle beside the gain menu of a live radio, with a
+  warning in its tooltip. **Not saved in the preferences:** it is off at every
+  start of DecLAB (a DC supply on a DC-grounded antenna can damage it);
+  `--bias-tee` on the command line (GUI and CLI) turns it on at start.
+- **Not verified on hardware** (no radio with the feature was attached): the
+  USB encodings and register writes follow libairspy, seify-hackrfone and
+  librtlsdr and are unit-tested.

@@ -6,8 +6,9 @@
 //! dongle must be bound to the WinUSB driver (Zadig); on Linux the kernel's
 //! DVB-T driver (`dvb_usb_rtl28xxu`) is detached when it is opened.
 //!
-//! **Receive only, antenna power always off.** `rtlsdr_proto` drives the
-//! bias-tee pin low at open and has no way to drive it high.
+//! **Receive only; antenna power off unless asked.** `rtlsdr_proto` drives
+//! the bias-tee pin low at open and when the dongle is closed; only
+//! [`RtlSettings::bias_tee`] or [`RtlSdrControl::set_bias_tee`] drive it high.
 //!
 //! The dongle streams unsigned 8-bit IQ at 2.048 MS/s (4 MB/s). A reader
 //! thread keeps [`IN_FLIGHT`] bulk transfers queued and hands the bytes over
@@ -203,6 +204,11 @@ impl RtlSdrControl {
     /// The tuner's AGC, or a fixed gain (snapped to the tuner's steps).
     pub fn set_gains(&self, gains: RtlGains) -> Result<()> {
         self.dev.rtl.lock().unwrap().set_gains(gains)
+    }
+
+    /// Power the antenna port (RTL-SDR Blog dongles), or not.
+    pub fn set_bias_tee(&self, on: bool) -> Result<()> {
+        self.dev.rtl.lock().unwrap().set_bias_tee(on)
     }
 
     /// The dongle's clock error, ppm (positive: it runs high).

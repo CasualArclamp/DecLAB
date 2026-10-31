@@ -20,7 +20,7 @@ airspy = ["dep:nusb", "dep:futures-lite"]
 # Live RTL-SDR front end (RTL2832U with an R820T/R820T2/R828D tuner: the V3,
 # V4 and most current dongles), from DecPagers (DecDAB before it), pure Rust
 # over nusb as well. On Windows the dongle must use the WinUSB driver (Zadig).
-# Receive only, the bias tee is always off. The chips' logic is plain code,
+# Receive only; the bias tee is off unless asked. The chips' logic is plain code,
 # built and tested without the feature.
 rtlsdr = ["dep:nusb"]
 

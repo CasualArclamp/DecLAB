@@ -19,10 +19,11 @@
 //! and must wait for its PLL to report lock, so this is a driver over a bus
 //! rather than a list of commands.
 //!
-//! **Antenna-port power (the bias tee) is never switched on.** RTL-SDR Blog
-//! dongles drive it from GPIO 0; [`Rtl2832::open`] drives that pin low and
-//! nothing in this file can drive it high. A test checks that no write ever
-//! sets it.
+//! **Antenna-port power (the bias tee) is off unless asked.** RTL-SDR Blog
+//! dongles drive it from GPIO 0; [`Rtl2832::open`] drives that pin low, only
+//! [`Rtl2832::set_bias_tee`] (from [`RtlSettings::bias_tee`], false by
+//! default) drives it high, and [`Rtl2832::close`] drives it low again. Tests
+//! check each of those.
 
 use std::time::Duration;
 
@@ -268,6 +269,8 @@ pub struct RtlSettings {
     pub gains: RtlGains,
     /// The dongle's clock error, ppm (positive: it runs high).
     pub ppm: f64,
+    /// Power the antenna port (RTL-SDR Blog dongles). Off by default.
+    pub bias_tee: bool,
 }
 
 impl Default for RtlSettings {
@@ -277,6 +280,7 @@ impl Default for RtlSettings {
             sample_rate: SAMPLE_RATE_HZ,
             gains: RtlGains::default(),
             ppm: 0.0,
+            bias_tee: false,
         }
     }
 }
@@ -592,7 +596,7 @@ impl<B: RtlBus> Rtl2832<B> {
         d.r82xx_init()?;
         d.i2c_repeater(false)?;
 
-        d.bias_tee_off()?;
+        d.set_bias_tee(false)?;
         Ok(d)
     }
 
@@ -622,6 +626,7 @@ impl<B: RtlBus> Rtl2832<B> {
         self.settings.center_hz = s.center_hz;
         self.set_sample_rate(s.sample_rate)?;
         self.set_gains(s.gains)?;
+        self.set_bias_tee(s.bias_tee)?;
         self.reset_buffer()
     }
 
@@ -708,6 +713,8 @@ impl<B: RtlBus> Rtl2832<B> {
     /// Put the tuner in standby and power the demodulator and ADCs down
     /// (`rtlsdr_deinit_baseband`).
     pub fn close(&mut self) -> Result<()> {
+        // Antenna power off first: it must not outlive the program.
+        self.set_bias_tee(false)?;
         if self.tuner_up {
             self.i2c_repeater(true)?;
             for (r, v) in [
@@ -836,15 +843,19 @@ impl<B: RtlBus> Rtl2832<B> {
         self.demod_write(1, 0x3e, ((offs >> 8) & 0x3f) as u16, 1)
     }
 
-    /// GPIO 0 an output, driven low: the bias tee off.
-    fn bias_tee_off(&mut self) -> Result<()> {
+    /// GPIO 0 an output, driven high (the bias tee on) or low (off), as
+    /// librtlsdr's `rtlsdr_set_gpio_output` and `rtlsdr_set_gpio_bit` do.
+    pub fn set_bias_tee(&mut self, on: bool) -> Result<()> {
         let bit = 1u8 << BIAS_TEE_GPIO;
         let d = self.read_reg(block::SYS, reg::GPD)?;
         self.write_reg(block::SYS, reg::GPD, u16::from(d & !bit), 1)?;
         let oe = self.read_reg(block::SYS, reg::GPOE)?;
         self.write_reg(block::SYS, reg::GPOE, u16::from(oe | bit), 1)?;
         let o = self.read_reg(block::SYS, reg::GPO)?;
-        self.write_reg(block::SYS, reg::GPO, u16::from(o & !bit), 1)
+        let o = if on { o | bit } else { o & !bit };
+        self.write_reg(block::SYS, reg::GPO, u16::from(o), 1)?;
+        self.settings.bias_tee = on;
+        Ok(())
     }
 
     // ---- the R82xx (the I2C repeater must be on) ---------------------------
@@ -1396,23 +1407,42 @@ mod tests {
         assert_eq!(d.bus().sys.get(&reg::DEMOD_CTL), Some(&0x20));
     }
 
-    #[test]
-    fn the_bias_tee_is_never_driven_on() {
-        let mut d = opened(R820T_I2C_ADDR, true);
-        d.set_center(100_000_000).unwrap();
-        d.set_ppm(-3.0).unwrap();
-        d.close().unwrap();
-        let gpo: Vec<u8> = d
-            .bus()
+    /// The levels written to GPO (the bias-tee pin is bit 0), in order.
+    fn gpo_writes(d: &Rtl2832<Mock>) -> Vec<u8> {
+        d.bus()
             .log
             .iter()
             .filter(|(v, i, _)| *v == reg::GPO && *i == (block::SYS << 8) | 0x10)
             .map(|(_, _, data)| data[0])
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn the_bias_tee_is_off_unless_asked() {
+        let mut d = opened(R820T_I2C_ADDR, true);
+        d.set_center(100_000_000).unwrap();
+        d.set_ppm(-3.0).unwrap();
+        d.close().unwrap();
+        let gpo = gpo_writes(&d);
         assert!(!gpo.is_empty(), "the pin is driven low at open");
         assert!(gpo.iter().all(|b| b & 1 == 0), "{gpo:?}");
         // GPIO 0 is an output (so the low level holds).
         assert_eq!(d.bus().sys[&reg::GPOE] & 1, 1);
         assert_eq!(d.bus().sys[&reg::GPD] & 1, 0);
+    }
+
+    #[test]
+    fn the_bias_tee_goes_on_when_asked_and_off_at_close() {
+        let mut d = Rtl2832::open(Mock::new(R820T_I2C_ADDR), true).expect("open");
+        d.start(&RtlSettings { center_hz: 222_064_000, bias_tee: true, ..RtlSettings::default() })
+            .expect("start");
+        assert_eq!(gpo_writes(&d).last().map(|b| b & 1), Some(1), "on after start");
+        assert!(d.settings().bias_tee);
+        d.set_bias_tee(false).unwrap();
+        assert_eq!(gpo_writes(&d).last().map(|b| b & 1), Some(0));
+        d.set_bias_tee(true).unwrap();
+        d.close().unwrap();
+        assert_eq!(gpo_writes(&d).last().map(|b| b & 1), Some(0), "off after close");
+        assert!(!d.settings().bias_tee);
     }
 }

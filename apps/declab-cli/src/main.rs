@@ -7,7 +7,7 @@
 //! declab run <decoder> --file <capture> [--rate HZ] [--freq HZ] [--offset HZ]
 //!                      [--bandwidth HZ] [--seconds S] [--realtime]
 //! declab run <decoder> --radio hackrf|airspy|rtlsdr --freq HZ [--rate HZ] [--offset HZ]
-//!                      [--gain AMP,LNA,VGA | DB | agc] [--ppm PPM] [--seconds S] [--record OUT.cs8]
+//!                      [--gain AMP,LNA,VGA | DB | agc] [--ppm PPM] [--bias-tee] [--seconds S] [--record OUT.cs8]
 //!                      [--ts OUT.ts] [--card] [--udp ADDR:PORT] [--http ADDR:PORT]
 //!                      [--sound]   (runs are silent unless --sound)
 //! ```
@@ -226,6 +226,7 @@ fn open_hackrf(o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
         center_hz: o.hz("--freq")?.context("--freq")? as u64,
         sample_rate: o.hz("--rate")?.unwrap_or(10e6) as u32,
         gains,
+        bias_tee: o.flag("--bias-tee"),
     };
     Ok(Box::new(HackRfSource::open(s)?))
 }
@@ -247,6 +248,7 @@ fn open_airspy(o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
     let s = AirspySettings {
         center_hz: o.hz("--freq")?.context("--freq")? as u64,
         gains,
+        bias_tee: o.flag("--bias-tee"),
         ..AirspySettings::default()
     };
     Ok(Box::new(AirspySource::open(s)?))
@@ -279,6 +281,7 @@ fn open_rtlsdr(o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
         center_hz: o.hz("--freq")?.context("--freq")? as u64,
         gains,
         ppm,
+        bias_tee: o.flag("--bias-tee"),
         ..RtlSettings::default()
     };
     Ok(Box::new(RtlSdrSource::open(s)?))

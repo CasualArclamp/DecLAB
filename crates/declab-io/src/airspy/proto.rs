@@ -7,10 +7,11 @@
 //! (airspyone_host, BSD-3-Clause, Airspy project). All requests are
 //! Vendor | Device.
 //!
-//! **Bias tee: never on.** The only command that touches the GPIO the bias tee
-//! hangs off is [`bias_tee_off`], and it has no argument: the value is the
-//! constant 0. [`start_sequence`] sends it on every open, and a test checks
-//! that no command any function here can build ever carries a 1 there.
+//! **Bias tee: off unless asked.** The only commands that touch the GPIO the
+//! bias tee hangs off are [`bias_tee`] and [`bias_tee_off`]. [`start_sequence`]
+//! sends one on every open, and it carries a 1 only when
+//! [`StartParams::bias_tee`] is set, which nothing does by default; a test
+//! checks that no sequence built from default parameters ever carries one.
 
 use declab_core::{Error, Result};
 
@@ -152,10 +153,15 @@ pub fn set_packing(on: bool) -> Command {
     Command::set(REQ_SET_PACKING, on as u16)
 }
 
-/// Switch the antenna bias tee **off**. Deliberately has no parameter: see the
-/// module comment.
+/// Switch the antenna bias tee on or off (`airspy_gpio_write` on port 1 pin
+/// 13: the value is the pin's level).
+pub fn bias_tee(on: bool) -> Command {
+    Command::out(REQ_GPIO_WRITE, u16::from(on), GPIO_BIAS_TEE_INDEX, Vec::new())
+}
+
+/// Switch the antenna bias tee **off**: what every open and every close does.
 pub fn bias_tee_off() -> Command {
-    Command::out(REQ_GPIO_WRITE, 0, GPIO_BIAS_TEE_INDEX, Vec::new())
+    bias_tee(false)
 }
 
 pub fn board_id_read() -> Command {
@@ -228,11 +234,13 @@ pub struct StartParams {
     pub mixer: u8,
     pub vga: u8,
     pub packed: bool,
+    /// Power the antenna port. Off unless the user asked.
+    pub bias_tee: bool,
 }
 
 /// The start sequence of libairspy's `airspy_open` + `airspy_start_rx`: rate,
-/// frequency, gains with both AGCs off, bias tee off, receiver off, clear
-/// halt, receiver on. (Packing is set before the rate, as libairspy's callers
+/// frequency, gains with both AGCs off, the bias tee as asked (off by
+/// default), receiver off, clear halt, receiver on. (Packing is set before the rate, as libairspy's callers
 /// do between open and start.)
 pub fn start_sequence(p: &StartParams) -> Result<Vec<Step>> {
     use Step::{ClearHalt, Control};
@@ -246,7 +254,7 @@ pub fn start_sequence(p: &StartParams) -> Result<Vec<Step>> {
         Control(set_lna_gain(p.lna)),
         Control(set_mixer_gain(p.mixer)),
         Control(set_vga_gain(p.vga)),
-        Control(bias_tee_off()),
+        Control(bias_tee(p.bias_tee)),
         Control(receiver_mode(false)),
         ClearHalt,
         Control(receiver_mode(true)),
@@ -333,6 +341,39 @@ mod tests {
     }
 
     #[test]
+    fn bias_tee_command_carries_the_level() {
+        assert_eq!((bias_tee(true).value, bias_tee(true).index), (1, 45));
+        assert_eq!(bias_tee(false), bias_tee_off());
+    }
+
+    #[test]
+    fn bias_tee_is_on_only_when_asked() {
+        let seq = |on: bool| {
+            start_sequence(&StartParams {
+                center_hz: 546_000_000,
+                rate_index: 0,
+                lna: 5,
+                mixer: 5,
+                vga: 5,
+                packed: false,
+                bias_tee: on,
+            })
+            .unwrap()
+        };
+        let levels = |on: bool| -> Vec<u16> {
+            seq(on)
+                .iter()
+                .filter_map(|s| match s {
+                    Step::Control(c) if c.request == REQ_GPIO_WRITE => Some(c.value),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(levels(false), vec![0]);
+        assert_eq!(levels(true), vec![1]);
+    }
+
+    #[test]
     fn bias_tee_is_off_on_every_path() {
         let off = bias_tee_off();
         assert_eq!(off.dir, Dir::Out);
@@ -350,6 +391,7 @@ mod tests {
                         mixer: g,
                         vga: g,
                         packed,
+                        bias_tee: false,
                     })
                     .unwrap();
                     let mut gpio = 0;
@@ -377,6 +419,7 @@ mod tests {
             mixer: 12,
             vga: 13,
             packed: false,
+            bias_tee: false,
         })
         .unwrap();
         let reqs: Vec<Option<u8>> = seq

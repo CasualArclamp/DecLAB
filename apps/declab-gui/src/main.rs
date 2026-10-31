@@ -75,6 +75,9 @@ struct Options {
     /// `--optimise`: run the Airspy gain optimiser once the radio is up (it
     /// changes the gains, and the result is kept in the preferences).
     optimise: bool,
+    /// `--bias-tee`: power the antenna port from the start (it is never
+    /// saved, so it is off at every start unless this is given).
+    bias_tee: bool,
     /// `--vfo ID@FREQ` (repeatable): more VFOs, besides the one `--decoder`
     /// and `--chan` give.
     vfos: Vec<(String, f64)>,
@@ -132,6 +135,7 @@ impl Options {
                     o.vfos.push((id.to_string(), parse_hz(hz)?));
                 }
                 "--rail-closed" => o.rail_closed = true,
+                "--bias-tee" => o.bias_tee = true,
                 "--play" => {
                     o.play = Some(
                         value("a service id")?
@@ -272,6 +276,10 @@ struct App {
     hack_amp: bool,
     hack_lna: u16,
     hack_vga: u16,
+    /// Power the antenna port of a live radio (an LNA or active antenna).
+    /// Never saved: off at every start of the program, since DC on the wrong
+    /// antenna can damage it.
+    bias_tee: bool,
     air_lna: u8,
     air_mix: u8,
     air_vga: u8,
@@ -399,6 +407,7 @@ impl App {
             hack_amp: prefs::get(&p, "hackrf_amp") == Some("1"),
             hack_lna: prefs::num(&p, "hackrf_lna").unwrap_or(24),
             hack_vga: prefs::num(&p, "hackrf_vga").unwrap_or(20),
+            bias_tee: opts.bias_tee,
             air_lna: prefs::num(&p, "airspy_lna").unwrap_or(12),
             air_mix: prefs::num(&p, "airspy_mix").unwrap_or(10),
             air_vga: prefs::num(&p, "airspy_vga").unwrap_or(8),
@@ -693,6 +702,7 @@ impl App {
                         lna_db: self.hack_lna,
                         vga_db: self.hack_vga,
                     },
+                    bias_tee: self.bias_tee,
                 };
                 let src = HackRfSource::open(s).map_err(|e| e.to_string())?;
                 self.control = Control::HackRf(src.control());
@@ -709,6 +719,7 @@ impl App {
                         vga: self.air_vga,
                     }
                     .clamped(),
+                    bias_tee: self.bias_tee,
                     ..AirspySettings::default()
                 };
                 let src = AirspySource::open(s).map_err(|e| e.to_string())?;
@@ -722,6 +733,7 @@ impl App {
                     center_hz: self.center_hz as u64,
                     gains: self.rtl_gains(),
                     ppm: self.rtl_ppm,
+                    bias_tee: self.bias_tee,
                     ..RtlSettings::default()
                 };
                 let src = RtlSdrSource::open(s).map_err(|e| e.to_string())?;
@@ -945,6 +957,39 @@ impl App {
         self.view_hz = self
             .view_hz
             .clamp(self.center_hz - half, self.center_hz + half);
+    }
+
+    /// The antenna-port power switch, beside the gain menu of a live radio.
+    fn bias_tee_ui(&mut self, ui: &mut egui::Ui) {
+        let on = self.bias_tee;
+        let text = RichText::new("Bias tee").color(if on { Color32::from_rgb(255, 176, 40) } else { Color32::GRAY });
+        let r = ui.selectable_label(on, text).on_hover_text(
+            "Power the antenna port (3.3-5 V) for an LNA or active antenna.\n\
+             Off at every start of DecLAB: leave it off for a plain or\n\
+             DC-grounded antenna, which it can damage.",
+        );
+        if r.clicked() {
+            self.bias_tee = !on;
+            self.apply_bias_tee();
+        }
+    }
+
+    /// Send the bias tee setting to the open radio.
+    fn apply_bias_tee(&mut self) {
+        let on = self.bias_tee;
+        let r = match &self.control {
+            #[cfg(feature = "hackrf")]
+            Control::HackRf(c) => c.set_bias_tee(on),
+            #[cfg(feature = "airspy")]
+            Control::Airspy(c) => c.set_bias_tee(on),
+            #[cfg(feature = "rtlsdr")]
+            Control::RtlSdr(c) => c.set_bias_tee(on),
+            _ => Ok(()),
+        };
+        if let Err(e) = r {
+            self.error = Some(e.to_string());
+            self.bias_tee = false;
+        }
     }
 
     fn apply_gains(&mut self) {
@@ -1429,6 +1474,9 @@ impl App {
                                 }
                             });
                         }
+                    }
+                    if self.kind != SourceKind::File {
+                        self.bias_tee_ui(ui);
                     }
                     ui.label(RichText::new("centre").color(Color32::GRAY));
                     ui.label(RichText::new(format!("{:.3} MHz", self.center_hz / 1e6)).color(Color32::WHITE));

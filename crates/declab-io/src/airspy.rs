@@ -12,11 +12,11 @@
 //! [`convert`]; this file is the device, the reader thread and the
 //! [`IqSource`].
 //!
-//! **Receive only, bias tee always off.** The radio's antenna-port DC supply
-//! (for an LNA or an active antenna) can damage whatever is connected to it,
-//! so, as with the HackRF, DecSAT-family software does not switch it on. It
-//! is sent explicitly off at every open ([`proto::bias_tee_off`] has no
-//! argument to set it any other way).
+//! **Receive only; bias tee off unless asked.** The radio's antenna-port DC
+//! supply (for an LNA or an active antenna) can damage whatever is connected
+//! to it, so [`AirspySettings::bias_tee`] is false by default and the radio
+//! is sent explicitly off at every open without it, and again when the
+//! source is dropped.
 //!
 //! **Only 10 MS/s complex** (the R2's ADC runs at 20 MS/s; the bulk stream is
 //! that real signal, turned into IQ on the host by [`convert::RealToIq`]).
@@ -184,6 +184,8 @@ pub struct AirspySettings {
     /// The device's packed 12-bit transfers (8 samples in 12 bytes: 30 MB/s
     /// instead of 40 MB/s on the USB). Off unless the USB port drops buffers.
     pub packed: bool,
+    /// Power the antenna port (an LNA or active antenna). Off by default.
+    pub bias_tee: bool,
 }
 
 impl Default for AirspySettings {
@@ -193,6 +195,7 @@ impl Default for AirspySettings {
             sample_rate: proto::IQ_RATE,
             gains: AirspyGains::default(),
             packed: false,
+            bias_tee: false,
         }
     }
 }
@@ -347,6 +350,13 @@ impl AirspyControl {
         Ok(())
     }
 
+    /// Power the antenna port, or not.
+    pub fn set_bias_tee(&self, on: bool) -> Result<()> {
+        self.usb.control(&proto::bias_tee(on))?;
+        self.settings.lock().unwrap().bias_tee = on;
+        Ok(())
+    }
+
     pub fn set_gains(&self, gains: AirspyGains) -> Result<()> {
         let g = gains.clamped();
         self.usb.control(&proto::set_lna_gain(g.lna))?;
@@ -451,6 +461,7 @@ impl AirspySource {
             mixer: gains.mixer,
             vga: gains.vga,
             packed: settings.packed,
+            bias_tee: settings.bias_tee,
         })?;
         for step in &steps {
             match step {
@@ -605,6 +616,8 @@ impl IqSource for AirspySource {
 
 impl Drop for AirspySource {
     fn drop(&mut self) {
+        // Antenna power off first: it must not outlive the program.
+        let _ = self.control.usb.control(&proto::bias_tee_off());
         self.stop.store(true, Ordering::Relaxed);
         // Unblock a reader waiting to hand over a buffer.
         while self.feed.rx.try_recv().is_ok() {}
