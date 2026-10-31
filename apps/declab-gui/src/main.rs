@@ -653,6 +653,20 @@ impl App {
         declab_decoders::ALL[self.dec]
     }
 
+    /// Where a radio starts: the remembered centre if the radio can tune
+    /// there and the channel lies in its span, else the channel itself,
+    /// within the radio's range. (A file's centre, 0 Hz for a simulated
+    /// one, stays remembered after switching to a radio: handed over as it
+    /// was, the radio refused to start.)
+    #[allow(dead_code)] // unused when no radio is built in
+    fn live_centre(&mut self, lo_hz: f64, hi_hz: f64, rate: f64) -> u64 {
+        let tunable = (lo_hz..=hi_hz).contains(&self.center_hz);
+        if !tunable || (self.chan_hz - self.center_hz).abs() > rate / 2.0 {
+            self.center_hz = self.chan_hz.clamp(lo_hz, hi_hz).round();
+        }
+        self.center_hz as u64
+    }
+
     /// The rate the source runs at, or would.
     fn rate(&self) -> f64 {
         if self.source_rate > 0.0 {
@@ -694,8 +708,10 @@ impl App {
             #[cfg(feature = "hackrf")]
             SourceKind::HackRf => {
                 use declab_io::{HackRfGains, HackRfSettings, HackRfSource};
+                // The HackRF One tunes 1 MHz to 6 GHz.
+                let centre = self.live_centre(1e6, 6e9, self.hack_rate);
                 let s = HackRfSettings {
-                    center_hz: self.center_hz as u64,
+                    center_hz: centre,
                     sample_rate: self.hack_rate as u32,
                     gains: HackRfGains {
                         amp: self.hack_amp,
@@ -711,8 +727,10 @@ impl App {
             #[cfg(feature = "airspy")]
             SourceKind::Airspy => {
                 use declab_io::{AirspyGains, AirspySettings, AirspySource};
+                use declab_io::airspy::proto::{FREQ_MAX_HZ, FREQ_MIN_HZ};
+                let centre = self.live_centre(FREQ_MIN_HZ as f64, FREQ_MAX_HZ as f64, 10e6);
                 let s = AirspySettings {
-                    center_hz: self.center_hz as u64,
+                    center_hz: centre,
                     gains: AirspyGains {
                         lna: self.air_lna,
                         mixer: self.air_mix,
@@ -729,8 +747,11 @@ impl App {
             #[cfg(feature = "rtlsdr")]
             SourceKind::RtlSdr => {
                 use declab_io::{RtlSdrSource, RtlSettings};
+                use declab_io::rtlsdr_proto::{FREQ_MAX_HZ, FREQ_MIN_HZ, SAMPLE_RATE_HZ};
+                let centre =
+                    self.live_centre(FREQ_MIN_HZ as f64, FREQ_MAX_HZ as f64, SAMPLE_RATE_HZ as f64);
                 let s = RtlSettings {
-                    center_hz: self.center_hz as u64,
+                    center_hz: centre,
                     gains: self.rtl_gains(),
                     ppm: self.rtl_ppm,
                     bias_tee: self.bias_tee,
