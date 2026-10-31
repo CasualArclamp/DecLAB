@@ -1,0 +1,21 @@
+# made by CasualArclamp
+[package]
+name = "decsat-rx"
+description = "DVB-S/S2/S2X receiver core for DecLAB: demodulator, identify, FEC, from DecSAT's engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decsat-core = { path = "../decsat-core" }
+decsat-dsp = { path = "../decsat-dsp" }
+decsat-fec = { path = "../decsat-fec" }
+decsat-frame = { path = "../decsat-frame" }
+decsat-modem = { path = "../decsat-modem" }
+num-complex.workspace = true
+rustfft.workspace = true
+
+[dev-dependencies]
+decsat-mod = { path = "../decsat-mod" }

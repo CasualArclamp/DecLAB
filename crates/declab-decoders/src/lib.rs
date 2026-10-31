@@ -19,6 +19,7 @@ mod level;
 mod nxdn;
 mod p25;
 mod pagers;
+mod sat;
 mod tetra;
 mod voice;
 
@@ -28,6 +29,7 @@ use analog::Mode;
 pub static ALL: &[&dyn DecoderFactory] = &[
     &dvbt::Factory,
     &dab::Factory,
+    &sat::Factory,
     &analog::Factory(Mode::Wfm),
     &analog::Factory(Mode::Nfm),
     &analog::Factory(Mode::Am),

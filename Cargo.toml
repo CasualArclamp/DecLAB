@@ -58,6 +58,20 @@ opt-level = 3
 [profile.dev.package.decdab-codecs]
 opt-level = 3
 
+# DVB-S/S2/S2X (crates/decsat-*, from DecSAT).
+[profile.dev.package.decsat-fec]
+opt-level = 3
+[profile.dev.package.decsat-dsp]
+opt-level = 3
+[profile.dev.package.decsat-frame]
+opt-level = 3
+[profile.dev.package.decsat-rx]
+opt-level = 3
+[profile.dev.package.decsat-modem]
+opt-level = 3
+[profile.dev.package.decsat-mod]
+opt-level = 3
+
 [profile.release]
 debug = "line-tables-only"
 lto = "thin"

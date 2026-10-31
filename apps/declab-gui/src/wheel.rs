@@ -299,6 +299,13 @@ pub fn icon(painter: &egui::Painter, id: &str, p: Pos2, s: f32, ink: Color32) {
             painter.line_segment([r.center_top(), r.center_top() + vec2(s * 0.45, -s * 0.5)], st);
         }
         "dvbs" | "s2ts" => dish(painter),
+        "sat" => {
+            // A dish with a feed horn and the packets of its data.
+            dish(painter);
+            for k in 0..3 {
+                painter.circle_filled(p + vec2(s * 0.95, s * (0.1 + 0.35 * k as f32)), 1.8, ink);
+            }
+        }
         "s2ip" => {
             dish(painter);
             for k in 0..3 {

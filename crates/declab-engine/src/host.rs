@@ -161,6 +161,9 @@ pub struct DecoderView {
     pub audio: Option<String>,
     /// Transport-stream packets the decoder has made (`Sink::ts`).
     pub ts_packets: u64,
+    /// IP datagrams (DVB-S2 GSE) and their bytes since the decoder started.
+    pub ip_packets: u64,
+    pub ip_bytes: u64,
 }
 
 /// What the source thread is asked to do.
@@ -235,6 +238,8 @@ struct VfoShared {
     mini_rows: Mutex<VecDeque<(&'static str, WaterfallRow)>>,
     /// Where the decoder's transport stream is written, if anywhere.
     ts_file: Mutex<Option<std::io::BufWriter<std::fs::File>>>,
+    /// Where the decoder's IP datagrams are written (a PCAP of raw IP).
+    pcap_file: Mutex<Option<std::io::BufWriter<std::fs::File>>>,
     /// The decoder's sound to a WAV file (`Host::write_audio`).
     wav_file: Mutex<Option<WavOut>>,
     /// This VFO's volume against the master (0 mutes it), `f32` bits.
@@ -252,6 +257,7 @@ impl VfoShared {
             custom: Mutex::new(VecDeque::new()),
             mini_rows: Mutex::new(VecDeque::new()),
             ts_file: Mutex::new(None),
+            pcap_file: Mutex::new(None),
             wav_file: Mutex::new(None),
             gain: AtomicU32::new(1.0f32.to_bits()),
             drives_source: AtomicBool::new(drives_source),
@@ -505,6 +511,34 @@ impl Host {
             *f = Some(std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(p)?));
         }
         Ok(())
+    }
+
+    /// Write a VFO's IP datagrams to `path` (a `.pcap` of raw IP, link type
+    /// 101), or stop.
+    pub fn write_vfo_pcap(&self, id: VfoId, path: Option<PathBuf>) -> std::io::Result<()> {
+        use std::io::Write;
+        let Some(v) = self.vfo(id) else { return Ok(()) };
+        let mut f = v.vs.pcap_file.lock().unwrap();
+        if let Some(mut old) = f.take() {
+            old.flush()?;
+        }
+        if let Some(p) = path {
+            let mut w = std::io::BufWriter::new(std::fs::File::create(p)?);
+            // Global header: magic, version 2.4, no zone, no sigfigs,
+            // snaplen 65535, LINKTYPE_RAW (101).
+            w.write_all(&0xA1B2_C3D4u32.to_le_bytes())?;
+            w.write_all(&2u16.to_le_bytes())?;
+            w.write_all(&4u16.to_le_bytes())?;
+            w.write_all(&[0; 8])?;
+            w.write_all(&65535u32.to_le_bytes())?;
+            w.write_all(&101u32.to_le_bytes())?;
+            *f = Some(w);
+        }
+        Ok(())
+    }
+
+    pub fn write_pcap(&self, path: Option<PathBuf>) -> std::io::Result<()> {
+        self.focused().map_or(Ok(()), |v| self.write_vfo_pcap(v.id, path))
     }
 
     // ---- The focused VFO: the single-decoder API ------------------------
@@ -913,8 +947,11 @@ impl Chain {
         // they are (DVB-T's FFT runs on them directly: a full-rate filter
         // cost it 30 % more time and did nothing); one that names the source's
         // rate gets them untouched when its channel is most of the band.
+        // A channel under half the band is cut out and decimated even then
+        // (a satellite carrier of 2 MS/s on a 10 MS/s radio).
         let passthrough = offset_hz == 0.0
-            && (want.is_none() || want.is_some_and(|r| (r - in_rate).abs() < 1e-6 * in_rate) && bw >= 0.8 * in_rate);
+            && (want.is_none() && bw >= 0.5 * in_rate
+                || want.is_some_and(|r| (r - in_rate).abs() < 1e-6 * in_rate) && bw >= 0.8 * in_rate);
         let ddc = (!passthrough).then(|| Ddc::new(in_rate, offset_hz, bw));
         let mid_rate = ddc.as_ref().map_or(in_rate, |d| d.out_rate());
         let rs = match want {
@@ -1125,6 +1162,22 @@ fn worker_thread(
             if let Some(f) = vs.ts_file.lock().unwrap().as_mut() {
                 use std::io::Write;
                 for p in &sink.ts {
+                    let _ = f.write_all(p);
+                }
+            }
+        }
+        if !sink.ip.is_empty() {
+            v.ip_packets += sink.ip.len() as u64;
+            v.ip_bytes += sink.ip.iter().map(|p| p.len() as u64).sum::<u64>();
+            if let Some(f) = vs.pcap_file.lock().unwrap().as_mut() {
+                use std::io::Write;
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                for p in &sink.ip {
+                    // Packet header: seconds, microseconds, captured, original.
+                    let _ = f.write_all(&(now.as_secs() as u32).to_le_bytes());
+                    let _ = f.write_all(&now.subsec_micros().to_le_bytes());
+                    let _ = f.write_all(&(p.len() as u32).to_le_bytes());
+                    let _ = f.write_all(&(p.len() as u32).to_le_bytes());
                     let _ = f.write_all(p);
                 }
             }

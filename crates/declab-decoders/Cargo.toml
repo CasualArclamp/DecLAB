@@ -32,4 +32,17 @@ decdab-fic = { path = "../decdab-fic" }
 decdab-msc = { path = "../decdab-msc" }
 decdab-codecs = { path = "../decdab-codecs" }
 decdab-data = { path = "../decdab-data" }
+# DVB-S/S2/S2X: DecSAT's receiver (crates/decsat-*).
+decsat-core = { path = "../decsat-core" }
+decsat-rx = { path = "../decsat-rx" }
+decsat-frame = { path = "../decsat-frame" }
+decsat-gse = { path = "../decsat-gse" }
+decsat-ts = { path = "../decsat-ts" }
+decsat-modem = { path = "../decsat-modem" }
 egui = { workspace = true, optional = true }
+
+[dev-dependencies]
+decsat-mod = { path = "../decsat-mod" }
+decsat-core = { path = "../decsat-core" }
+decsat-gse = { path = "../decsat-gse" }
+decsat-modem = { path = "../decsat-modem" }

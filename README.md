@@ -12,6 +12,7 @@ in Rust, all from one portable `.exe`.
 
 | | Modes |
 |---|---|
+| 🛰️ **Satellite** | DVB-S, DVB-S2 and DVB-S2X (found blind, ACM): transport streams with the same services list, player and guide, and GSE as IP datagrams to a PCAP |
 | 📺 **Terrestrial TV** | DVB-T and DVB-T2 (found blind), with the programme guide, Red Button and transport-stream out |
 | 📻 **Digital radio** | DAB and DAB+, with station text (DLS) and slideshows |
 | 〰️ **Analog** | FM with RDS, NFM, AM, USB, LSB, DSB and CW |

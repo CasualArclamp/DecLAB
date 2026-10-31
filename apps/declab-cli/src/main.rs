@@ -8,7 +8,7 @@
 //!                      [--bandwidth HZ] [--seconds S] [--realtime]
 //! declab run <decoder> --radio hackrf|airspy|rtlsdr --freq HZ [--rate HZ] [--offset HZ]
 //!                      [--gain AMP,LNA,VGA | DB | agc] [--ppm PPM] [--bias-tee] [--seconds S] [--record OUT.cs8]
-//!                      [--ts OUT.ts] [--card] [--udp ADDR:PORT] [--http ADDR:PORT]
+//!                      [--set KEY=VALUE] [--ts OUT.ts] [--pcap OUT.pcap] [--card] [--udp ADDR:PORT] [--http ADDR:PORT]
 //!                      [--sound]   (runs are silent unless --sound)
 //! ```
 //!
@@ -116,9 +116,21 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         // The decoder's transport stream (DVB-T/T2).
         host.write_ts(Some(PathBuf::from(path)))?;
     }
+    if let Some(path) = o.get("--pcap") {
+        // The decoder's IP datagrams (DVB-S2 GSE) as a raw-IP PCAP.
+        host.write_pcap(Some(PathBuf::from(path)))?;
+    }
     if let Some(path) = o.get("--wav") {
         // The decoder's sound, as 16-bit PCM.
         host.write_audio(Some(PathBuf::from(path)))?;
+    }
+    // A decoder setting, as its panel would send it: `--set symbol_rate=2000000`.
+    for (i, a) in o.0.iter().enumerate() {
+        if a == "--set"
+            && let Some((key, value)) = o.0.get(i + 1).and_then(|kv| kv.split_once('='))
+        {
+            host.command(declab_api::Command::Set { key: key.into(), value: value.into() });
+        }
     }
     // A service by name, once the decoder lists it.
     let mut want_service = o.get("--service").map(str::to_lowercase);
@@ -149,7 +161,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             .map(|m| format!("{} {:.2}{}{}", m.name, m.value, if m.unit.is_empty() { "" } else { " " }, m.unit))
             .collect();
         println!(
-            "{:6.1} s  in {:5.1} dBFS{}  ch {:.0} kS/s (/{}{})  {:?}  {}  cpu {:.0}%{}",
+            "{:6.1} s  in {:5.1} dBFS{}  ch {:.0} kS/s (/{}{})  {:?}  {}  cpu {:.0}%{}{}",
             s.samples as f64 / s.sample_rate.max(1.0),
             s.rms_dbfs,
             if s.clip_percent > 0.1 { format!(" CLIP {:.1}%", s.clip_percent) } else { String::new() },
@@ -160,6 +172,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             meas.join(", "),
             v.cpu_percent,
             if v.ts_packets > 0 { format!("  TS {} packets", v.ts_packets) } else { String::new() },
+            if v.ip_packets > 0 { format!("  IP {} packets", v.ip_packets) } else { String::new() },
         );
         if let Some(c) = &v.card
             && verbose

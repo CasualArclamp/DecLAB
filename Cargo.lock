@@ -675,6 +675,13 @@ dependencies = [
  "declab-dsp",
  "declab-pagers",
  "declab-pmr",
+ "decsat-core",
+ "decsat-frame",
+ "decsat-gse",
+ "decsat-mod",
+ "decsat-modem",
+ "decsat-rx",
+ "decsat-ts",
  "egui",
  "num-complex",
  "rustfft",
@@ -752,6 +759,106 @@ name = "declab-pmr"
 version = "0.1.1"
 dependencies = [
  "num-complex",
+]
+
+[[package]]
+name = "decsat-core"
+version = "0.1.1"
+dependencies = [
+ "num-complex",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decsat-dsp"
+version = "0.1.1"
+dependencies = [
+ "decsat-core",
+ "num-complex",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decsat-fec"
+version = "0.1.1"
+dependencies = [
+ "decsat-core",
+ "num-complex",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decsat-frame"
+version = "0.1.1"
+dependencies = [
+ "decsat-core",
+ "decsat-dsp",
+ "num-complex",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decsat-gse"
+version = "0.1.1"
+dependencies = [
+ "decsat-core",
+ "decsat-ip",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decsat-ip"
+version = "0.1.1"
+dependencies = [
+ "decsat-core",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decsat-mod"
+version = "0.1.1"
+dependencies = [
+ "decsat-core",
+ "decsat-dsp",
+ "decsat-fec",
+ "decsat-frame",
+ "decsat-gse",
+ "decsat-ip",
+ "decsat-ts",
+ "num-complex",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decsat-modem"
+version = "0.1.1"
+dependencies = [
+ "decsat-core",
+ "rustfft",
+]
+
+[[package]]
+name = "decsat-rx"
+version = "0.1.1"
+dependencies = [
+ "decsat-core",
+ "decsat-dsp",
+ "decsat-fec",
+ "decsat-frame",
+ "decsat-mod",
+ "decsat-modem",
+ "num-complex",
+ "rustfft",
+]
+
+[[package]]
+name = "decsat-ts"
+version = "0.1.1"
+dependencies = [
+ "decsat-core",
+ "decsat-frame",
+ "decsat-ip",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

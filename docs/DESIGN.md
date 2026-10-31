@@ -123,7 +123,7 @@ DecLAB is GPL-3.0-or-later, so DAB+ uses libxaac (§20).
 | M2a | DVB-T/T2 as a plug-in: decode, card, constellation, services, now/next, `.ts` out | ✅ 2026-10-28: C23 and C30 decode to DecDVB-T's very bytes at its speed |
 | M2b | TS hub, player (video, audio, subtitles), EPG, Red Button, PLP choice, HTTP/UDP out | ✅ 2026-10-28 on captures; not yet live |
 | M3 | DAB/DAB+ as a plug-in: audio, DLS, slideshow, SPI; libxaac question | ✅ 2026-10-30: 11D and 12B play (DAB+ by libxaac, DAB by DecDAB's MP2), DLS shown; SPI not yet |
-| M4 | DVB-S and DVB-S2/S2X TS + GSE/IP (PCAP) | DecSAT's test captures decode |
+| M4 | DVB-S and DVB-S2/S2X TS + GSE/IP (PCAP) | ✅ 2026-10-31 in simulation only (§23): `sat` plug-in; no real satellite capture tried yet |
 | M5 | DVB-RCS2/TDMA return burst analyser | DecSAT's inroute captures decode |
 | M6 | Release: CI, portable exe, README | v0.1.0 |
 | V1 | RTL-SDR source; DMR Tier I/II/III + packet data + LRRP (`declab-pmr`, `dmr` plug-in), weak-signal receiver | ✅ 2026-10-29 in simulation only: no real DMR capture yet. AMBE+2 vocoder (port of mbelib) plays 2026-10-29 |
@@ -851,3 +851,53 @@ Engine and GUI done; the CLI still runs one decoder.
 - **Not verified on hardware** (no radio with the feature was attached): the
   USB encodings and register writes follow libairspy, seify-hackrfone and
   librtlsdr and are unit-tested.
+
+## 23. Satellite: DVB-S, S2, S2X, TS and GSE (2026-10-31, M4)
+
+- **One plug-in, `sat`** (`declab-decoders/src/sat.rs`, family Satellite), on
+  DecSAT's receiver (`..\DecDVB`, v0.10.17), copied under the original
+  names: `decsat-core`, `-dsp`, `-fec` (LDPC, BCH, demappers, S2X tables),
+  `-frame` (PLHEADER, PLS, scrambler, VL-SNR, super-frames), `-gse`, `-ip`,
+  `-ts` (deframer, PSI/SI), `-modem` (DVB-S Viterbi + RS), `-mod` (modulator:
+  dev-dependency, for the tests and `sat_make`). The new `decsat-rx` holds
+  what DecSAT keeps in its engine crate: `demod` (PL demodulator), `identify`
+  (symbol rate, roll-off, carrier, S2 or not), `psk` (QPSK for DVB-S), the
+  super-frame stripper and the FEC stage (`fec.rs`: the engine's `FecDecoder`
+  without its VFO machinery). Not brought over: DVB-RCS2, TDMA, the other
+  modems, the beacon/CID decoders' own VFOs (`beacon` and `period` are in
+  only because `identify` calls them).
+- **Flow:** gather ~0.6 s (longer if a carrier is too slow to show two
+  frames), `identify_in`; DVB-S2 verdict → PL demodulator; else a carrier of
+  a known symbol rate → the PL demodulator as a probe (it finds headers at
+  lower SNR than identify does), and when nothing decodes in 4 s the other
+  standard (QPSK → DVB-S) is tried. Lock lost for 4 s → look again. The
+  carrier's offset from the channel centre is removed by an oscillator in
+  the decoder (no retune: a source-driving retune would reset the decoder).
+- **FEC on a thread of its own** (`sat-fec`): LDPC, BCH, BBHEADER, then each
+  input stream (ISI) to its stage: transport packets → `Sink::ts` (the first
+  stream met; PSI/SI gives the services and now/next), GSE and GSE-HEM → IP
+  datagrams in `Sink::ip`. A live source drops frames when the queue (64) is
+  full (counted, shown); a file waits.
+- **New in the host:** `Sink::ip` is counted (`DecoderView::ip_packets`,
+  `ip_bytes`) and written as a raw-IP PCAP (`Host::write_pcap`; CLI
+  `--pcap`; GUI "record .pcap" in an IP traffic box where the services list
+  would be). The CLI got `--set KEY=VALUE` (a decoder setting as its panel
+  sends it). The host's DDC now also decimates a centred channel under half
+  the band for decoders that take the source's rate.
+- **Settings** (panel): symbol rate (kS/s) and the S2 scrambling code. The
+  symbol rate matters below the SNR identify can work at: with it set, a
+  QPSK 1/4 GSE carrier decodes at 0 dB Es/N0 (needs -2.35); without it from
+  about 1.5 dB.
+- **Tested on simulation only** (`cargo run --release -p declab-decoders
+  --example sat_make -- OUT s2ts|s2x|gse|dvbs [ES_N0] [SECONDS] [OFFSET_HZ]
+  [RS]`, cf32 at 4 S/symbol; and DecSAT's `decsat tx`): 8PSK 3/4 TS, S2X
+  (8PSK 25/36), QPSK GSE (546 UDP datagrams in the PCAP), DVB-S 3/4 down to
+  6.5 dB, offsets of ±300 kHz, two unit tests. CPU: the demodulator is the
+  cost (8PSK 3/4 at 2 MS/s on a 8 MS/s channel, 49 % of a core; the FEC
+  thread ~20 %): decimating to 2-3 samples a symbol before the matched
+  filter would roughly halve it.
+- **Not done:** ISI selection (the first TS stream is output; every stream is
+  decoded and listed), BISS descrambling and ffmpeg-less multicast-radio
+  relay from DecSAT's `decsat-ts`/`decsat-ip` (the crates are here, unwired),
+  DVB-S2 ACM statistics per MODCOD, the Identify card, the live GUI on a
+  radio (no dish here).

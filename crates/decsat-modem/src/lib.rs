@@ -1,0 +1,64 @@
+// made by CasualArclamp
+//! Satellite modem formats beyond DVB-S2: DVB-S (EN 300 421) and Intelsat
+//! IESS-315's turbo product code `tpc_2964`; the IESS Viterbi/Reed–Solomon
+//! modes after.
+//!
+//! - [`conv`]: the K = 7 convolutional code, puncturing, Viterbi decoding.
+//! - [`rs`]: shortened Reed–Solomon codes over GF(256).
+//! - [`interleave`]: Forney convolutional interleaving.
+//! - [`dvbs`]: the DVB-S transmitter and blind receiver.
+//! - [`tpc`]: turbo product codes (extended Hamming products, Chase–Pyndiah).
+//! - [`tpc2964`]: `tpc_2964` frames, their structure found from the signal;
+//!   its receiver also takes [`tpc78`], Comtech's TPC 7/8 (16K block).
+//! - [`payload`]: what a modem's data carry (HDLC, MPEG-TS) and how they are
+//!   scrambled, found from the data.
+//! - [`edmac`]: Comtech EDMAC framing (21/20, its M&C channel);
+//!   [`ethblock`]: the bridged Ethernet in 258-byte packet blocks inside it.
+//! - [`text`]: live text search in any bit stream, every reading at once.
+//! - [`g728`]: ITU-T G.728 LD-CELP 16 kbit/s voice, and finding it in two
+//!   bits of a timeslot (the CDM-600L's Drop & Insert voice).
+//! - [`bsc`]: IBM bisync (BSC) blocks; [`radar`]: the radar track feed
+//!   they carry on PH-ML.
+//! - [`asterix`]: the other radar feeds' ASTERIX; [`mode_s`]: the Mode S
+//!   registers (selected altitude, air data) their reports carry.
+//! - [`is19`]: the 102.4 kBd outbounds of a DAMA telephony network on
+//!   Intelsat 19 — frames, descrambling, packets, call signalling.
+//! - [`pcm`]: PCM telemetry frames (a beacon's): sync words known or found
+//!   blind, every reading of the bits, the minor-frame counter.
+//! - [`ccsds`]: CCSDS TM synchronisation and channel coding (marker,
+//!   randomiser, Reed–Solomon in the dual basis, the K = 7 code) and the
+//!   TM/AOS transfer frames.
+
+pub mod aptx;
+pub mod asterix;
+pub mod bsc;
+pub mod ccsds;
+pub mod cid;
+pub mod conv;
+pub mod convblind;
+pub mod dandi;
+pub mod dvbs;
+pub mod e1;
+pub mod edmac;
+pub mod ethblock;
+pub mod fastlink;
+pub mod g728;
+pub mod ibs;
+pub mod ibssync;
+pub mod interleave;
+pub mod is19;
+pub mod mode_s;
+pub mod mpa;
+pub mod oui;
+pub mod paradise;
+pub mod payload;
+pub mod pcm;
+pub mod radar;
+pub mod rs;
+pub mod slotpkt;
+pub mod tdm257;
+pub mod tdmfast;
+pub mod text;
+pub mod tpc;
+pub mod tpc2964;
+pub mod tpc78;

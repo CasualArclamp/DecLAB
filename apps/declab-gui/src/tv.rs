@@ -31,6 +31,8 @@ pub struct Tv {
     pub play_when_ready: Option<u16>,
     /// Why the last request came to nothing.
     pub note: String,
+    /// The IP datagrams (GSE) go to this PCAP while it is `Some`.
+    pcap: Option<std::path::PathBuf>,
 }
 
 impl Tv {
@@ -51,6 +53,7 @@ impl Tv {
             selected: None,
             play_when_ready: None,
             note: String::new(),
+            pcap: None,
         }
     }
 
@@ -65,6 +68,34 @@ impl Tv {
         self.ts.packets > 0
     }
 
+    /// The IP traffic a decoder (DVB-S2 GSE) sends: counts, and a PCAP of
+    /// raw IP that Wireshark opens.
+    pub fn ip_ui(&mut self, ui: &mut egui::Ui, host: &Host, name: &str, packets: u64, bytes: u64) {
+        ui.label(RichText::new("IP traffic").strong());
+        ui.label(RichText::new(format!("{packets} datagrams · {:.2} MB", bytes as f64 / 1e6)).weak());
+        ui.add_space(4.0);
+        let mut on = self.pcap.is_some();
+        if ui.checkbox(&mut on, "record .pcap").changed() {
+            self.note.clear();
+            let path = on.then(|| {
+                let dir = std::path::PathBuf::from(self.outputs_ui.dir.trim());
+                let _ = std::fs::create_dir_all(&dir);
+                let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                dir.join(format!("{name}_{t}.pcap"))
+            });
+            match host.write_pcap(path.clone()) {
+                Ok(()) => self.pcap = path,
+                Err(e) => self.note = format!("pcap: {e}"),
+            }
+        }
+        if let Some(p) = &self.pcap {
+            ui.label(RichText::new(p.display().to_string()).small().weak());
+        }
+        if !self.note.is_empty() {
+            ui.label(RichText::new(&self.note).color(egui::Color32::from_rgb(240, 200, 80)));
+        }
+    }
+
     /// A new source or decoder: the stream is a different one.
     pub fn reset(&mut self) {
         self.player.close();
@@ -73,6 +104,7 @@ impl Tv {
         self.ts = TsView::default();
         self.outputs_sent = None;
         self.note.clear();
+        self.pcap = None;
     }
 
     /// The hub's view and guide, now and then; a pending `--play` or VLC.

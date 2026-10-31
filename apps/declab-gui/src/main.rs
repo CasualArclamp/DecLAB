@@ -1838,6 +1838,14 @@ impl eframe::App for App {
                                     self.tv.services_ui(ui, host, &stream_name);
                                     return;
                                 }
+                                // IP datagrams (GSE) have no services: a count and a PCAP.
+                                if self.view.ip_packets > 0
+                                    && let Some(host) = &self.host
+                                {
+                                    let (n, b) = (self.view.ip_packets, self.view.ip_bytes);
+                                    self.tv.ip_ui(ui, host, &stream_name, n, b);
+                                    return;
+                                }
                                 match minis
                                     .iter()
                                     .find(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name))
