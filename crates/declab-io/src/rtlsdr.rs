@@ -121,8 +121,11 @@ impl Inner {
         let manufacturer = info.manufacturer_string().unwrap_or("").to_string();
         let product = info.product_string().unwrap_or("").to_string();
         // The RTL-SDR Blog V4 says so in its USB strings (as the Blog fork
-        // of librtlsdr checks).
-        let v4 = manufacturer == "RTLSDRBlog" && product == "Blog V4";
+        // of librtlsdr checks). On Windows the manufacturer string can be
+        // missing (nusb takes it from the driver's INF), so a missing one
+        // passes; a V4 taken for a plain R828D tunes nothing (16 MHz crystal
+        // assumed instead of 28.8 MHz).
+        let v4 = product == "Blog V4" && matches!(manufacturer.as_str(), "RTLSDRBlog" | "");
         let device = info.open().map_err(|e| {
             Error::Other(format!(
                 "cannot open the RTL-SDR ({e}). Is it in use by another program, \
