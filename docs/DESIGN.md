@@ -1081,3 +1081,25 @@ Radio's sinks and many other programs send, so the source is generic.
   decoder queue (566 blocks dropped) at 80 % of a core. Filling each buffer
   to ~10 ms, and waiting 1 ms after a short read rather than calling again,
   gives 29–31 % against 23 % for the same file replayed in real time.
+
+## 29. LNB local oscillator (2026-11-03)
+
+A satellite dish's LNB mixes the Ku downlink (10.7–12.75 GHz) to an IF of
+950–2150 MHz, which is what the radio tunes. The DVB-S/S2/S2X settings page
+now has an **LNB L.O., MHz** field (empty: none), with a menu of the usual
+oscillators (Universal 9750 / 10600, single-band 10750 / 11300).
+
+- **Display only.** The radio, the host, the band's geometry and the
+  decoder all stay on the IF. The GUI adds the L.O. wherever it writes or
+  takes a frequency for that VFO: the big frequency display (typing a
+  downlink tunes to downlink − L.O.), the band's scale (ticks on round
+  downlink MHz), its cursor readout and channel tag, the card, the VFO list
+  (GHz above 10 GHz, to fit). The top bar's centre stays the IF, marked
+  "IF · L.O. …", and recordings are named by it, since the file holds IF.
+- **Per decoder, saved** like its other settings (`set.sat.lo_hz`, Hz); the
+  decoder ignores the key. Other decoders on the same band show plain IF.
+- **High-side only** (downlink = IF + L.O.): a C-band LNB (5150 MHz, the
+  spectrum inverted) is not handled yet.
+- The frequency display grew to 11 digits for 10 GHz and up.
+- `declab-gui --set KEY=VALUE` (repeatable) sets a setting of `--decoder`'s
+  page for one run, as the CLI's `--set` does: `--set lo_hz=9750000000`.

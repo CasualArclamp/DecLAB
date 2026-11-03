@@ -13,8 +13,8 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, PointerButton, Sense, Ui, pos2, vec2,
 };
 
-/// Digits shown: up to 9.999.999.999 Hz, enough for anything a HackRF tunes.
-const DIGITS: usize = 10;
+/// Digits shown: up to 99.999.999.999 Hz, a Ku-band downlink behind an LNB.
+const DIGITS: usize = 11;
 
 /// Draw the display for `hz` and apply any edits. Returns true when the value
 /// changed; the result is clamped to `[min, max]`.
@@ -134,6 +134,6 @@ mod tests {
         let d: Vec<u8> = (0..super::DIGITS)
             .map(|i| ((v / 10u64.pow((super::DIGITS - 1 - i) as u32)) % 10) as u8)
             .collect();
-        assert_eq!(d, vec![0, 5, 4, 6, 1, 6, 6, 6, 6, 7]);
+        assert_eq!(d, vec![0, 0, 5, 4, 6, 1, 6, 6, 6, 6, 7]);
     }
 }

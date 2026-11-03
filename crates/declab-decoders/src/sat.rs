@@ -93,7 +93,19 @@ mod panel {
         rate: String,
         /// DVB-S2 physical layer scrambling code, as typed.
         gold: String,
+        /// The LNB's local oscillator, MHz as typed (empty: no LNB, the
+        /// radio sees the downlink itself). The app shows and takes
+        /// frequencies as the downlink's, IF + L.O.; the decoder ignores it.
+        lo: String,
     }
+
+    /// LNBs' usual local oscillators, MHz, for the menu.
+    const LO_PRESETS: [(&str, &str); 4] = [
+        ("9750", "Universal, low band"),
+        ("10600", "Universal, high band"),
+        ("10750", "Ku single band"),
+        ("11300", "Ku single band"),
+    ];
 
     impl SatPanel {
         fn set(key: &str, value: &str) -> Command {
@@ -104,11 +116,20 @@ mod panel {
         fn rate_hz(&self) -> String {
             self.rate.trim().parse::<f64>().map_or(String::new(), |k| format!("{}", k * 1e3))
         }
+
+        /// The L.O. in Hz for the app ("" when none or not a number).
+        fn lo_hz(&self) -> String {
+            self.lo.trim().parse::<f64>().ok().filter(|&m| m > 0.0).map_or(String::new(), |m| format!("{}", m * 1e6))
+        }
     }
 
     impl Panel for SatPanel {
         fn settings(&self) -> Vec<Command> {
-            vec![Self::set("symbol_rate", &self.rate_hz()), Self::set("gold", self.gold.trim())]
+            vec![
+                Self::set("symbol_rate", &self.rate_hz()),
+                Self::set("gold", self.gold.trim()),
+                Self::set("lo_hz", &self.lo_hz()),
+            ]
         }
 
         fn restore(&mut self, key: &str, value: &str) {
@@ -117,6 +138,9 @@ mod panel {
                     self.rate = value.parse::<f64>().map_or(String::new(), |hz| format!("{}", hz / 1e3));
                 }
                 "gold" => self.gold = value.to_string(),
+                "lo_hz" => {
+                    self.lo = value.parse::<f64>().map_or(String::new(), |hz| format!("{}", hz / 1e6));
+                }
                 _ => {}
             }
         }
@@ -136,6 +160,30 @@ mod panel {
                 ui.label("Scrambling code");
                 if ui.add(egui::TextEdit::singleline(&mut self.gold).desired_width(90.0).hint_text("0")).lost_focus() {
                     commands.push(Self::set("gold", self.gold.trim()));
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("LNB L.O., MHz");
+                let typed = ui
+                    .add(egui::TextEdit::singleline(&mut self.lo).desired_width(90.0).hint_text("none"))
+                    .on_hover_text("Frequencies are then shown and typed as the downlink's: IF + L.O.")
+                    .lost_focus();
+                let mut picked = false;
+                ui.menu_button("▾", |ui| {
+                    for (mhz, name) in LO_PRESETS {
+                        if ui.button(format!("{mhz} MHz  {name}")).clicked() {
+                            self.lo = mhz.to_string();
+                            picked = true;
+                        }
+                    }
+                    if ui.button("None (no LNB)").clicked() {
+                        self.lo.clear();
+                        picked = true;
+                    }
+                });
+                if typed || picked {
+                    commands.push(Self::set("lo_hz", &self.lo_hz()));
                 }
             });
         }

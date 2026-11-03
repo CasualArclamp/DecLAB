@@ -53,6 +53,9 @@ pub struct BandInput<'a> {
     pub inert: bool,
     /// A line under the spectrum when there is nothing to show.
     pub idle_text: &'a str,
+    /// An LNB's local oscillator, added to the frequencies written on the
+    /// band (the scale, the cursor's readout); 0 without one.
+    pub lnb_lo_hz: f64,
 }
 
 /// Another VFO's channel on the band.
@@ -160,9 +163,11 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
     // Frequency scale.
     let step = tick_step(span);
     let decimals = if step >= 1e6 { 0 } else if step >= 100e3 { 1 } else if step >= 10e3 { 2 } else { 3 };
-    let mut f = (lo_hz / step).ceil() * step;
-    while f < lo_hz + span {
-        let x = x_of(f);
+    // Ticks on round downlink frequencies when an LNB shifts them.
+    let off = inp.lnb_lo_hz;
+    let mut f = ((lo_hz + off) / step).ceil() * step;
+    while f < lo_hz + off + span {
+        let x = x_of(f - off);
         painter.line_segment([pos2(x, spec.top()), pos2(x, spec.bottom())], Stroke::new(1.0, grid));
         painter.text(
             pos2(x, spec.bottom() + 3.0),
@@ -313,7 +318,7 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
         painter.text(
             pos2(plot_r - 4.0, spec.top() + 26.0),
             Align2::RIGHT_TOP,
-            format!("{:.4} MHz{level}", hz / 1e6),
+            format!("{:.4} MHz{level}", (hz + inp.lnb_lo_hz) / 1e6),
             FontId::monospace(12.0),
             Color32::WHITE,
         );
@@ -462,6 +467,7 @@ mod tests {
                     moving: None,
                     inert,
                     idle_text: "",
+                    lnb_lo_hz: 0.0,
                 };
                 out.extend(show(ui, &inp));
             });
@@ -623,6 +629,7 @@ mod tests {
                     moving: None,
                     inert: false,
                     idle_text: "",
+                    lnb_lo_hz: 0.0,
                 };
                 out.extend(show(ui, &inp));
             });
