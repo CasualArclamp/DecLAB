@@ -15,9 +15,9 @@ in Rust, all from one portable `.exe`.
 | 🛰️ **Satellite** | DVB-S, DVB-S2 and DVB-S2X (found blind, ACM): transport streams with the same services list, player and guide, and GSE as IP datagrams to a PCAP |
 | 📺 **Terrestrial TV** | DVB-T and DVB-T2 (found blind), with the programme guide, Red Button and transport-stream out |
 | 📻 **Digital radio** | DAB and DAB+, with station text (DLS) and slideshows |
-| 〰️ **Analog** | FM with RDS, NFM, AM, USB, LSB, DSB and CW |
+| 〰️ **Analog** | FM with RDS, NFM, AM, USB, LSB, DSB and CW; squelch by level, SNR or noise |
 | 📟 **Pagers** | POCSAG and FLEX |
-| 🎙️ **Digital voice** | DMR (Tier I, II and III, LRRP positions), NXDN48, NXDN96, P25 phase 1 and TETRA, detected by itself |
+| 🎙️ **Digital voice** | DMR (Tier I, II and III, LRRP positions), NXDN48, NXDN96, P25 phase 1 and TETRA, detected by itself; data as a hex dump, LRRP table and IP view |
 
 **Several decoders at once.** Run up to eight VFOs on one radio, each with its
 own decoder, sound and settings. The VFO list down the left collapses to a
