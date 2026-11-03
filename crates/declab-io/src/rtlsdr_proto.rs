@@ -749,9 +749,20 @@ impl<B: RtlBus> Rtl2832<B> {
         }
     }
 
+    /// A vendor OUT request. After a pause (the 250 ms in `sysfreq_sel`) an
+    /// RTL-SDR Blog V4 was seen to stall every OUT request until an IN one
+    /// went through, so a failed one is tried again after the dummy read
+    /// `demod_write` uses. An I2C address nothing answers at fails again.
+    fn out(&mut self, value: u16, index: u16, data: &[u8]) -> Result<()> {
+        if self.bus.control_out(value, index, data).is_ok() {
+            return Ok(());
+        }
+        let _ = self.bus.control_in((0x01 << 8) | 0x20, 0x0a, 1);
+        self.bus.control_out(value, index, data)
+    }
+
     fn write_reg(&mut self, blk: u16, addr: u16, val: u16, len: usize) -> Result<()> {
-        self.bus
-            .control_out(addr, (blk << 8) | 0x10, &Self::be(val, len))
+        self.out(addr, (blk << 8) | 0x10, &Self::be(val, len))
     }
 
     fn read_reg(&mut self, blk: u16, addr: u16) -> Result<u8> {
@@ -764,8 +775,7 @@ impl<B: RtlBus> Rtl2832<B> {
     /// `rtlsdr_demod_write_reg`, with its dummy read that lets the write
     /// complete.
     fn demod_write(&mut self, page: u16, addr: u16, val: u16, len: usize) -> Result<()> {
-        self.bus
-            .control_out((addr << 8) | 0x20, 0x10 | page, &Self::be(val, len))?;
+        self.out((addr << 8) | 0x20, 0x10 | page, &Self::be(val, len))?;
         self.bus.control_in((0x01 << 8) | 0x20, 0x0a, 1)?;
         Ok(())
     }
@@ -775,8 +785,7 @@ impl<B: RtlBus> Rtl2832<B> {
     }
 
     fn i2c_write(&mut self, addr: u8, data: &[u8]) -> Result<()> {
-        self.bus
-            .control_out(u16::from(addr), (block::IIC << 8) | 0x10, data)
+        self.out(u16::from(addr), (block::IIC << 8) | 0x10, data)
     }
 
     fn i2c_read(&mut self, addr: u8, len: u16) -> Result<Vec<u8>> {
@@ -1130,6 +1139,10 @@ mod tests {
         sys: std::collections::HashMap<u16, u8>,
         log: Vec<(u16, u16, Vec<u8>)>,
         slept: Duration,
+        /// Like the RTL-SDR Blog V4: after a pause of 100 ms or more, every
+        /// OUT request stalls until an IN one goes through.
+        stall_after_pause: bool,
+        stalled: bool,
     }
 
     impl Mock {
@@ -1142,6 +1155,8 @@ mod tests {
                 sys: Default::default(),
                 log: Vec::new(),
                 slept: Duration::ZERO,
+                stall_after_pause: false,
+                stalled: false,
             }
         }
 
@@ -1160,6 +1175,9 @@ mod tests {
 
     impl RtlBus for Mock {
         fn control_out(&mut self, value: u16, index: u16, data: &[u8]) -> Result<()> {
+            if self.stalled {
+                return Err(Error::Other("endpoint STALL condition".into()));
+            }
             self.log.push((value, index, data.to_vec()));
             if index == (block::IIC << 8) | 0x10 && value == u16::from(self.tuner_addr) {
                 let r = usize::from(data[0]);
@@ -1174,6 +1192,7 @@ mod tests {
         }
 
         fn control_in(&mut self, value: u16, index: u16, len: u16) -> Result<Vec<u8>> {
+            self.stalled = false;
             if index == block::IIC << 8 {
                 if value != u16::from(self.tuner_addr) {
                     return Err(Error::Other("no ack".into()));
@@ -1195,6 +1214,7 @@ mod tests {
 
         fn sleep(&mut self, d: Duration) {
             self.slept += d;
+            self.stalled |= self.stall_after_pause && d >= Duration::from_millis(100);
         }
     }
 
@@ -1206,6 +1226,17 @@ mod tests {
         })
         .expect("start");
         d
+    }
+
+    /// The pause in `sysfreq_sel` leaves a V4 stalling OUT requests; open
+    /// gets past it.
+    #[test]
+    fn an_out_stall_after_a_pause_is_got_past() {
+        let mut m = Mock::new(R828D_I2C_ADDR);
+        m.stall_after_pause = true;
+        let mut d = Rtl2832::open(m, true).expect("open");
+        assert_eq!(d.tuner(), Tuner::R828D);
+        d.start(&RtlSettings::default()).expect("start");
     }
 
     #[test]
