@@ -10,6 +10,7 @@
 //!
 //! ```text
 //! declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr]
+//!             [--net tcp://HOST:PORT|listen://ADDR:PORT|udp://ADDR:PORT --iq int8|int16|… --rate HZ]
 //!            [--decoder ID] [--chan HZ] [--zoom Z] [--wheel]
 //!            [--screenshot OUT.png] [--after SECS]
 //! ```
@@ -69,6 +70,10 @@ struct Options {
     rate: Option<f64>,
     freq: Option<f64>,
     radio: Option<SourceKind>,
+    /// `--net URL`: raw IQ over the network (also picks that source), and
+    /// `--iq TYPE` its sample type.
+    net: Option<String>,
+    iq: Option<declab_io::NetSample>,
     decoder: Option<String>,
     chan: Option<f64>,
     zoom: Option<f64>,
@@ -136,6 +141,14 @@ impl Options {
                         r => return Err(format!("unknown radio {r:?}")),
                     })
                 }
+                "--net" => {
+                    o.net = Some(value("tcp://HOST:PORT, listen://ADDR:PORT or udp://ADDR:PORT")?);
+                    o.radio = Some(SourceKind::Network);
+                }
+                "--iq" => {
+                    let t = value("int8, uint8, int16, int32 or float32")?;
+                    o.iq = Some(declab_io::NetSample::parse(&t).ok_or(format!("--iq: no sample type {t:?}"))?);
+                }
                 "--wheel" => o.wheel = true,
                 "--scope" => o.scope = Some(value("a scope name")?),
                 "--tab" => {
@@ -168,7 +181,7 @@ impl Options {
                 "--after" => o.after = value("seconds")?.parse().map_err(|_| "--after: seconds")?,
                 "-h" | "--help" => {
                     return Err("declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr] \
-                                [--decoder ID] [--chan HZ] [--zoom Z] [--wheel] [--screenshot OUT.png] [--after SECS]"
+                                [--net URL --iq TYPE] [--decoder ID] [--chan HZ] [--zoom Z] [--wheel] [--screenshot OUT.png] [--after SECS]"
                         .into());
                 }
                 f if !f.starts_with("--") => o.file = Some(f.into()),
@@ -251,6 +264,8 @@ enum SourceKind {
     Airspy,
     HackRf,
     RtlSdr,
+    /// Raw IQ from another program over TCP or UDP (`declab_io::net`).
+    Network,
     File,
 }
 
@@ -260,6 +275,7 @@ impl SourceKind {
             SourceKind::Airspy => "Airspy R2",
             SourceKind::HackRf => "HackRF One",
             SourceKind::RtlSdr => "RTL-SDR",
+            SourceKind::Network => "Network IQ",
             SourceKind::File => "IQ file",
         }
     }
@@ -268,6 +284,7 @@ impl SourceKind {
             SourceKind::Airspy => "airspy",
             SourceKind::HackRf => "hackrf",
             SourceKind::RtlSdr => "rtlsdr",
+            SourceKind::Network => "net",
             SourceKind::File => "file",
         }
     }
@@ -313,6 +330,11 @@ struct App {
     rtl_agc: bool,
     rtl_db10: u16,
     rtl_ppm: f64,
+    /// Network IQ: where from (a `tcp://`, `listen://` or `udp://` URL),
+    /// the sample type and the rate the sender says it sends.
+    net_url: String,
+    net_sample: declab_io::NetSample,
+    net_rate: f64,
     /// The Airspy gain optimiser while it runs, and what the last run found.
     opt: Option<gain_opt::Optimiser>,
     opt_note: Option<String>,
@@ -411,6 +433,7 @@ impl App {
                 Some("hackrf") => SourceKind::HackRf,
                 Some("file") => SourceKind::File,
                 Some("rtlsdr") => SourceKind::RtlSdr,
+                Some("net") => SourceKind::Network,
                 _ => SourceKind::Airspy,
             });
         let file = opts
@@ -448,6 +471,20 @@ impl App {
             rtl_agc: prefs::get(&p, "rtlsdr_agc") == Some("1"),
             rtl_db10: prefs::num(&p, "rtlsdr_gain").unwrap_or(declab_io::RtlGains::default().db10),
             rtl_ppm: prefs::num(&p, "rtlsdr_ppm").unwrap_or(0.0),
+            net_url: opts
+                .net
+                .clone()
+                .or_else(|| prefs::get(&p, "net_url").map(String::from))
+                .unwrap_or_else(|| "tcp://127.0.0.1:7777".into()),
+            net_sample: opts
+                .iq
+                .or_else(|| prefs::get(&p, "net_iq").and_then(declab_io::NetSample::parse))
+                .unwrap_or(declab_io::NetSample::Cs8),
+            net_rate: opts
+                .rate
+                .filter(|_| kind == SourceKind::Network)
+                .or(prefs::num(&p, "net_rate"))
+                .unwrap_or(2e6),
             opt: None,
             opt_note: None,
             host: None,
@@ -750,6 +787,7 @@ impl App {
             SourceKind::Airspy => 10e6,
             SourceKind::HackRf => self.hack_rate,
             SourceKind::RtlSdr => declab_io::rtlsdr_proto::SAMPLE_RATE_HZ as f64,
+            SourceKind::Network => self.net_rate,
             SourceKind::File => self.file_rate,
         }
     }
@@ -778,6 +816,18 @@ impl App {
                     r = r.with_center_freq(c);
                 }
                 Ok(Box::new(r))
+            }
+            SourceKind::Network => {
+                use declab_io::{NetIqSettings, NetIqSource};
+                let (mode, addr) = NetIqSettings::parse_url(&self.net_url).map_err(|e| e.to_string())?;
+                let s = NetIqSettings {
+                    mode,
+                    addr,
+                    sample: self.net_sample,
+                    sample_rate: self.net_rate,
+                    center_hz: self.center_hz,
+                };
+                Ok(Box::new(NetIqSource::open(s).map_err(|e| e.to_string())?))
             }
             #[cfg(feature = "hackrf")]
             SourceKind::HackRf => {
@@ -844,7 +894,9 @@ impl App {
         self.stop();
         match self.open_source() {
             Ok(src) => {
-                self.live = src.is_live();
+                // A stream tuned at its sender is shown as a file is: its
+                // band stays put and a drag does not try to retune it.
+                self.live = src.is_live() && src.can_retune();
                 self.source_rate = src.sample_rate();
                 if !self.live {
                     self.center_hz = src.center_freq();
@@ -1052,6 +1104,52 @@ impl App {
         self.view_hz = self
             .view_hz
             .clamp(self.center_hz - half, self.center_hz + half);
+    }
+
+    /// Network IQ's settings: where from, the sample type, the rate and the
+    /// centre the stream is labelled with (none of which the stream says,
+    /// except an rtl_tcp server's sample type). Changed while running, the
+    /// stream is opened again.
+    fn network_ui(&mut self, ui: &mut egui::Ui, running: bool) {
+        let mut reopen = false;
+        let r = ui
+            .add(egui::TextEdit::singleline(&mut self.net_url).desired_width(170.0))
+            .on_hover_text(
+                "tcp://HOST:PORT connects to a sender that listens (SDR++ IQ Exporter: TCP (Server)); \
+                 listen://0.0.0.0:PORT waits for one to connect (TCP (Client)); \
+                 udp://0.0.0.0:PORT takes UDP. An rtl_tcp server is recognised and tuned.",
+            );
+        reopen |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let before = self.net_sample;
+        egui::ComboBox::from_id_salt("net_iq").selected_text(self.net_sample.label()).show_ui(ui, |ui| {
+            for t in declab_io::NetSample::ALL {
+                ui.selectable_value(&mut self.net_sample, t, t.label());
+            }
+        });
+        reopen |= self.net_sample != before;
+        ui.label(RichText::new("rate").color(Color32::GRAY));
+        let mut msps = self.net_rate / 1e6;
+        let r = ui.add(egui::DragValue::new(&mut msps).range(0.001..=100.0).speed(0.01).max_decimals(6).suffix(" MS/s"));
+        if r.changed() {
+            self.net_rate = msps * 1e6;
+        }
+        reopen |= r.drag_stopped() || (r.lost_focus() && r.changed());
+        if !self.live {
+            // The centre only labels the band; the sender is tuned at its end.
+            ui.label(RichText::new("at").color(Color32::GRAY));
+            let mut mhz = self.center_hz / 1e6;
+            let r = ui.add(egui::DragValue::new(&mut mhz).range(0.0..=10_000.0).speed(0.01).max_decimals(6).suffix(" MHz"));
+            if r.changed() {
+                self.center_hz = (mhz * 1e6).round();
+            }
+            reopen |= r.drag_stopped() || (r.lost_focus() && r.changed());
+        }
+        if reopen {
+            self.save_prefs();
+            if running {
+                self.start();
+            }
+        }
     }
 
     /// The antenna-port power switch, beside the gain menu of a live radio.
@@ -1311,6 +1409,9 @@ impl App {
             ("rtlsdr_agc", if self.rtl_agc { "1" } else { "0" }.into()),
             ("rtlsdr_gain", self.rtl_db10.to_string()),
             ("rtlsdr_ppm", format!("{:.1}", self.rtl_ppm)),
+            ("net_url", self.net_url.clone()),
+            ("net_iq", self.net_sample.label().into()),
+            ("net_rate", format!("{:.0}", self.net_rate)),
         ]);
     }
 
@@ -1436,7 +1537,7 @@ impl App {
                     ui.label(RichText::new("source").color(Color32::GRAY));
                     let before = self.kind;
                     egui::ComboBox::from_id_salt("source").selected_text(self.kind.label()).show_ui(ui, |ui| {
-                        for k in [SourceKind::Airspy, SourceKind::HackRf, SourceKind::RtlSdr, SourceKind::File] {
+                        for k in [SourceKind::Airspy, SourceKind::HackRf, SourceKind::RtlSdr, SourceKind::Network, SourceKind::File] {
                             ui.selectable_value(&mut self.kind, k, k.label());
                         }
                     });
@@ -1541,6 +1642,7 @@ impl App {
                                 self.cancel_optimise();
                             }
                         }
+                        SourceKind::Network => self.network_ui(ui, running),
                         SourceKind::RtlSdr => {
                             ui.label(RichText::new("rate").color(Color32::GRAY));
                             ui.label(RichText::new("2.048 MS/s").color(Color32::WHITE));
@@ -1574,7 +1676,7 @@ impl App {
                             });
                         }
                     }
-                    if self.kind != SourceKind::File {
+                    if !matches!(self.kind, SourceKind::File | SourceKind::Network) {
                         self.bias_tee_ui(ui);
                     }
                     ui.label(RichText::new("centre").color(Color32::GRAY));

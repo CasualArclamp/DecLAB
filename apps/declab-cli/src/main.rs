@@ -10,6 +10,9 @@
 //!                      [--gain AMP,LNA,VGA | DB | agc] [--ppm PPM] [--bias-tee] [--seconds S] [--record OUT.cs8] [--record-channel OUT.cf32]
 //!                      [--set KEY=VALUE] [--ts OUT.ts] [--pcap OUT.pcap] [--card] [--udp ADDR:PORT] [--http ADDR:PORT]
 //!                      [--sound]   (runs are silent unless --sound)
+//! declab run <decoder> --net tcp://HOST:PORT|listen://ADDR:PORT|udp://ADDR:PORT
+//!                      --rate HZ [--iq int8|uint8|int16|int32|float32] [--freq HZ] …
+//!                      (raw IQ from SDR++'s IQ Exporter, GNU Radio, an rtl_tcp server…)
 //! ```
 //!
 //! `run` prints the decoder's lock and measurements once a second and plays
@@ -87,8 +90,10 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         Box::new(r)
     } else if let Some(radio) = o.get("--radio") {
         open_radio(radio, &o)?
+    } else if let Some(url) = o.get("--net") {
+        open_net(url, &o)?
     } else {
-        bail!("give --file <capture> or --radio hackrf|airspy|rtlsdr");
+        bail!("give --file <capture>, --radio hackrf|airspy|rtlsdr or --net tcp://HOST:PORT");
     };
 
     let live = source.is_live();
@@ -312,6 +317,25 @@ fn open_rtlsdr(o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
 #[cfg(not(feature = "rtlsdr"))]
 fn open_rtlsdr(_: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
     bail!("built without the rtlsdr feature")
+}
+
+/// Raw IQ over the network. The stream carries no rate, so `--rate` is
+/// required; `--freq` only labels the band (an rtl_tcp server is tuned to it).
+fn open_net(url: &str, o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    use declab_io::{NetIqSettings, NetIqSource, NetSample};
+    let (mode, addr) = NetIqSettings::parse_url(url)?;
+    let sample = match o.get("--iq") {
+        Some(t) => NetSample::parse(t).with_context(|| format!("--iq {t}: int8, uint8, int16, int32 or float32"))?,
+        None => NetSample::Cs8,
+    };
+    let s = NetIqSettings {
+        mode,
+        addr,
+        sample,
+        sample_rate: o.hz("--rate")?.context("give --rate: a network stream does not say its rate")?,
+        center_hz: o.hz("--freq")?.unwrap_or(0.0),
+    };
+    Ok(Box::new(NetIqSource::open(s)?))
 }
 
 fn open_radio(name: &str, o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
