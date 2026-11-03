@@ -397,6 +397,17 @@ impl fmt::Display for Message {
             (0x01, Some((s, d, false))) => write!(f, "private call {s} → {d}"),
             (0x08, Some((s, d, g))) => write!(f, "TX_REL {s} → {}{d}", if g { "TG " } else { "" }),
             (_, Some((s, d, g))) => write!(f, "{name} {s} → {}{d}", if g { "TG " } else { "" }),
+            _ if name == "unknown" => {
+                // Rust note: `{b:02x}` per byte, joined, so the type and
+                // content can be looked up.
+                let hex: Vec<String> = self.0.iter().map(|b| format!("{b:02x}")).collect();
+                write!(
+                    f,
+                    "message type {:#04x} (not known): {}",
+                    self.kind(),
+                    hex.join(" ")
+                )
+            }
             _ => write!(f, "{name}"),
         }
     }

@@ -73,6 +73,18 @@ pub enum Event {
     ControlChannel { lich: Lich },
 }
 
+/// One frame as the receiver saw it, for looking into a real channel
+/// (`Receiver::frame_log`; the `nxdn_file` example).
+#[derive(Debug, Clone)]
+pub struct FrameNote {
+    pub lich: Lich,
+    /// It passed: the LICH parity, then a CRC or clean voice.
+    pub good: bool,
+    pub eye_snr_db: f32,
+    /// The frame's hard bits, descrambled (FSW first).
+    pub bits: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
     pub frames: u64,
@@ -117,6 +129,8 @@ pub struct Receiver {
     pub stats: Stats,
     events: Vec<Event>,
     tap: Option<Vec<f32>>,
+    /// Every frame, when set (`Some(Vec::new())`): see [`FrameNote`].
+    pub frame_log: Option<Vec<FrameNote>>,
 }
 
 impl Receiver {
@@ -166,6 +180,7 @@ impl Receiver {
             stats: Stats::default(),
             events: Vec::new(),
             tap: None,
+            frame_log: None,
         }
     }
 
@@ -491,7 +506,15 @@ impl Receiver {
         let lich = Lich((0..8).fold(0u8, |v, i| {
             (v << 1) | u8::from(llr[layout::LICH + 2 * i] < 0.0)
         }));
-        let good = lich.parity_ok() && self.payload(lich, &llr);
+        let good = lich.parity_ok() && self.payload(lich, &llr, sync.is_some());
+        if let Some(log) = &mut self.frame_log {
+            log.push(FrameNote {
+                lich,
+                good,
+                eye_snr_db: 10.0 * (5.0 / self.noise).log10(),
+                bits: llr.iter().map(|&l| u8::from(l < 0.0)).collect(),
+            });
+        }
         self.stats.frames += 1;
         if !good {
             self.stats.frames_bad += 1;
@@ -522,14 +545,22 @@ impl Receiver {
     }
 
     /// The SACCH and the payload. True if a CRC passed or the voice came out
-    /// clean.
-    fn payload(&mut self, lich: Lich, llr: &[f32]) -> bool {
+    /// clean. `seen`: the FSW was found here (else the frame is where the
+    /// flywheel expects one, and may be noise after the carrier went).
+    fn payload(&mut self, lich: Lich, llr: &[f32], seen: bool) -> bool {
         if lich.rfct() == Rfct::Rcch {
-            // The control channel's CAC is not decoded yet: only the LICH
-            // vouches for the frame.
+            // The control channel's CAC is not decoded yet: only the FSW and
+            // the LICH vouch for the frame. The LICH's one parity bit passes
+            // half of all noise, so a frame the flywheel guessed is not
+            // believed: a repeater's beacon (two frames every few seconds)
+            // was followed by "control channel" frames read from silence.
+            if !seen {
+                return false;
+            }
             self.events.push(Event::ControlChannel { lich });
             return true;
         }
+        let first = self.events.len();
         let mut checked = false;
         match sacch_decode(&llr[layout::SACCH..layout::PAYLOAD]) {
             Some(b) => {
@@ -612,6 +643,19 @@ impl Receiver {
             if checked {
                 self.events.push(Event::Voice { frames });
             }
+        }
+        if !seen {
+            // A guessed frame's messages must be ones NXDN has: a short CRC
+            // (SACCH's is 6 bits) lets the odd frame of noise through.
+            // Rust note: `split_off` takes this frame's events off the end,
+            // to be put back filtered.
+            let mine = self.events.split_off(first);
+            self.events.extend(mine.into_iter().filter(|e| match e {
+                Event::Facch { msg } | Event::Sacch { msg } => {
+                    super::message_name(msg.kind()) != "unknown"
+                }
+                _ => true,
+            }));
         }
         checked
     }

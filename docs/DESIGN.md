@@ -999,3 +999,18 @@ C/N. Cost on broadcast FM: 5.7 % of a core without, 6.1 (level, SNR) to
 6.5 % (noise) with (`squelch_cost`). Settings: `squelch` = `off` | `level`
 | `snr` | `noise` (a number, as older prefs hold, means level at that dBFS),
 `squelch_level`, `squelch_snr`, `squelch_noise`.
+
+## 25. NXDN: frames the flywheel guessed (2026-11-03)
+
+On the air, an NXDN48 repeater with no traffic sent a beacon every 5 s:
+two frames (LICH 0xc2, FACCH1 in both halves: IDLE, then TX_REL from the repeater's own
+unit ID). After them the flywheel kept decoding frames where the next ones
+would have been. Half of those noise "frames" pass the LICH's single
+parity bit. Those reading as control channel (RCCH) were believed outright
+(nothing else checks a CAC yet), so the card said "control channel"; the
+rest went to FACCH1/SACCH, whose short CRCs (SACCH: 6 bits) let the odd one
+through as a message of unknown type. Now an RCCH frame counts only where
+the FSW was found, and a guessed frame's messages must be of a known type.
+A message of unknown type shows its type and bytes rather than "unknown".
+`nxdn_file` prints every frame (LICH, pass or not, eye SNR; `bits` adds the
+descrambled bits: a real frame starts with the FSW, cdf59).
