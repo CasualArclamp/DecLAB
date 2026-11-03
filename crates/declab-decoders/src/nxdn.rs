@@ -90,7 +90,7 @@ pub(crate) fn gate(mode: Mode) -> crate::gate_panel::Gate {
     }
 }
 
-/// A call in a few characters, for the headline: "TG 2083 ← 2574".
+/// A call in a few characters, for the headline: "TG 77 ← 1234".
 fn short(msg: &Message) -> String {
     match msg.call() {
         Some((s, d, true)) => format!("TG {d} ← {s}"),

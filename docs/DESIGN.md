@@ -1045,7 +1045,7 @@ length); `DecoderView::log_total` now counts every line.
 A repeater that only bursts (a call of a second or two, then its beacon)
 had its call on the card for as long as it lasted. Now DMR and NXDN keep
 the last call that ended (`heard::LastCall`): between calls the headline is
-"last: TG 2083 ← 2574" and a "last call" line gives its age, length and
+"last: TG 77 ← 1234" and a "last call" line gives its age, length and
 BER; the channel's state (carrier, call, control channel) is a line of its
 own. "Control channel" means a control frame in the last 2 s, not one ever.
 When the signal drops, Digital voice keeps the last mode's card, titled
