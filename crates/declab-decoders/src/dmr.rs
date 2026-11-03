@@ -16,7 +16,7 @@
 
 use std::collections::VecDeque;
 
-use crate::heard::HeardList;
+use crate::heard::{HeardList, LastCall};
 
 use declab_api::{
     Audio, Block, Card, DataPacket, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec,
@@ -181,6 +181,8 @@ struct Dmr {
     frames_out: u64,
     pcm8: Vec<f32>,
     pcm48: Vec<f32>,
+    /// The last call that ended, for the card between calls.
+    last_call: Option<LastCall>,
 }
 
 /// Silence after which the slot being played lets go of the speaker.
@@ -222,6 +224,7 @@ impl Dmr {
             frames_out: 0,
             pcm8: Vec::with_capacity(3 * ambe2::FRAME),
             pcm48: Vec::with_capacity(18 * ambe2::FRAME),
+            last_call: None,
         }
     }
 
@@ -318,6 +321,12 @@ impl Dmr {
         }
         if let Some(c) = self.calls[slot as usize].take() {
             let ber = 100.0 * c.errors as f64 / (c.frames * 46).max(1) as f64;
+            self.last_call = Some(LastCall {
+                what: format!("{} {}", slot_name(slot), short(&c.lc)),
+                end_s: c.last_s,
+                len_s: c.last_s - c.start_s,
+                ber,
+            });
             out.log(format!(
                 "{}: end of {} after {:.1} s, {} voice frames, BER {ber:.2} %",
                 slot_name(slot),
@@ -517,9 +526,17 @@ impl Dmr {
             Some(Source::Ts1 | Source::Ts2) => "direct mode",
             None => "searching",
         };
+        let state = match &self.calls {
+            [None, None] if st.csbks > 0 && source.is_some() => "control channel",
+            [None, None] => src,
+            _ => "call",
+        };
         let headline = match &self.calls {
-            [None, None] if st.csbks > 0 && source.is_some() => "control channel".to_string(),
-            [None, None] => src.to_string(),
+            // Between calls the last one stays up, with its age.
+            [None, None] => match &self.last_call {
+                Some(l) => l.headline(),
+                None => state.to_string(),
+            },
             calls => calls
                 .iter()
                 .enumerate()
@@ -551,6 +568,13 @@ impl Dmr {
                 range: (0.0, 30.0),
             }),
             details: vec![
+                pair("state", state.into()),
+                pair(
+                    "last call",
+                    self.last_call
+                        .as_ref()
+                        .map_or("–".into(), |l| l.detail(self.now_s)),
+                ),
                 pair(
                     "colour code",
                     st.colour_code.map_or("–".into(), |c| c.to_string()),
@@ -617,6 +641,7 @@ impl Decoder for Dmr {
         self.heard.clear();
         self.kind = SystemKind::default();
         self.calls = [None, None];
+        self.last_call = None;
         self.playing = None;
         self.sym_hist.clear();
     }

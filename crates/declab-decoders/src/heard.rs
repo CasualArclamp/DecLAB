@@ -43,6 +43,40 @@ struct Radio {
     encrypted: bool,
 }
 
+/// The last call that ended, kept on the card between calls: a repeater
+/// that only bursts (a call, then its beacon) would otherwise show the call
+/// for as long as it lasts and then "carrier".
+#[derive(Debug, Clone)]
+pub(crate) struct LastCall {
+    /// The call in a few characters: "TG 2350 ← 2341234".
+    pub what: String,
+    pub end_s: f64,
+    pub len_s: f64,
+    pub ber: f64,
+}
+
+impl LastCall {
+    /// "last: TG 2350 ← 2341234".
+    pub fn headline(&self) -> String {
+        format!("last: {}", self.what)
+    }
+
+    /// "0:12 ago, 2.9 s, BER 0.03 %".
+    pub fn detail(&self, now: f64) -> String {
+        format!("{} ago, {:.1} s, BER {:.2} %", clock(now - self.end_s), self.len_s, self.ber)
+    }
+}
+
+/// Seconds as m:ss (h:mm:ss past an hour).
+pub(crate) fn clock(s: f64) -> String {
+    let s = s.max(0.0) as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct HeardList {
     groups: Vec<Group>,

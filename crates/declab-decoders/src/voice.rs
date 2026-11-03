@@ -134,6 +134,11 @@ struct Voice {
     active: Option<usize>,
     decimate: Decimate3,
     narrow: Vec<Iq>,
+    /// The card of the last mode on the air, and when it went: kept up
+    /// after the signal drops, since a bursting repeater's call (or beacon)
+    /// was otherwise on screen for half a second.
+    last_card: Option<(Card, f64)>,
+    now_s: f64,
 }
 
 impl Voice {
@@ -156,12 +161,15 @@ impl Voice {
             active: None,
             decimate: Decimate3::new(),
             narrow: Vec::new(),
+            last_card: None,
+            now_s: 0.0,
         }
     }
 }
 
 impl Decoder for Voice {
     fn process(&mut self, block: &Block<'_>, out: &mut Sink) {
+        self.now_s = (block.first_sample + block.iq.len() as u64) as f64 / block.tuning.sample_rate;
         self.narrow.clear();
         self.decimate.process(block.iq, &mut self.narrow);
         let mut tuning = block.tuning;
@@ -223,14 +231,27 @@ impl Decoder for Voice {
                 out.scopes.append(&mut s.scopes);
                 out.card = s.card.take();
                 out.heard = s.heard.take();
+                if let Some(c) = &out.card {
+                    self.last_card = Some((c.clone(), self.now_s));
+                }
             }
             None if reported => {
                 out.lock = Lock::Searching;
-                out.card = Some(Card {
-                    title: "Digital voice".into(),
-                    headline: "searching".into(),
-                    details: vec![("listening for".into(), LISTENING.into())],
-                    ..Card::default()
+                out.card = Some(match &self.last_card {
+                    // The last mode's card, as it was, with its age.
+                    Some((c, at)) => {
+                        let mut c = c.clone();
+                        c.title = format!("{} · last heard {} ago", c.title, crate::heard::clock(self.now_s - at));
+                        c.gauge = None;
+                        c.details.insert(0, ("listening for".into(), LISTENING.into()));
+                        c
+                    }
+                    None => Card {
+                        title: "Digital voice".into(),
+                        headline: "searching".into(),
+                        details: vec![("listening for".into(), LISTENING.into())],
+                        ..Card::default()
+                    },
                 });
                 // DMR's symbols, so the scope shows what the channel holds.
                 out.scopes.append(&mut self.modes[0].sink.scopes);
@@ -272,6 +293,7 @@ impl Decoder for Voice {
             m.lock = Lock::Searching;
         }
         self.active = None;
+        self.last_card = None;
         self.decimate.reset();
     }
 }

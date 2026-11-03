@@ -10,7 +10,7 @@
 //! Scope "Symbols": the soft symbols of the latest frames, four bands.
 
 use std::collections::VecDeque;
-use crate::heard::HeardList;
+use crate::heard::{HeardList, LastCall};
 
 use declab_api::{
     Audio, Block, Card, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq, Lock,
@@ -90,6 +90,15 @@ pub(crate) fn gate(mode: Mode) -> crate::gate_panel::Gate {
     }
 }
 
+/// A call in a few characters, for the headline: "TG 2083 ← 2574".
+fn short(msg: &Message) -> String {
+    match msg.call() {
+        Some((s, d, true)) => format!("TG {d} ← {s}"),
+        Some((s, d, false)) => format!("{s} → {d}"),
+        None => msg.to_string(),
+    }
+}
+
 struct Call {
     msg: Message,
     start_s: f64,
@@ -114,6 +123,10 @@ struct Nxdn {
     pcm8: Vec<f32>,
     pcm48: Vec<f32>,
     control_frames: u64,
+    /// When the latest control channel frame came, s.
+    control_s: f64,
+    /// The last call that ended, for the card between calls.
+    last_call: Option<LastCall>,
 }
 
 impl Nxdn {
@@ -136,6 +149,8 @@ impl Nxdn {
             pcm8: Vec::with_capacity(4 * ambe2::FRAME),
             pcm48: Vec::with_capacity(24 * ambe2::FRAME),
             control_frames: 0,
+            control_s: f64::NEG_INFINITY,
+            last_call: None,
         }
     }
 
@@ -186,6 +201,12 @@ impl Nxdn {
         }
         if let Some(c) = self.call.take() {
             let ber = 100.0 * c.errors as f64 / (c.frames * 46).max(1) as f64;
+            self.last_call = Some(LastCall {
+                what: short(&c.msg),
+                end_s: c.last_s,
+                len_s: c.last_s - c.start_s,
+                ber,
+            });
             out.log(format!(
                 "end of {} after {:.1} s, {} voice frames, BER {ber:.2} %",
                 c.msg,
@@ -235,7 +256,10 @@ impl Nxdn {
                     _ => self.note(msg.to_string(), out),
                 },
                 Event::Voice { frames } => self.voice(&frames, out),
-                Event::ControlChannel { .. } => self.control_frames += 1,
+                Event::ControlChannel { .. } => {
+                    self.control_frames += 1;
+                    self.control_s = self.now_s;
+                }
             }
         }
         if self
@@ -271,15 +295,18 @@ impl Nxdn {
         let ber = 100.0 * st.voice_bit_errors as f64 / st.voice_bits.max(1) as f64;
         out.measure("Eye SNR", f64::from(st.eye_snr_db), "dB");
         out.measure("Voice BER", ber, "%");
-        let headline = match (&self.call, st.locked) {
-            (Some(c), _) => match c.msg.call() {
-                Some((s, d, true)) => format!("TG {d} ← {s}"),
-                Some((s, d, false)) => format!("{s} → {d}"),
-                None => c.msg.to_string(),
-            },
-            (None, true) if self.control_frames > 0 => "control channel".into(),
-            (None, true) => "carrier".into(),
-            (None, false) => "searching".into(),
+        let state = match (&self.call, st.locked) {
+            (Some(_), _) => "call",
+            // A stray control frame once must not label a repeater for good.
+            (None, true) if self.now_s - self.control_s < 2.0 => "control channel",
+            (None, true) => "carrier",
+            (None, false) => "searching",
+        };
+        // Between calls the last one stays up, with its age.
+        let headline = match (&self.call, &self.last_call) {
+            (Some(c), _) => short(&c.msg),
+            (None, Some(l)) => l.headline(),
+            (None, None) => state.into(),
         };
         let pair = |k: &str, v: String| (k.to_string(), v);
         out.card = Some(Card {
@@ -293,6 +320,11 @@ impl Nxdn {
                 range: (0.0, 30.0),
             }),
             details: vec![
+                pair("state", state.into()),
+                pair(
+                    "last call",
+                    self.last_call.as_ref().map_or("–".into(), |l| l.detail(self.now_s)),
+                ),
                 pair("RAN", st.ran.map_or("–".into(), |r| r.to_string())),
                 pair("offset", format!("{:+.0} Hz", st.offset_hz)),
                 pair(
@@ -352,6 +384,7 @@ impl Decoder for Nxdn {
         self.rx.reset();
         self.heard.clear();
         self.call = None;
+        self.last_call = None;
         self.sym_hist.clear();
     }
 }

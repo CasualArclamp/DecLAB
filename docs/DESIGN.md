@@ -1039,3 +1039,15 @@ is fed (cf32 at its rate, 72 kS/s for Digital voice: 0.6 MB/s against the
 radio's 20), for long recordings of one channel. The CLI's log printing
 stopped once the view's 300-line log was full (it counted the deque's
 length); `DecoderView::log_total` now counts every line.
+
+## 27. The last call stays on the card (2026-11-03)
+
+A repeater that only bursts (a call of a second or two, then its beacon)
+had its call on the card for as long as it lasted. Now DMR and NXDN keep
+the last call that ended (`heard::LastCall`): between calls the headline is
+"last: TG 2083 ← 2574" and a "last call" line gives its age, length and
+BER; the channel's state (carrier, call, control channel) is a line of its
+own. "Control channel" means a control frame in the last 2 s, not one ever.
+When the signal drops, Digital voice keeps the last mode's card, titled
+"last heard m:ss ago", instead of a bare "searching". A retune clears both.
+A headline too long for the card shrinks to fit beside its margin.

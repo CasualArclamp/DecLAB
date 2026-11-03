@@ -223,7 +223,21 @@ fn draw_card(ui: &mut Ui, c: &declab_api::Card, colour: Color32, freq_hz: f64, c
     let margin = c.gauge.as_ref().and_then(|g| g.need_db.map(|n| ((g.value_db - n) * 10.0).round() / 10.0 + 0.0));
     ui.horizontal(|ui| {
         let empty = c.headline == "–" || c.headline.is_empty();
-        ui.label(RichText::new(if empty { "–" } else { &c.headline }).size(24.0).color(if empty { GREY } else { colour }));
+        let text = if empty { "–" } else { &c.headline };
+        // A long headline ("TS1 TG 2350 ← 2341234", a last call with its
+        // age) shrinks to leave room for the margin, then is cut.
+        let room = ui.available_width() - if margin.is_some() { 90.0 } else { 0.0 };
+        // Rust note: `WidgetText::into_galley` lays the label's own text out
+        // (its font, unwrapped), so its width is what the label will take.
+        let wide = egui::WidgetText::from(RichText::new(text).size(24.0))
+            .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+            .size()
+            .x;
+        let size = (24.0 * room / wide.max(1.0)).clamp(15.0, 24.0);
+        ui.add_sized(
+            vec2(room.max(0.0), 30.0),
+            egui::Label::new(RichText::new(text).size(size).color(if empty { GREY } else { colour })).truncate(),
+        );
         if let Some(m) = margin {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new(format!("{m:+5.1} dB")).size(17.0).color(health(m)));
