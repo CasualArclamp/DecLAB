@@ -2,10 +2,11 @@
 //! IQ input and output for DecLAB (from DecDVB-T's Airspy branch).
 //!
 //! Everything upstream of the demodulator talks to an [`IqSource`]: an IQ file
-//! (replay) or
-//! the live HackRF One, Airspy R2 or RTL-SDR. Recording goes out through [`IqFileWriter`].
+//! (replay), the live HackRF One, Airspy R2 or RTL-SDR, or IQ over the
+//! network ([`net`]). Recording goes out through [`IqFileWriter`].
 
 pub mod file;
+pub mod net;
 pub mod raw_stream;
 pub mod rtlsdr_proto;
 pub mod wav;
@@ -20,6 +21,7 @@ pub mod airspy;
 #[cfg(feature = "hackrf")]
 pub mod hackrf;
 
+pub use net::{NetIqControl, NetIqSettings, NetIqSource, NetMode, NetSample};
 pub use file::{IqFileReader, IqFileWriter, NameHint, format_from_path, name_hint};
 pub use rtlsdr_proto::{RtlGains, RtlSettings};
 pub use wav::{CaptureInfo, WavIq, probe_capture};
@@ -69,6 +71,12 @@ pub trait IqSource: Send {
     /// Retune to `hz`. `Ok(false)` for a source with no tuner (a file).
     fn retune(&mut self, _hz: f64) -> Result<bool> {
         Ok(false)
+    }
+
+    /// Whether a retune moves what the source receives. A network stream is
+    /// live but tuned at its sender (except rtl_tcp's).
+    fn can_retune(&self) -> bool {
+        self.is_live()
     }
 
     /// Whether the source paces itself in real time (a radio does; a file

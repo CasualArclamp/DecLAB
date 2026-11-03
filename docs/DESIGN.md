@@ -131,6 +131,7 @@ DecLAB is GPL-3.0-or-later, so DAB+ uses libxaac (§20).
 | V2b | One "Digital voice" decoder detecting DMR, NXDN48 and NXDN96; NXDN96 | ✅ 2026-10-29 in simulation only; NXDN96 voice is half-rate (EHR) only |
 | V3 | P25 phase 1 in Digital voice: conventional calls (HDU, LDU1/2, TDU, TDULC), control channel TSBKs, IMBE vocoder (port of mbelib) | ✅ 2026-10-29 in simulation only; phase 2 (TDMA) and encrypted voice not decoded |
 | V4 | TETRA downlink in Digital voice: cell, calls, status, SDS; π/4-DQPSK coherent receiver; ACELP speech via a separate library | ✅ 2026-10-30 in simulation only; speech needs `tetra_acelp.dll` (private, not GPL); π/8-D8PSK, QAM and the uplink not decoded |
+| S1 | Network IQ source: raw IQ over TCP (connect or listen) or UDP, rtl_tcp recognised and tuned; SDR++'s IQ Exporter as the way in for radios without a driver here (SDRplay RSPduo) | ✅ 2026-11-03 against a stand-in sender (`net_send`); SDR++ itself not yet tried. Native SDRplay API next |
 | later | DLL plug-ins; DVB-C (port of `Documents\DecSAT\dvbc_decode.py`); modulators |
 
 ## 4. Notes from M1a (2026-10-27)
@@ -1051,3 +1052,32 @@ own. "Control channel" means a control frame in the last 2 s, not one ever.
 When the signal drops, Digital voice keeps the last mode's card, titled
 "last heard m:ss ago", instead of a bare "searching". A retune clears both.
 A headline too long for the card shrinks to fit beside its margin.
+
+## 28. Network IQ (2026-11-03)
+
+The user asked for the SDRplay RSPduo. Its only interface is SDRplay's
+closed API (a DLL or `.so` plus a service), so the first way in is SDR++,
+which drives it, sending IQ through its IQ Exporter. That format is not
+SDR++'s own: headerless interleaved samples over TCP or UDP is what GNU
+Radio's sinks and many other programs send, so the source is generic.
+
+- **`declab_io::net`**: `tcp://` connects (SDR++ "TCP (Server)"),
+  `listen://` accepts one sender after another ("TCP (Client)"), `udp://`
+  binds. int8/int16/int32 are scaled as SDR++ scales them (by 128, 32768
+  and 2³¹ − 1), float32 as is, uint8 offset by 128. A reader thread hands
+  ~10 ms buffers over a bounded channel (drops counted), as the USB
+  radios do.
+- **rtl_tcp**: a 12-byte `RTL0` header on connect switches to uint8 and
+  makes the source tunable (commands 0x01, 0x02, big-endian).
+- **No metadata**: the user gives the rate and centre; `describe()` shows
+  the rate measured after 2 s, so a wrong one is plain to see.
+- **Never blocks the engine**: with nothing arriving, a read returns 256
+  samples of silence every 100 ms, so Stop and the GUI stay responsive.
+- **`IqSource::can_retune`** (new, default `is_live()`): a network stream
+  is live but tuned at its sender. The GUI treats one as it treats a file
+  (the band stays put, the centre is entered), except for rtl_tcp.
+- **CPU** (10 MS/s int8 over loopback, WFM + RDS on the simulated FM band,
+  8 s): a read per packet made a block per packet, which overflowed the
+  decoder queue (566 blocks dropped) at 80 % of a core. Filling each buffer
+  to ~10 ms, and waiting 1 ms after a short read rather than calling again,
+  gives 29–31 % against 23 % for the same file replayed in real time.

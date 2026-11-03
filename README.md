@@ -90,6 +90,14 @@ Radios need the WinUSB driver, installed once with
 [Zadig](https://zadig.akeo.ie/). DecLAB talks to them through its own pure
 Rust drivers.
 
+**Any other radio, over the network.** "Network IQ" takes raw IQ from
+another program: SDR++'s IQ Exporter (so an SDRplay RSPduo or anything else
+SDR++ drives), GNU Radio's TCP or UDP sinks, or an rtl_tcp server (which
+DecLAB also tunes). Connect to a TCP server (`tcp://127.0.0.1:7777`), wait
+for a sender (`listen://0.0.0.0:7777`) or take UDP (`udp://0.0.0.0:7777`),
+in int8, uint8, int16, int32 or float32. The stream does not carry its
+rate or frequency, so you enter them.
+
 ### From source
 
 ```bash
@@ -109,6 +117,7 @@ declab list                                                    # the decoders
 declab run dab --file 11d_222.064MHz_4.096Msps.cs8 --service "classic fm" --wav out.wav
 declab run voice --radio rtlsdr --freq 439.5M --gain 40.2 --card
 declab run wfm --radio airspy --freq 98M --offset 1.2M
+declab run wfm --net tcp://127.0.0.1:7777 --iq int8 --rate 10M --freq 98M --offset 0.8M
 ```
 
 IQ files are read as cs8, cu8, cs16 or cf32 (from the extension); the

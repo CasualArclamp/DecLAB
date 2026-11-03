@@ -47,6 +47,9 @@ cargo run --release -p declab-gui -- out/sim_sat_s2x.cf32 --rate 8M --decoder sa
 cargo run --release -p declab-cli --example retune_probe -- FILE voice HZ_A HZ_B 3   # retune a running decoder from one carrier to another mid-file, as a click does; prints the view each 0.25 s
 cargo run --release -p declab-cli --example vfo_probe -- FILE pagers HZ_1 voice HZ_2   # two VFOs on a recording, as the GUI runs them; both views each 0.5 s
 cargo test -p declab-decoders --release relock_after_retune -- --ignored --nocapture   # Digital voice: time to relock after a retune or a drag, each mode pair
+cargo run --release -p declab-cli -- run wfm --net tcp://127.0.0.1:7777 --iq int8 --rate 10M --freq 98M --offset 0.8M   # raw IQ over the network: SDR++ IQ Exporter (Baseband, TCP (Server)), GNU Radio sinks; also listen://ADDR:PORT, udp://ADDR:PORT; rtl_tcp recognised and tuned
+cargo run --release -p declab-gui -- --net tcp://127.0.0.1:7777 --iq int8 --rate 10M --freq 98M --decoder wfm --chan 98.8M
+cargo run --release -p declab-io --example net_send -- out/sim_fm_98.000MHz_10Msps.cs8 10M tcp://127.0.0.1:7777 int8   # stand-in for SDR++'s IQ Exporter: plays a file out in real time (tcp:// listens, connect://, udp://)
 cargo run --release -p declab-cli -- list
 cargo run --release -p declab-cli -- selftest level
 cargo run --release -p declab-cli -- run wfm --file x_98.000MHz_10Msps.cs8 --offset 1.2M --realtime
@@ -58,6 +61,10 @@ Only an Airspy R2 is plugged in at the moment (the HackRF is not). All
 three drivers (HackRF, Airspy, RTL-SDR) are pure Rust over nusb and need the
 WinUSB driver. The user's own
 DecDVB-T GUI may be holding the Airspy ("Access is denied"): never kill it.
+
+**Network IQ** (`declab-io/src/net.rs`) takes headerless IQ from another
+program, so any radio SDR++ drives (the SDRplay RSPduo, say) works on
+Windows and Linux. The stream says neither rate nor frequency: give both.
 
 The GUI keeps its settings in `%APPDATA%\DecLAB\prefs.txt`; screenshot runs
 neither read nor write it.
