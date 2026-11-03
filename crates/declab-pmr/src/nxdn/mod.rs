@@ -162,9 +162,13 @@ impl Lich {
         Lich(v | u8::from(Lich::parity(v)))
     }
 
-    /// MMDVMHost `getParity`: set for 0x8x and 0xBx.
+    /// The parity bit: even parity over the RF channel type and functional
+    /// channel type (bits 7–4). MMDVMHost's `getParity` ("set for 0x8x and
+    /// 0xBx") agrees for the conventional values it sends, but a real
+    /// repeater on the composite channel type sends voice with LICH 0xef
+    /// (each frame with its FSW), which that shortcut threw away.
     fn parity(v: u8) -> bool {
-        matches!(v & 0xF0, 0x80 | 0xB0)
+        (v >> 4).count_ones() % 2 == 1
     }
 
     pub fn parity_ok(self) -> bool {
@@ -397,6 +401,18 @@ impl fmt::Display for Message {
             (0x01, Some((s, d, false))) => write!(f, "private call {s} → {d}"),
             (0x08, Some((s, d, g))) => write!(f, "TX_REL {s} → {}{d}", if g { "TG " } else { "" }),
             (_, Some((s, d, g))) => write!(f, "{name} {s} → {}{d}", if g { "TG " } else { "" }),
+            // Seen on the air around every call with the call's addresses
+            // (0x00 before VCALL, 0x11 after TX_REL); not in MMDVMHost's
+            // list, so not named.
+            (0x00 | 0x11, _) if self.0.len() >= 7 => {
+                let b = &self.0;
+                let (s, d) = (
+                    u16::from_be_bytes([b[3], b[4]]),
+                    u16::from_be_bytes([b[5], b[6]]),
+                );
+                let tg = if b[2] & 0x80 == 0 { "TG " } else { "" };
+                write!(f, "message type {:#04x}: {s} → {tg}{d}", self.kind())
+            }
             _ if name == "unknown" => {
                 // Rust note: `{b:02x}` per byte, joined, so the type and
                 // content can be looked up.
@@ -450,6 +466,18 @@ mod tests {
             llr[i] = -llr[i];
         }
         assert_eq!(facch1_decode(&llr).as_deref(), Some(&d80[..]));
+    }
+
+    #[test]
+    fn lich_parity_takes_a_real_repeater_s_frames() {
+        // Off the air, each with its FSW: idle (0xc2), FACCH1 then voice
+        // (0xc6), voice with SACCH (0xef); and MMDVMHost's conventional ones.
+        for v in [0xc2, 0xc6, 0xef, 0x81, 0x8d, 0xb3] {
+            assert!(Lich(v).parity_ok(), "{v:#x}");
+        }
+        for v in [0xee, 0xc3, 0x80, 0x28] {
+            assert!(!Lich(v).parity_ok(), "{v:#x}");
+        }
     }
 
     #[test]

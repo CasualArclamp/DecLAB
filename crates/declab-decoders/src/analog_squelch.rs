@@ -67,6 +67,7 @@ impl Method {
     }
 
     /// The threshold slider's range.
+    #[cfg_attr(not(feature = "ui"), allow(dead_code))]
     pub fn range(self) -> (f64, f64) {
         match self {
             Method::Level => (-100.0, -20.0),
@@ -112,6 +113,8 @@ impl Settings {
         }
     }
 
+    // Used by the settings panel, built with the "ui" feature only.
+    #[cfg_attr(not(feature = "ui"), allow(dead_code))]
     pub fn threshold_mut(&mut self, m: Method) -> &mut f64 {
         match m {
             Method::Level => &mut self.level_dbfs,
@@ -147,6 +150,7 @@ impl Settings {
     }
 
     /// The settings as `(key, value)` pairs.
+    #[cfg_attr(not(feature = "ui"), allow(dead_code))]
     pub fn pairs(&self) -> [(&'static str, String); 4] {
         [
             ("squelch", self.method.map_or("off", Method::key).into()),

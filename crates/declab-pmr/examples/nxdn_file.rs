@@ -70,7 +70,17 @@ fn main() -> std::io::Result<()> {
         }
         for e in ev.drain(..) {
             match e {
-                Event::Voice { .. } => voice += 1,
+                Event::Voice { frames } => {
+                    voice += 1;
+                    let e: Vec<String> = frames
+                        .iter()
+                        .map(|f| format!("{}/{}", f.errors, f.data_errors))
+                        .collect();
+                    println!(
+                        "{t:6.1}   voice, Golay corrections (all/data): {}",
+                        e.join(" ")
+                    );
+                }
                 e => println!("{t:6.1}   {e:?}"),
             }
         }

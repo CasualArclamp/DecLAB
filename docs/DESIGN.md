@@ -1014,3 +1014,28 @@ the FSW was found, and a guessed frame's messages must be of a known type.
 A message of unknown type shows its type and bytes rather than "unknown".
 `nxdn_file` prints every frame (LICH, pass or not, eye SNR; `bits` adds the
 descrambled bits: a real frame starts with the FSW, cdf59).
+
+## 26. NXDN voice from a real repeater (2026-11-03)
+
+A conventional NXDN48 repeater on the composite channel type sent its
+voice in frames with LICH 0xef (four voice frames, SACCH superframe), call
+set-up in 0xc6 (FACCH1, then voice) and idle in 0xc2. All 0xef frames were
+thrown away: the LICH parity followed MMDVMHost's `getParity` ("set for 0x8x
+and 0xBx"), which is right only for the conventional values it sends. The
+parity is even parity over bits 7–4 (all 216 real frames with their FSW
+agree, and so do MMDVMHost's values). With it, 30 minutes of the repeater
+(10 calls, six radios, three talkgroups) decode at 0.00–0.15 % voice BER;
+the AMBE+2 bit order shared with DMR was right (0 Golay corrections).
+
+Still open: the SACCH never passes its CRC on this repeater. Neither the
+interleave read the other way, any of the six puncture phases, a zero CRC
+start, nor the frames left scrambled decode it, and an idle frame's SACCH
+matches no IDLE message under those variants (16 of 60 bits off at best).
+So the RAN is not shown. Messages 0x00 (before VCALL) and 0x11 (after
+TX_REL) carry the call's addresses; they are shown with them, unnamed.
+
+`declab run … --record-channel OUT.cf32` writes the decoder's channel as it
+is fed (cf32 at its rate, 72 kS/s for Digital voice: 0.6 MB/s against the
+radio's 20), for long recordings of one channel. The CLI's log printing
+stopped once the view's 300-line log was full (it counted the deque's
+length); `DecoderView::log_total` now counts every line.

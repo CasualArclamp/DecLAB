@@ -7,7 +7,7 @@
 //! declab run <decoder> --file <capture> [--rate HZ] [--freq HZ] [--offset HZ]
 //!                      [--bandwidth HZ] [--seconds S] [--realtime]
 //! declab run <decoder> --radio hackrf|airspy|rtlsdr --freq HZ [--rate HZ] [--offset HZ]
-//!                      [--gain AMP,LNA,VGA | DB | agc] [--ppm PPM] [--bias-tee] [--seconds S] [--record OUT.cs8]
+//!                      [--gain AMP,LNA,VGA | DB | agc] [--ppm PPM] [--bias-tee] [--seconds S] [--record OUT.cs8] [--record-channel OUT.cf32]
 //!                      [--set KEY=VALUE] [--ts OUT.ts] [--pcap OUT.pcap] [--card] [--udp ADDR:PORT] [--http ADDR:PORT]
 //!                      [--sound]   (runs are silent unless --sound)
 //! ```
@@ -138,6 +138,10 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         // The raw samples, as they come from the source (format from the extension).
         host.record(Some(PathBuf::from(path)));
     }
+    if let Some(path) = o.get("--record-channel") {
+        // Only the decoder's channel, as it is fed (cf32 at its rate).
+        host.record_channel(Some(PathBuf::from(path))).context("--record-channel")?;
+    }
     let spec = factory.input(host.source_rate());
     let offset = o.hz("--offset")?.unwrap_or(0.0);
     let bandwidth = o.hz("--bandwidth")?.unwrap_or(spec.bandwidth_hz);
@@ -147,7 +151,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
 
     let t0 = Instant::now();
     let cpu0 = declab_engine::meter::process_cpu_seconds();
-    let mut printed_log = 0usize;
+    let mut printed_log = 0u64;
     let mut last_text = String::new();
     let mut audio_said = false;
     loop {
@@ -179,12 +183,14 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         {
             println!("    card: {} | {} | {}", c.title, c.headline, c.details.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "));
         }
-        // Rust note: `skip` on a VecDeque's iterator resumes where the last
-        // print stopped (the log only grows until it is trimmed at 300).
-        for line in v.log.iter().skip(printed_log) {
+        // The new lines are the deque's last `log_total - printed_log` (it
+        // keeps only the latest 300: counting its length stopped the
+        // printing once it was full).
+        let new = (v.log_total - printed_log).min(v.log.len() as u64) as usize;
+        for line in v.log.iter().skip(v.log.len() - new) {
             println!("    {line}");
         }
-        printed_log = v.log.len();
+        printed_log = v.log_total;
         if let Some(t) = v.text.values().next()
             && *t != last_text
         {

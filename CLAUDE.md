@@ -29,6 +29,7 @@ cargo run --release -p declab-pmr --example dmr_sweep -- 4 800   # DMR sensitivi
 cargo run --release -p declab-pmr --example dmr_file -- IN.cf32   # every DMR event of a real 24 kS/s channel, and the counters
 cargo run --release -p declab-pmr --example nxdn_make -- out/sim_nxdn.cf32 12 [96]   # simulated NXDN48 (or NXDN96) calls
 cargo run --release -p declab-gui -- out/sim_nxdn.cf32 --rate 48000 --decoder voice --screenshot out/x.png --after 6
+cargo run --release -p declab-cli -- run voice --radio airspy --freq FREQ --offset OFFSET --record-channel out/x.cf32 --seconds 1800   # long recording of just the decoder's channel (cf32 at its rate, 72 kS/s for voice); replay with --file out/x.cf32 --rate 72000
 cargo run --release -p declab-pmr --example nxdn_file -- IN.cf32 [96] [bits]   # every NXDN frame of a real 24 kS/s channel: LICH, pass or not, eye SNR (bits: the frame's bits)
 cargo run --release -p declab-pmr --example nxdn_sweep -- 4 800 - [96]   # NXDN48 (or 96) sensitivity, SNR gate on noise, CPU
 cargo run --release -p declab-pmr --example p25_make -- out/sim_p25.cf32 14   # simulated P25 call and control channel (then --decoder voice)

@@ -151,6 +151,9 @@ pub struct DecoderView {
     /// The decoder's other scopes, the latest points of each.
     pub scopes: Vec<(&'static str, Vec<Iq>)>,
     pub log: VecDeque<String>,
+    /// Lines ever logged (the deque keeps the latest few hundred), so a
+    /// reader can tell how many are new.
+    pub log_total: u64,
     pub services: Vec<Service>,
     /// Talkgroups and radios heard (digital voice), the latest list.
     pub heard: Option<Heard>,
@@ -257,6 +260,8 @@ struct VfoShared {
     pcap_file: Mutex<Option<std::io::BufWriter<std::fs::File>>>,
     /// The decoder's sound to a WAV file (`Host::write_audio`).
     wav_file: Mutex<Option<WavOut>>,
+    /// The channel IQ the decoder is fed, as cf32 (`Host::record_channel`).
+    chan_file: Mutex<Option<std::io::BufWriter<std::fs::File>>>,
     /// This VFO's volume against the master (0 mutes it), `f32` bits.
     gain: AtomicU32,
     /// The primary VFO may retune the radio when its decoder asks (a
@@ -274,6 +279,7 @@ impl VfoShared {
             ts_file: Mutex::new(None),
             pcap_file: Mutex::new(None),
             wav_file: Mutex::new(None),
+            chan_file: Mutex::new(None),
             gain: AtomicU32::new(1.0f32.to_bits()),
             drives_source: AtomicBool::new(drives_source),
         }
@@ -548,6 +554,23 @@ impl Host {
             w.write_all(&65535u32.to_le_bytes())?;
             w.write_all(&101u32.to_le_bytes())?;
             *f = Some(w);
+        }
+        Ok(())
+    }
+
+    /// Write the focused VFO's channel, as its decoder receives it (filtered,
+    /// at the decoder's rate), to `path` as cf32 (interleaved little-endian
+    /// f32 I and Q), or stop. A long recording of one channel costs a few
+    /// hundred kB/s where the radio's own stream costs 20 MB/s.
+    pub fn record_channel(&self, path: Option<PathBuf>) -> std::io::Result<()> {
+        use std::io::Write;
+        let Some(v) = self.focused() else { return Ok(()) };
+        let mut f = v.vs.chan_file.lock().unwrap();
+        if let Some(mut old) = f.take() {
+            old.flush()?;
+        }
+        if let Some(p) = path {
+            *f = Some(std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(p)?));
         }
         Ok(())
     }
@@ -1126,6 +1149,13 @@ fn worker_thread(
                     live: meta.live,
                 };
                 first_sample += iq.len() as u64;
+                if let Some(f) = vs.chan_file.lock().unwrap().as_mut() {
+                    use std::io::Write;
+                    for z in iq {
+                        let _ = f.write_all(&z.re.to_le_bytes());
+                        let _ = f.write_all(&z.im.to_le_bytes());
+                    }
+                }
                 decoder.process(&block, &mut sink);
                 in_flight_done = true;
             }
@@ -1234,6 +1264,7 @@ fn worker_thread(
             }
         }
         for line in sink.log.drain(..) {
+            v.log_total += 1;
             v.log.push_back(line);
             if v.log.len() > MAX_LOG {
                 v.log.pop_front();
