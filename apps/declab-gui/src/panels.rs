@@ -89,7 +89,9 @@ pub const MINI_H: f32 = 64.0;
 /// decoder's card beside it, in the style of DecDVB-T's and DecSAT's cards.
 ///
 /// `which` names the scope shown: "" for the channel IQ, else one of the
-/// decoder's own (`DecoderView::scopes`).
+/// decoder's own (`DecoderView::scopes`). `in_app`: the decoder's transport
+/// stream has a service with pictures, so "▶ In app" goes under the scope
+/// (as on DecSAT's VFO panel); a click comes back as [`Pick::InApp`].
 // Everything the box shows comes in as arguments; a struct would only rename them.
 #[allow(clippy::too_many_arguments)]
 pub fn scope_and_card(
@@ -102,7 +104,8 @@ pub fn scope_and_card(
     minis: &[Mini],
     selected: Option<u32>,
     services_here: bool,
-) -> Option<u32> {
+    in_app: bool,
+) -> Option<Pick> {
     let mut pick = None;
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
@@ -127,6 +130,18 @@ pub fn scope_and_card(
             if let Some(m) = minis.iter().find(|m| m.name == which.as_str()) {
                 mini_waterfall(ui, m);
             }
+            if in_app {
+                ui.add_space(6.0);
+                if ui
+                    .button("▶ In app")
+                    .on_hover_text(
+                        "Play the service picked in the list, or else the first with pictures,                          in a window here (decoded by ffmpeg); the list's Play plays others",
+                    )
+                    .clicked()
+                {
+                    pick = Some(Pick::InApp);
+                }
+            }
         });
         ui.add_space(10.0);
         ui.vertical(|ui| {
@@ -150,7 +165,7 @@ pub fn scope_and_card(
                         let on = selected == Some(s.id) || (selected.is_none() && view.services.len() == 1);
                         let text = RichText::new(format!("{label}   {}", s.kind)).size(13.0);
                         if ui.selectable_label(on, text).clicked() {
-                            pick = Some(s.id);
+                            pick = Some(Pick::Service(s.id));
                         }
                     }
                 }
@@ -446,6 +461,8 @@ fn shown_service(view: &DecoderView, selected: Option<u32>) -> Option<u32> {
 /// What a click in the services panel asks for.
 pub enum Pick {
     Service(u32),
+    /// The card's "▶ In app": play the TS's service with pictures.
+    InApp,
     /// Tune the channel here (a nearby cell's carrier), Hz.
     Tune(f64),
 }

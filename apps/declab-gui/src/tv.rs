@@ -29,6 +29,8 @@ pub struct Tv {
     pub selected: Option<u16>,
     /// A service to play as soon as its streams are known (`--play`).
     pub play_when_ready: Option<u16>,
+    /// Press "▶ In app" as soon as it shows (`--in-app`).
+    pub in_app_when_ready: bool,
     /// Why the last request came to nothing.
     pub note: String,
     /// The IP datagrams (GSE) go to this PCAP while it is `Some`.
@@ -52,6 +54,7 @@ impl Tv {
             pending_vlc: None,
             selected: None,
             play_when_ready: None,
+            in_app_when_ready: false,
             note: String::new(),
             pcap: None,
         }
@@ -125,6 +128,13 @@ impl Tv {
             self.play_when_ready = None;
             self.play(host, name, sid, None, None);
         }
+        if self.in_app_when_ready
+            && let Some(sid) = self.in_app_service()
+            && self.ts.report.programmes.iter().any(|p| p.number == sid && p.service_type.is_some())
+        {
+            self.in_app_when_ready = false;
+            self.in_app(host, name);
+        }
         if let Some(sid) = self.pending_vlc
             && let Some((addr, _)) = &self.ts.tcp
         {
@@ -163,6 +173,26 @@ impl Tv {
         self.selected = Some(sid);
         self.player.start(p, audio, subs, rx);
         self.sync_outputs(host, name);
+    }
+
+    /// What the card's "▶ In app" plays (DecSAT's VFO panel button): the
+    /// service picked in the list if it has pictures, else the first service
+    /// that has. `None` (no button) until a PMT names a video stream.
+    pub fn in_app_service(&self) -> Option<u16> {
+        let ps = &self.ts.report.programmes;
+        let pictures = |p: &&decdvbt_ts::Programme| player::video_pid(p).is_some();
+        self.selected
+            .and_then(|s| ps.iter().filter(pictures).find(|p| p.number == s))
+            .or_else(|| ps.iter().find(pictures))
+            .map(|p| p.number)
+    }
+
+    /// The card's "▶ In app": play [`Tv::in_app_service`], or bring its
+    /// window up if it is playing.
+    pub fn in_app(&mut self, host: &Host, name: &str) {
+        if let Some(sid) = self.in_app_service() {
+            self.watch(host, name, sid);
+        }
     }
 
     /// A service picked in the list or the guide: play it, unless it is

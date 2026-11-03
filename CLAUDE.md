@@ -41,9 +41,14 @@ cargo run --release -p declab-cli -- run voice --radio rtlsdr --freq 439.5M --ga
 cargo run --release -p declab-cli -- run dab --file ../DecDAB/captures/11d_long_222.064MHz_4.096Msps_amp.cs8 --service "classic fm" --wav out/x.wav --card   # DAB/DAB+ (DecDAB's captures); AAC by libxaac
 cargo run --release -p declab-gui -- ../DecDAB/captures/11d_long_222.064MHz_4.096Msps_amp.cs8 --decoder dab --screenshot out/x.png --after 12
 cargo run --release -p declab-cli -- run wfm --radio airspy --freq 98M --bias-tee   # antenna-port power for an LNA (off unless given; also --bias-tee on declab-gui)
-cargo run --release -p declab-decoders --example sat_make -- out/sim_sat_gse.cf32 gse 10 6 -120000   # simulated satellite carrier (s2ts, s2x, gse, dvbs), 8 MS/s
+cargo run --release -p declab-decoders --example sat_make -- out/sim_sat_gse.cf32 gse 10 6 -120000   # simulated satellite carrier (s2ts, s2tv, s2x, gse, dvbs), 8 MS/s
 cargo run --release -p declab-cli -- run sat --file out/sim_sat_gse.cf32 --rate 8M --bandwidth 3M --pcap out/x.pcap --ts out/x.ts --set symbol_rate=2000000 --card   # DVB-S/S2/S2X; GSE to PCAP, TS to a file
 cargo run --release -p declab-gui -- out/sim_sat_s2x.cf32 --rate 8M --decoder sat --chan 0 --screenshot out/x.png --after 7
+ffmpeg -ss 20 -t 40 -i ../DecDVB-T/out/c23_120.ts -map 0:p:4164:v -map 0:p:4164:a:0 -map 0:p:4164:s -c copy -f mpegts -muxrate 4355051 -mpegts_service_id 4164 -y out/sat_tv.ts   # one service, constant rate at s2tv's TS rate
+cargo run --release -p declab-decoders --example sat_make -- out/sim_sat_tv.cs8 s2tv 14 30 -150000 2e6 out/sat_tv.ts   # DVB-S2 8PSK 3/4 carrying it (cs8 to keep it small)
+cargo run --release -p declab-gui -- out/sim_sat_tv.cs8 --rate 8M --decoder sat --chan 0 --play 4164 --screenshot out/x.png --after 15   # the player on a satellite service
+cargo run --release -p declab-gui -- out/sim_sat_tv.cs8 --rate 8M --decoder sat --chan 0 --in-app --screenshot out/x.png --after 15   # the card's "▶ In app" pressed for you
+cargo run --release -p declab-gui -- ../DecDVB-T/captures/c30_546.000MHz_10Msps_amp.cs8 --decoder dvbt --chan 546M --play 17536 --screenshot out/x.png --after 15   # the player on DVB-T2 HD (C23: c23_490.000MHz_10Msps_amp120.cs8, 490M, --play 4164)
 cargo run --release -p declab-cli --example retune_probe -- FILE voice HZ_A HZ_B 3   # retune a running decoder from one carrier to another mid-file, as a click does; prints the view each 0.25 s
 cargo run --release -p declab-cli --example vfo_probe -- FILE pagers HZ_1 voice HZ_2   # two VFOs on a recording, as the GUI runs them; both views each 0.5 s
 cargo test -p declab-decoders --release relock_after_retune -- --ignored --nocapture   # Digital voice: time to relock after a retune or a drag, each mode pair

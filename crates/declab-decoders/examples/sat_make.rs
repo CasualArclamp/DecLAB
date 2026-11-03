@@ -3,12 +3,20 @@
 //! symbol, written as cf32 (the sample rate is 4 × the symbol rate):
 //!
 //! ```text
-//! cargo run --release -p declab-decoders --example sat_make -- OUT KIND [ES_N0_DB] [SECONDS] [OFFSET_HZ] [RS]
-//! KIND: s2ts   DVB-S2 8PSK 3/4, pilots, a transport stream
+//! cargo run --release -p declab-decoders --example sat_make -- OUT KIND [ES_N0_DB] [SECONDS] [OFFSET_HZ] [RS] [TS]
+//! KIND: s2ts   DVB-S2 QPSK 1/2, pilots, a transport stream
+//!       s2tv   DVB-S2 8PSK 3/4, pilots, a transport stream (room for TV)
 //!       s2x    DVB-S2X (QPSK 13/45), a transport stream
 //!       gse    DVB-S2 QPSK 1/2, GSE carrying IP (DNS and multicast radio)
 //!       dvbs   DVB-S QPSK 3/4, a transport stream
 //! ```
+//!
+//! OUT ending `.cs8` is written as 8-bit IQ (a quarter of cf32's size, for
+//! long files). TS (s2ts, s2tv and dvbs) is a transport stream file sent, looped,
+//! in place of the test packets, so the player has a programme to play. It
+//! goes out at the channel's TS rate (printed), so make it constant-rate at
+//! that rate, e.g. `ffmpeg -i IN.ts -map 0:p:SID -c copy -f mpegts -muxrate
+//! 4355051 OUT.ts` for s2tv at 2 MS/s.
 //!
 //! The test signals come from DecSAT's modulator (`decsat-mod`).
 
@@ -51,12 +59,21 @@ fn main() -> std::io::Result<()> {
     let seconds: f64 = a.get(4).map_or(4.0, |s| s.parse().unwrap());
     let offset: f64 = a.get(5).map_or(0.0, |s| s.parse().unwrap());
     let rs: f64 = a.get(6).map_or(2e6, |s| s.parse().unwrap());
+    let file: Vec<[u8; 188]> = a.get(7).map_or_else(Vec::new, |p| {
+        let b = std::fs::read(p).expect("TS");
+        // Rust note: `as_chunks` gives fixed-size `&[u8; 188]` packets (and
+        // a short tail, dropped).
+        b.as_chunks::<188>().0.iter().filter(|c| c[0] == 0x47).copied().collect()
+    });
+    let source = |seed| TsBbFramer::new(seed).with_packets(file.clone());
     let sps = 4;
     let n_sym = (rs * seconds) as usize;
 
     let (syms, alpha) = match kind {
         "dvbs" => {
-            let mut ts = TsBbFramer::new(3);
+            // EN 300 421 §4.4: RS(204,188) then the 3/4 inner code, 2 bits a symbol.
+            eprintln!("TS rate {:.0} bit/s", rs * 2.0 * 0.75 * 188.0 / 204.0);
+            let mut ts = source(3);
             let mut tx = DvbsTx::new(Rate::R3_4);
             let mut syms = Vec::new();
             while syms.len() < n_sym + 20_000 {
@@ -74,9 +91,23 @@ fn main() -> std::io::Result<()> {
             f.set_roll_off(RollOff::R20);
             (f.build_schedule(&[FrameSpec::s2x(144, true)], n_sym), 0.20)
         }
-        _ => {
-            let mut f = PlFramer::new(0, 3);
+        "s2tv" => {
+            // EN 302 307-1 table 5a: Kbch 48408 for 3/4, less the 80-bit
+            // BBHEADER; 8PSK: 21600 + 90 PLHEADER + 14 pilot blocks of 36.
+            eprintln!("TS rate {:.0} bit/s", rs * 48_328.0 / 22_194.0);
+            let mut f = PlFramer::new(0, 3).with_source(Box::new(source(3)));
             f.set_roll_off(RollOff::R20);
+            // MODCOD 14: 8PSK 3/4 (table 12).
+            (f.build_schedule(&[FrameSpec::new(14, false, true)], n_sym), 0.20)
+        }
+        _ => {
+            // Table 5a: Kbch 32208 for 1/2, less the BBHEADER; QPSK: 32400 +
+            // 90 + 22 pilot blocks of 36.
+            eprintln!("TS rate {:.0} bit/s", rs * 32_128.0 / 33_282.0);
+            // PlFramer::new's own source is TsBbFramer::new(seed ^ 0x7E57).
+            let mut f = PlFramer::new(0, 3).with_source(Box::new(source(3 ^ 0x7E57)));
+            f.set_roll_off(RollOff::R20);
+            // MODCOD 4: QPSK 1/2 (EN 302 307-1 table 12).
             (f.build_schedule(&[FrameSpec::new(4, false, true)], n_sym), 0.20)
         }
     };
@@ -91,12 +122,20 @@ fn main() -> std::io::Result<()> {
     let sigma = (p_sig * sps as f64 / 10f64.powf(esn0 / 10.0)).sqrt() as f32;
     let mut rng = Rng(0x5A7E_11D3);
     let w = std::f64::consts::TAU * offset / (rs * sps as f64);
+    let cs8 = out.ends_with(".cs8");
+    // cs8: full scale at 4 × the RMS, which leaves room for the peaks.
+    let k = 127.0 / (4.0 * (p_sig as f32 + sigma * sigma).sqrt());
     let mut file = std::io::BufWriter::new(std::fs::File::create(out)?);
     for (n, s) in x.iter().enumerate() {
         let ph = w * n as f64;
         let y = *s * Iq::new(ph.cos() as f32, ph.sin() as f32) + rng.gauss() * sigma;
-        file.write_all(&y.re.to_le_bytes())?;
-        file.write_all(&y.im.to_le_bytes())?;
+        if cs8 {
+            let q = |v: f32| (v * k).round().clamp(-127.0, 127.0) as i8 as u8;
+            file.write_all(&[q(y.re), q(y.im)])?;
+        } else {
+            file.write_all(&y.re.to_le_bytes())?;
+            file.write_all(&y.im.to_le_bytes())?;
+        }
     }
     file.flush()?;
     eprintln!("wrote {out}: {kind}, {:.1} s, Es/N0 {esn0} dB, {} S/s", x.len() as f64 / (rs * sps as f64), rs * sps as f64);

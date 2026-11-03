@@ -109,6 +109,9 @@ pub struct TsBbFramer {
     radio: TestRadio,
     mpe_queue: std::collections::VecDeque<[u8; TS_LEN]>,
     mpe_cc: u8,
+    /// A transport stream to send in place of the test packets, looped
+    /// (empty: the test packets).
+    file: Vec<[u8; TS_LEN]>,
 }
 
 /// The PID carrying IP (the test radio) in MPE.
@@ -142,7 +145,16 @@ impl TsBbFramer {
             radio: TestRadio::new([239, 255, 1, 2], "DecSAT test radio (MPE)"),
             mpe_queue: Default::default(),
             mpe_cc: 0,
+            file: Vec::new(),
         }
+    }
+
+    /// Send these packets, over and over, in place of the test packets: a
+    /// real programme for the player. They go out at the channel's rate, so
+    /// a constant-rate stream padded to it plays in real time.
+    pub fn with_packets(mut self, packets: Vec<[u8; TS_LEN]>) -> Self {
+        self.file = packets;
+        self
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -159,6 +171,9 @@ impl TsBbFramer {
     pub fn packet(&mut self) -> [u8; TS_LEN] {
         let n = self.seq;
         self.seq += 1;
+        if !self.file.is_empty() {
+            return self.file[(n % self.file.len() as u64) as usize];
+        }
         let k = (n % 40) as usize;
         if k < self.tables.len() {
             let (pid, ref sec) = self.tables[k];

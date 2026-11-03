@@ -84,6 +84,9 @@ struct Options {
     tab: data_tabs::Tab,
     /// `--play SID`: play this service once its streams are known.
     play: Option<u16>,
+    /// `--in-app`: press the card's "▶ In app" once there is a service with
+    /// pictures.
+    in_app: bool,
     /// `--window ts|epg`: open with that window up.
     window: Option<String>,
     /// `--settings`: open with the Settings window up (for screenshots).
@@ -169,6 +172,7 @@ impl Options {
                 }
                 "--rail-closed" => o.rail_closed = true,
                 "--bias-tee" => o.bias_tee = true,
+                "--in-app" => o.in_app = true,
                 "--play" => {
                     o.play = Some(
                         value("a service id")?
@@ -520,6 +524,7 @@ impl App {
                     t.mute();
                 }
                 t.play_when_ready = opts.play;
+                t.in_app_when_ready = opts.in_app;
                 t
             },
             data_tabs: data_tabs::DataTabs::opening_on(opts.tab),
@@ -2018,9 +2023,10 @@ impl eframe::App for App {
                                     // The services go under the card when the right
                                     // column holds a waterfall; else they have it.
                                     has_big,
+                                    self.tv.in_app_service().is_some(),
                                 );
-                                if let Some(id) = pick {
-                                    picked = Some(panels::Pick::Service(id));
+                                if pick.is_some() {
+                                    picked = pick;
                                 }
                             })
                         },
@@ -2096,6 +2102,11 @@ impl eframe::App for App {
                         }
                     }
                     Some(panels::Pick::Tune(hz)) => self.tune_exact(hz),
+                    Some(panels::Pick::InApp) => {
+                        if let Some(h) = &self.host {
+                            self.tv.in_app(h, &stream_name);
+                        }
+                    }
                     None => {}
                 }
             });
