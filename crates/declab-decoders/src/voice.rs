@@ -186,6 +186,17 @@ impl Decoder for Voice {
             for line in m.sink.log.drain(..) {
                 out.log(format!("{} {line}", m.name));
             }
+            // Data from any mode: it passed its own CRC (or the mode's
+            // decode), so it is on the air even before the card says so.
+            for mut p in m.sink.packets.drain(..) {
+                p.channel = format!("{} {}", m.name, p.channel);
+                out.packets.push(p);
+            }
+            for mut l in m.sink.locations.drain(..) {
+                l.channel = format!("{} {}", m.name, l.channel);
+                out.locations.push(l);
+            }
+            out.ip.append(&mut m.sink.ip);
         }
         // Keep the mode that is on the air while it stays locked; else take
         // whichever has locked.

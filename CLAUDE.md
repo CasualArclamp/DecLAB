@@ -22,6 +22,9 @@ cargo run --release -p declab-gui -- ..\DecPagers\out\sim_pagers_153.000MHz_1Msp
 cargo run -p declab-gui --example make_icon   # redraws apps/declab-gui/assets/icon.ico and icon-256.png (preview out/icon-preview.png)
 cargo run --release -p declab-pmr --example dmr_make -- out/sim_dmr.cf32 15   # simulated DMR repeater: call, Tier III CSBKs, LRRP
 cargo run --release -p declab-gui -- out/sim_dmr.cf32 --rate 48000 --decoder voice --screenshot out/x.png --after 8   # Digital voice: DMR, NXDN48, NXDN96, P25, TETRA detected by itself
+cargo run --release -p declab-gui -- out/sim_dmr.cf32 --rate 48000 --decoder voice --tab hex --screenshot out/x.png --after 9   # Digital voice's data tabs: heard, hex, lrrp, ip
+cargo run --release -p declab-cli -- run nfm --radio airspy --freq 446.05M --set squelch=noise --set squelch_noise=10   # squelch: off, level, snr or noise, each with its threshold
+cargo test -p declab-decoders --release squelch_sweep -- --ignored --nocapture   # each squelch method's reading against C/N
 cargo run --release -p declab-pmr --example dmr_sweep -- 4 800   # DMR sensitivity vs C/N (and CPU)
 cargo run --release -p declab-pmr --example dmr_file -- IN.cf32   # every DMR event of a real 24 kS/s channel, and the counters
 cargo run --release -p declab-pmr --example nxdn_make -- out/sim_nxdn.cf32 12 [96]   # simulated NXDN48 (or NXDN96) calls

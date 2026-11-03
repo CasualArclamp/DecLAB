@@ -30,6 +30,7 @@ use declab_api::{
 use declab_dsp::{Fir, lowpass};
 
 use crate::analog_rds::{RdsDecoder, pty_name};
+use crate::analog_squelch::{self as squelch, Squelch};
 
 /// The audio the decoder hands back, Hz.
 const PCM_RATE: u32 = 48_000;
@@ -105,9 +106,8 @@ struct Settings {
     /// Broadcast FM: stereo when the pilot allows, or always mono. `"stereo"`
     /// = `"auto"` | `"mono"`.
     stereo: bool,
-    /// Mute the audio while the channel is weaker than this, dBFS. `"squelch"`
-    /// = a number or `"off"`.
-    squelch_dbfs: Option<f64>,
+    /// The squelch: its method and thresholds (see `analog_squelch`).
+    squelch: squelch::Settings,
     /// CW: the note a carrier on the dial makes, Hz. `"pitch"`.
     pitch_hz: f64,
 }
@@ -121,17 +121,19 @@ impl Settings {
                 _ => 0.0,
             },
             stereo: true,
-            squelch_dbfs: None,
+            squelch: squelch::Settings::default(),
             pitch_hz: 800.0,
         }
     }
 
     fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        if self.squelch.set(key, value)? {
+            return Ok(());
+        }
         let num = || value.parse::<f64>().map_err(|_| format!("{key}: {value:?} is not a number"));
         match key {
             "deemph" => self.deemph_us = num()?.clamp(0.0, 2000.0),
             "stereo" => self.stereo = value != "mono",
-            "squelch" => self.squelch_dbfs = if value == "off" { None } else { Some(num()?) },
             "pitch" => self.pitch_hz = num()?.clamp(200.0, 2000.0),
             _ => return Err(format!("no setting {key:?}")),
         }
@@ -206,6 +208,8 @@ struct Analog {
     last_station: Option<String>,
     last_text: Option<String>,
     settings: Settings,
+    /// The squelch, made at the first block (it needs the rate).
+    squelch: Option<Squelch>,
     /// How much of the stereo difference is let through, 0..1.
     blend: f32,
     /// RDS groups and samples at the start of the rate's window.
@@ -259,6 +263,7 @@ impl Analog {
             last_station: None,
             last_text: None,
             settings: Settings::for_mode(mode),
+            squelch: None,
             blend: 0.0,
             rate_mark: (0, 0),
             samples: 0,
@@ -271,6 +276,21 @@ impl Analog {
             mpx_n: 0,
             mpx_rows: Vec::new(),
         }
+    }
+
+    /// The squelch for the card: its method, reading against threshold and
+    /// state ("SNR 14.2 / 6 dB, open").
+    fn squelch_line(&self) -> Option<String> {
+        let m = self.settings.squelch.method?;
+        let sq = self.squelch.as_ref()?;
+        Some(format!(
+            "{} {:.1} / {:.0} {}, {}",
+            m.label(),
+            sq.metric,
+            self.settings.squelch.threshold(m),
+            m.unit(),
+            if sq.is_open() { "open" } else { "shut" }
+        ))
     }
 
     /// The card: for WFM everything RDS has said; for the others the level.
@@ -287,8 +307,8 @@ impl Analog {
         let kv = |k: &str, v: String| (k.to_string(), v);
         if self.mode != Mode::Wfm {
             let mut details = vec![kv("level", format!("{level:.1} dBFS"))];
-            if let Some(sq) = self.settings.squelch_dbfs {
-                details.push(kv("squelch", format!("{sq:.0} dBFS")));
+            if let Some(sq) = self.squelch_line() {
+                details.push(kv("squelch", sq));
             }
             if self.settings.deemph_us > 0.0 {
                 details.push(kv("de-emphasis", format!("{:.0} µs", self.settings.deemph_us)));
@@ -302,7 +322,8 @@ impl Analog {
                 gauge: Some(Gauge {
                     label: "level".into(),
                     value_db: level as f32 + 100.0,
-                    need_db: self.settings.squelch_dbfs.map(|s| s as f32 + 100.0),
+                    need_db: (self.settings.squelch.method == Some(squelch::Method::Level))
+                        .then_some(self.settings.squelch.level_dbfs as f32 + 100.0),
                     need_label: "squelch".into(),
                     range: (0.0, 100.0),
                 }),
@@ -323,6 +344,9 @@ impl Analog {
             let (tp, ta) = r.tp_ta();
             details.push(kv("TP / TA", format!("{} / {}", u8::from(tp), u8::from(ta))));
             details.push(kv("content", if r.music() { "music" } else { "speech" }.to_string()));
+        }
+        if let Some(sq) = self.squelch_line() {
+            details.push(kv("squelch", sq));
         }
         details.push(kv("RDS sync", if r.synced() { "held" } else { "searching" }.to_string()));
         details.push(kv("RDS Es/N0", format!("{:.1} dB", r.snr_db())));
@@ -516,9 +540,18 @@ impl Decoder for Analog {
         // De-emphasis: a pole at 1/(2πτ) (50 µs: 3183 Hz); τ = 0 leaves it out.
         let tau = self.settings.deemph_us * 1e-6;
         let de_k = if tau > 0.0 { coeff(1.0 / (TAU * tau), rate) } else { 1.0 };
-        let block_energy: f64 = iq.iter().map(|x| x.norm_sqr() as f64).sum();
-        let block_db = 10.0 * (block_energy / iq.len() as f64).max(1e-20).log10();
-        let muted = self.settings.squelch_dbfs.is_some_and(|sq| block_db < sq);
+        // The squelch: AM listens to the envelope, FM to the discriminator.
+        let sq_method = self.settings.squelch.method;
+        let sq_threshold = sq_method.map_or(0.0, |m| self.settings.squelch.threshold(m) as f32);
+        if sq_method.is_some() && self.squelch.is_none() {
+            let det = match mode {
+                Mode::Wfm => squelch::Detector::Wide,
+                Mode::Nfm => squelch::Detector::Narrow,
+                _ => squelch::Detector::Envelope,
+            };
+            self.squelch = Some(Squelch::new(det, rate));
+        }
+        let mut sq_gain = 1.0f32;
         let dc_k = coeff(15.0, rate);
         let agc_k = coeff(12.0, rate);
         let pilot_k = coeff(500.0, rate);
@@ -555,11 +588,15 @@ impl Decoder for Analog {
             let gain = 0.6 / self.power.max(EPS).sqrt();
             let mut left: f32;
             let mut right: f32;
+            let delta = x * self.previous.conj();
+            let step = if is_fm { delta.im.atan2(delta.re) } else { 0.0 };
+            // Rust note: `if let (Some(m), Some(sq))` matches both at once.
+            if let (Some(m), Some(sq)) = (sq_method, self.squelch.as_mut()) {
+                sq_gain = sq.tick(m, sq_threshold, amp2, step);
+            }
             if is_fm {
-                let delta = x * self.previous.conj();
                 let deviation = if mode == Mode::Nfm { 5_000.0 } else { 75_000.0 };
-                let multiplex =
-                    (delta.im.atan2(delta.re) * (rate / (TAU * deviation)) as f32).clamp(-4.0, 4.0);
+                let multiplex = (step * (rate / (TAU * deviation)) as f32).clamp(-4.0, 4.0);
                 self.fm_dc += dc_k * (multiplex - self.fm_dc);
                 let multiplex = multiplex - self.fm_dc;
                 if mode == Mode::Wfm && rate >= 140_000.0 {
@@ -634,16 +671,13 @@ impl Decoder for Analog {
             self.audio_phase += PCM_RATE as f64 / rate;
             if self.audio_phase >= 1.0 {
                 self.audio_phase -= 1.0;
-                self.pcm.push((left * 0.7).clamp(-1.0, 1.0));
-                self.pcm.push((right * 0.7).clamp(-1.0, 1.0));
+                self.pcm.push((left * 0.7 * sq_gain).clamp(-1.0, 1.0));
+                self.pcm.push((right * 0.7 * sq_gain).clamp(-1.0, 1.0));
             }
         }
         self.count += iq.len() as u64;
         if !self.mpx_buf.is_empty() {
             self.mpx_spectrum(rate);
-        }
-        if muted {
-            self.pcm.fill(0.0);
         }
         if !self.pcm.is_empty() {
             out.audio.push(Audio {
@@ -683,10 +717,15 @@ mod panel {
     use declab_api::{Command, Panel};
     use egui::Ui;
 
-    use super::{Mode, Settings};
+    use super::{Mode, Settings, squelch};
+
+    /// The modes with a squelch: AM and FM.
+    fn has_squelch(mode: Mode) -> bool {
+        matches!(mode, Mode::Am | Mode::Nfm | Mode::Wfm)
+    }
 
     pub fn for_mode(mode: Mode) -> Option<Box<dyn Panel>> {
-        matches!(mode, Mode::Wfm | Mode::Nfm | Mode::Cw)
+        matches!(mode, Mode::Am | Mode::Wfm | Mode::Nfm | Mode::Cw)
             .then(|| Box::new(AnalogPanel { mode, s: Settings::for_mode(mode) }) as Box<dyn Panel>)
     }
 
@@ -714,8 +753,10 @@ mod panel {
             if self.mode == Mode::Wfm {
                 put("stereo", if self.s.stereo { "auto" } else { "mono" }.into());
             }
-            if self.mode == Mode::Nfm {
-                put("squelch", self.s.squelch_dbfs.map_or("off".into(), |q| format!("{q:.0}")));
+            if has_squelch(self.mode) {
+                for (k, val) in self.s.squelch.pairs() {
+                    put(k, val);
+                }
             }
             if self.mode == Mode::Cw {
                 put("pitch", format!("{:.0}", self.s.pitch_hz));
@@ -759,25 +800,42 @@ mod panel {
                         });
                     ui.end_row();
                 }
-                if self.mode == Mode::Nfm {
+                if has_squelch(self.mode) {
+                    // Off or one of three methods, and that method's
+                    // threshold (each keeps its own).
                     ui.label("Squelch");
-                    let mut on = self.s.squelch_dbfs.is_some();
-                    let mut level = self.s.squelch_dbfs.unwrap_or(-60.0);
-                    ui.horizontal(|ui| {
-                        let a = ui.checkbox(&mut on, "").changed();
-                        let b = ui
-                            .add_enabled(
-                                on,
-                                egui::Slider::new(&mut level, -100.0..=-20.0).suffix(" dBFS").integer(),
-                            )
-                            .changed();
-                        if a || b {
-                            self.s.squelch_dbfs = on.then_some(level);
-                            let v = if on { format!("{level:.0}") } else { "off".into() };
-                            set(commands, "squelch", v);
-                        }
-                    });
+                    let sq = &mut self.s.squelch;
+                    let name = |m: Option<squelch::Method>| m.map_or("off", |m| m.label());
+                    egui::ComboBox::from_id_salt("squelch")
+                        .selected_text(name(sq.method))
+                        .show_ui(ui, |ui| {
+                            for m in std::iter::once(None).chain(squelch::Method::ALL.map(Some)) {
+                                let tip = match m {
+                                    None => "audio always on",
+                                    Some(squelch::Method::Level) => "channel power, dBFS: moves with the gain",
+                                    Some(squelch::Method::Snr) => "carrier-to-noise from the signal's moments (M2M4); AM's modulation reads a few dB low",
+                                    Some(squelch::Method::Noise) => "quieting of the detector's noise above the audio, dB below noise alone",
+                                };
+                                if ui.selectable_label(sq.method == m, name(m)).on_hover_text(tip).clicked() {
+                                    sq.method = m;
+                                    set(commands, "squelch", m.map_or("off", |m| m.key()).into());
+                                }
+                            }
+                        });
                     ui.end_row();
+                    if let Some(m) = sq.method {
+                        ui.label("Opens at");
+                        let (lo, hi) = m.range();
+                        let t = sq.threshold_mut(m);
+                        if ui
+                            .add(egui::Slider::new(t, lo..=hi).suffix(format!(" {}", m.unit())).integer())
+                            .changed()
+                        {
+                            let key = format!("squelch_{}", m.key());
+                            set(commands, &key, format!("{t:.0}"));
+                        }
+                        ui.end_row();
+                    }
                 }
                 if self.mode == Mode::Cw {
                     ui.label("Note");
@@ -839,7 +897,9 @@ mod tests {
             .into_iter()
             .filter_map(|c| if let Command::Set { key, value } = c { Some((key, value)) } else { None })
             .collect();
-        assert!(got.contains(&("squelch".into(), "-55".into())), "{got:?}");
+        // An older numeric setting comes back as the level method.
+        assert!(got.contains(&("squelch".into(), "level".into())), "{got:?}");
+        assert!(got.contains(&("squelch_level".into(), "-55".into())), "{got:?}");
         assert!(got.contains(&("deemph".into(), "750".into())), "{got:?}");
         // And a decoder given them takes them.
         let mut d = Analog::new(Mode::Nfm);
@@ -847,8 +907,93 @@ mod tests {
         for (key, value) in got {
             d.command(Command::Set { key, value }, &mut sink);
         }
-        assert_eq!(d.settings.squelch_dbfs, Some(-55.0));
+        assert_eq!(d.settings.squelch.method, Some(squelch::Method::Level));
+        assert_eq!(d.settings.squelch.level_dbfs, -55.0);
         assert_eq!(d.settings.deemph_us, 750.0);
+    }
+
+    /// What each squelch method costs broadcast FM, fastest of 5 over 10 s
+    /// of signal:
+    /// `cargo test -p declab-decoders --release squelch_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn squelch_cost() {
+        let rate = 384_000.0;
+        let iq = wfm(10.0, 0.05, |t| 0.5 * (TAU * 1_000.0 * t).sin());
+        for sq in ["off", "level", "snr", "noise"] {
+            let best = (0..5)
+                .map(|_| {
+                    let mut d = Analog::new(Mode::Wfm);
+                    let mut sink = Sink::default();
+                    d.command(Command::Set { key: "squelch".into(), value: sq.into() }, &mut sink);
+                    let t = std::time::Instant::now();
+                    for chunk in iq.chunks(16_384) {
+                        sink.clear();
+                        let block = Block {
+                            iq: chunk,
+                            tuning: Tuning { center_hz: 0.0, sample_rate: rate, generation: 0 },
+                            first_sample: 0,
+                            dropped_before: 0,
+                            live: false,
+                        };
+                        d.process(&block, &mut sink);
+                    }
+                    t.elapsed().as_secs_f64()
+                })
+                .fold(f64::MAX, f64::min);
+            println!("{sq:6} {:5.2} % of a core", best / 10.0 * 100.0);
+        }
+    }
+
+    /// NFM with the noise squelch: a second of noise is silent, a carrier
+    /// with a tone after it is heard.
+    #[test]
+    fn noise_squelch_mutes_noise_and_passes_a_call() {
+        let rate = 48_000.0;
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        let mut gauss = move || {
+            // Sum of 12 uniforms less 6: near enough Gaussian for a test.
+            (0..12)
+                .map(|_| {
+                    s ^= s << 13;
+                    s ^= s >> 7;
+                    s ^= s << 17;
+                    (s >> 11) as f32 / (1u64 << 53) as f32
+                })
+                .sum::<f32>()
+                - 6.0
+        };
+        let mut ph = 0.0f64;
+        let iq: Vec<Iq> = (0..96_000)
+            .map(|n| {
+                let noise = Iq::new(gauss(), gauss()) * 0.02;
+                if n < 48_000 {
+                    return noise;
+                }
+                ph += TAU * 3_000.0 * (TAU * 1_000.0 * n as f64 / rate).sin() / rate;
+                noise + Iq::from_polar(0.3, ph as f32)
+            })
+            .collect();
+        let mut d = Analog::new(Mode::Nfm);
+        let mut sink = Sink::default();
+        d.command(Command::Set { key: "squelch".into(), value: "noise".into() }, &mut sink);
+        let mut audio = Vec::new();
+        for chunk in iq.chunks(4_800) {
+            sink.clear();
+            let block = Block {
+                iq: chunk,
+                tuning: Tuning { center_hz: 0.0, sample_rate: rate, generation: 0 },
+                first_sample: 0,
+                dropped_before: 0,
+                live: false,
+            };
+            d.process(&block, &mut sink);
+            audio.extend(sink.audio.iter().flat_map(|a| a.samples.iter().step_by(2).copied()));
+        }
+        let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+        // The noise half, and the call's half after 50 ms to open.
+        assert!(rms(&audio[..48_000]) < 1e-4, "{}", rms(&audio[..48_000]));
+        assert!(tone(&audio[50_400..], 1_000.0) > 0.05, "{}", tone(&audio[50_400..], 1_000.0));
     }
 
     #[test]

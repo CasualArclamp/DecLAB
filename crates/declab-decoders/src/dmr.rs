@@ -19,8 +19,8 @@ use std::collections::VecDeque;
 use crate::heard::HeardList;
 
 use declab_api::{
-    Audio, Block, Card, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq, Lock,
-    Sink,
+    Audio, Block, Card, DataPacket, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec,
+    Iq, Location, Lock, Sink,
 };
 use declab_pmr::dmr::data::Packet;
 use declab_pmr::dmr::lrrp::{self, Lrrp};
@@ -355,11 +355,32 @@ impl Dmr {
             h.dst.to_string()
         };
         let crc = if p.crc_ok { "" } else { " (CRC failed)" };
-        match lrrp::udp(p) {
+        // The whole packet for the hex dump, the datagram for the IP view.
+        let ip = |a: [u8; 4]| format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3]);
+        let u = lrrp::udp(p);
+        let kind = match &u {
+            Some(u) => format!("UDP {}:{} → {}:{}", ip(u.src), u.sport, ip(u.dst), u.dport),
+            None => format!("SAP {} {:?}", h.sap, h.format),
+        };
+        out.packets.push(DataPacket {
+            at_s: self.now_s,
+            channel: slot_name(slot).into(),
+            from: h.src.to_string(),
+            to: to.clone(),
+            kind,
+            crc_ok: p.crc_ok,
+            bytes: p.data.clone(),
+        });
+        if let Some(d) = lrrp::datagram(p) {
+            out.ip.push(d);
+        }
+        match u {
             Some(u) if u.sport == lrrp::LRRP_PORT || u.dport == lrrp::LRRP_PORT => {
                 match Lrrp::parse(&u.payload) {
                     Some(l) => {
                         self.locations += 1;
+                        out.locations
+                            .push(location(&l, self.now_s, slot_name(slot), h.src));
                         // LRRP is Motorola's protocol (MOTOTRBO's location
                         // service); Hytera's is its own.
                         self.kind.motorola = true;
@@ -378,7 +399,6 @@ impl Dmr {
                 }
             }
             Some(u) => {
-                let ip = |a: [u8; 4]| format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3]);
                 out.log(format!(
                     "{}: UDP {}:{} → {}:{}, {} bytes, from {} to {to}{crc}",
                     slot_name(slot),
@@ -599,6 +619,33 @@ impl Decoder for Dmr {
         self.calls = [None, None];
         self.playing = None;
         self.sym_hist.clear();
+    }
+}
+
+/// An LRRP message for the GUI's location table.
+fn location(l: &Lrrp, at_s: f64, channel: &str, src: u32) -> Location {
+    let mut note = Vec::new();
+    if let Some(r) = l.response.filter(|&r| r != 0) {
+        note.push(format!("result {r:#x}"));
+    }
+    if let Some(id) = l.request_id {
+        note.push(format!("request {id}"));
+    }
+    Location {
+        at_s,
+        channel: channel.into(),
+        radio: src.to_string(),
+        message: lrrp::message_name(l.message).into(),
+        lat: l.lat,
+        lon: l.lon,
+        altitude_m: l.altitude_m,
+        radius_m: l.radius_m,
+        speed: l.speed,
+        heading_deg: l.heading_deg,
+        time: l
+            .time
+            .map(|(y, mo, d, h, mi, s)| format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02} UTC")),
+        note: note.join(", "),
     }
 }
 

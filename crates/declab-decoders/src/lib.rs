@@ -9,6 +9,7 @@ use declab_api::DecoderFactory;
 
 mod analog;
 mod analog_rds;
+mod analog_squelch;
 mod dab;
 mod dmr;
 mod dvbt;

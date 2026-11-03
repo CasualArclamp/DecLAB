@@ -282,6 +282,45 @@ pub struct Picture {
     pub bytes: Vec<u8>,
 }
 
+/// A data message off the air (a DMR data packet, a TETRA SDS), whole, for
+/// the GUI's hex dump.
+#[derive(Debug, Clone, Default)]
+pub struct DataPacket {
+    /// Seconds into the decode.
+    pub at_s: f64,
+    /// Where it came in: "DMR TS1".
+    pub channel: String,
+    pub from: String,
+    pub to: String,
+    /// What it is: "UDP 12.0.0.5:4001 → 13.0.0.1:4001", "SDS type 4".
+    pub kind: String,
+    /// Its own CRC passed.
+    pub crc_ok: bool,
+    pub bytes: Vec<u8>,
+}
+
+/// A location message (Motorola LRRP over DMR): a fix, or a request or
+/// answer without one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Location {
+    pub at_s: f64,
+    pub channel: String,
+    /// The radio the fix is of (the packet's source for a response).
+    pub radio: String,
+    /// "triggered location", "immediate location request", …
+    pub message: String,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub altitude_m: Option<f64>,
+    pub radius_m: Option<f64>,
+    pub speed: Option<f64>,
+    pub heading_deg: Option<f64>,
+    /// The fix's own time, "2026-10-30 12:34:56 UTC".
+    pub time: Option<String>,
+    /// Anything else the message said (a result code, a request ID).
+    pub note: String,
+}
+
 /// Everything a decoder hands back from one [`Decoder::process`] call. The
 /// host empties it after each call, so a decoder only pushes.
 ///
@@ -292,8 +331,13 @@ pub struct Sink {
     pub lock: Lock,
     /// 188-byte MPEG transport-stream packets (DVB-T/T2, DVB-S/S2 TS mode).
     pub ts: Vec<[u8; 188]>,
-    /// IPv4/IPv6 datagrams (DVB-S2 GSE, DVB-RCS2 return): the host writes PCAP.
+    /// IPv4/IPv6 datagrams (DVB-S2 GSE, DVB-RCS2 return, DMR packet data):
+    /// the host writes PCAP.
     pub ip: Vec<Vec<u8>>,
+    /// Data messages, whole (digital voice's packet data and SDS).
+    pub packets: Vec<DataPacket>,
+    /// Location messages (DMR's LRRP).
+    pub locations: Vec<Location>,
     /// Decoded audio (DAB/DAB+). TV audio comes out of the TS instead.
     pub audio: Vec<Audio>,
     pub pictures: Vec<Picture>,
@@ -341,6 +385,8 @@ impl Sink {
     pub fn clear(&mut self) {
         self.ts.clear();
         self.ip.clear();
+        self.packets.clear();
+        self.locations.clear();
         self.audio.clear();
         self.pictures.clear();
         self.text.clear();

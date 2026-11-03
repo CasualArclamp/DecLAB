@@ -99,6 +99,56 @@ pub fn udp(p: &Packet) -> Option<Udp> {
     }
 }
 
+/// The packet as a whole IPv4 datagram: as sent for SAP 4 (any protocol),
+/// rebuilt with a 20-byte header for UDP/IPv4 header compression (SAP 3,
+/// TS 102 361-3 clause 7.2: TTL 64, the UDP checksum left 0 as allowed).
+/// For the IP view and PCAP files.
+pub fn datagram(p: &Packet) -> Option<Vec<u8>> {
+    let d = &p.data;
+    match p.header.sap {
+        sap::IP => {
+            if d.len() < 20 || d[0] >> 4 != 4 {
+                return None;
+            }
+            let total = usize::from(u16::from_be_bytes([d[2], d[3]]));
+            (total >= 20).then(|| d[..total.min(d.len())].to_vec())
+        }
+        sap::UDP_HC => {
+            let u = udp(p)?;
+            let len = 28 + u.payload.len();
+            let mut v = Vec::with_capacity(len);
+            v.extend_from_slice(&[0x45, 0]);
+            v.extend_from_slice(&(len as u16).to_be_bytes());
+            // The IPv4 ID is sent (table 7.14's first 16 bits).
+            v.extend_from_slice(&d[..2]);
+            v.extend_from_slice(&[0, 0, 64, 17, 0, 0]);
+            v.extend_from_slice(&u.src);
+            v.extend_from_slice(&u.dst);
+            let sum = ipv4_checksum(&v);
+            v[10..12].copy_from_slice(&sum.to_be_bytes());
+            v.extend_from_slice(&u.sport.to_be_bytes());
+            v.extend_from_slice(&u.dport.to_be_bytes());
+            v.extend_from_slice(&((8 + u.payload.len()) as u16).to_be_bytes());
+            v.extend_from_slice(&[0, 0]);
+            v.extend_from_slice(&u.payload);
+            Some(v)
+        }
+        _ => None,
+    }
+}
+
+/// RFC 791's header checksum: the ones'-complement sum of 16-bit words.
+pub fn ipv4_checksum(h: &[u8]) -> u16 {
+    let mut sum: u32 = h
+        .chunks(2)
+        .map(|w| u32::from(w[0]) << 8 | u32::from(*w.get(1).unwrap_or(&0)))
+        .sum();
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
 /// The LRRP message types SDRTrunk knows.
 pub fn message_name(t: u8) -> &'static str {
     match t {
@@ -334,5 +384,46 @@ mod tests {
             l.to_string()
                 .starts_with("LRRP triggered location 37.77490, -122.41940")
         );
+    }
+
+    /// A compressed-header packet comes out as the IPv4/UDP datagram that
+    /// a whole-header packet would carry: same addresses, ports, payload,
+    /// and a header whose checksum checks.
+    #[test]
+    fn compressed_header_rebuilds_a_datagram() {
+        use super::super::data::{DataHeader, Format};
+        let h = DataHeader {
+            group: false,
+            format: Format::Unconfirmed,
+            sap: sap::UDP_HC,
+            pad: 0,
+            dst: 100,
+            src: 5678,
+            blocks: 0,
+        };
+        let mut hc = vec![0x12, 0x34, 0x00, 0x00, 0x00];
+        hc.extend_from_slice(&4001u16.to_be_bytes());
+        hc.extend_from_slice(&4001u16.to_be_bytes());
+        hc.extend_from_slice(b"hello");
+        let p = Packet {
+            header: h,
+            data: hc,
+            crc_ok: true,
+            bad_blocks: 0,
+        };
+        let d = datagram(&p).unwrap();
+        assert_eq!(d.len(), 28 + 5);
+        assert_eq!(ipv4_checksum(&d[..20]), 0);
+        assert_eq!(&d[4..6], &[0x12, 0x34]);
+        let whole = Packet {
+            header: DataHeader { sap: sap::IP, ..h },
+            data: d.clone(),
+            crc_ok: true,
+            bad_blocks: 0,
+        };
+        let (a, b) = (udp(&p).unwrap(), udp(&whole).unwrap());
+        assert_eq!(a, b);
+        assert_eq!(b.payload, b"hello");
+        assert_eq!(datagram(&whole).unwrap(), d);
     }
 }

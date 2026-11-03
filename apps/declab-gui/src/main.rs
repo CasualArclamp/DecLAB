@@ -18,6 +18,7 @@
 //! window and closes; it neither reads nor writes the preferences.
 
 mod band;
+mod data_tabs;
 mod epg_view;
 mod external;
 mod freq_display;
@@ -74,6 +75,8 @@ struct Options {
     wheel: bool,
     /// `--scope NAME`: show this decoder scope (for screenshots).
     scope: Option<String>,
+    /// `--tab heard|hex|lrrp|ip`: Digital voice's tab to open on.
+    tab: data_tabs::Tab,
     /// `--play SID`: play this service once its streams are known.
     play: Option<u16>,
     /// `--window ts|epg`: open with that window up.
@@ -135,6 +138,15 @@ impl Options {
                 }
                 "--wheel" => o.wheel = true,
                 "--scope" => o.scope = Some(value("a scope name")?),
+                "--tab" => {
+                    o.tab = match value("heard, hex, lrrp or ip")?.as_str() {
+                        "heard" => data_tabs::Tab::Heard,
+                        "hex" => data_tabs::Tab::Hex,
+                        "lrrp" => data_tabs::Tab::Lrrp,
+                        "ip" => data_tabs::Tab::Ip,
+                        t => return Err(format!("--tab: no tab {t:?} (heard, hex, lrrp, ip)")),
+                    }
+                }
                 "--settings" => o.settings = true,
                 "--optimise" | "--optimize" => o.optimise = true,
                 "--vfo" => {
@@ -326,6 +338,8 @@ struct App {
     settings_open: bool,
     /// What follows a decoder's transport stream: services, player, guide.
     tv: tv::Tv,
+    /// Digital voice's tabs over the right-hand box: heard, hex, LRRP, IP.
+    data_tabs: data_tabs::DataTabs,
     /// The settings window's page: None for General, else a decoder.
     settings_page: Option<usize>,
     chan_hz: f64,
@@ -471,6 +485,7 @@ impl App {
                 t.play_when_ready = opts.play;
                 t
             },
+            data_tabs: data_tabs::DataTabs::opening_on(opts.tab),
             settings_page: None,
             // (`--settings` opens on the running decoder's page: set in `new`.)
             chan_hz,
@@ -1916,6 +1931,30 @@ impl eframe::App for App {
                                 // A transport stream's services (DVB), else a decoder's
                                 // large waterfall (WFM: its multiplex), else the
                                 // services on their own.
+                                // Digital voice: talkgroups and radios, or its
+                                // data as hex, LRRP locations or IP.
+                                if info.family == declab_api::Family::Voice {
+                                    match self.data_tabs.bar(ui, &self.view) {
+                                        data_tabs::Tab::Heard => {
+                                            if let Some(p) =
+                                                panels::services(ui, &self.view, self.selected_service)
+                                            {
+                                                picked = Some(p);
+                                            }
+                                        }
+                                        data_tabs::Tab::Hex => self.data_tabs.hex(ui, &self.view),
+                                        data_tabs::Tab::Lrrp => self.data_tabs.lrrp(ui, &self.view),
+                                        data_tabs::Tab::Ip => {
+                                            if let Some(host) = &self.host {
+                                                let (n, b) = (self.view.ip_packets, self.view.ip_bytes);
+                                                self.tv.ip_ui(ui, host, &stream_name, n, b);
+                                                ui.add_space(4.0);
+                                            }
+                                            self.data_tabs.ip(ui, &self.view);
+                                        }
+                                    }
+                                    return;
+                                }
                                 if self.tv.active()
                                     && let Some(host) = &self.host
                                 {

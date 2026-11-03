@@ -960,3 +960,42 @@ Engine and GUI done; the CLI still runs one decoder.
   then kept in view coordinates); the full band at 16384 bins costs about
   40 MB of history and texture.
 
+
+## 24. Digital voice data tabs; AM/FM squelch (2026-11-02)
+
+**Data tabs.** The right-hand box of Digital voice has four tabs: *Heard*
+(the talkgroup and radio tables, §19), *Hex* (every data message whole: a
+heading, then offset, 16 bytes in hex, ASCII), *LRRP* (location messages
+as a table, newest first; a click on a position copies it) and *IP* (the
+datagrams, newest first, with the PCAP recorder; the picked one, or the
+newest, is taken apart: IPv4 and UDP headers, the checksum checked, the
+payload in hex). `--tab heard|hex|lrrp|ip` opens on one (screenshots).
+
+The API gained `Sink::packets` (`DataPacket`: time, channel, from, to,
+kind, CRC, bytes) and `Sink::locations` (`Location`, from LRRP). DMR sends
+every reassembled data packet, its datagram to `Sink::ip` (so `--pcap` and
+the GUI's recorder take DMR data too) and each LRRP message; TETRA sends
+its SDS. Digital voice forwards them from every mode, the channel prefixed
+with the mode. Header-compressed packets (SAP 3, TS 102 361-3 §7.2) are
+rebuilt as whole IPv4/UDP datagrams (`lrrp::datagram`) with a correct
+header checksum. The host keeps the last 200 messages and locations and
+the last 64 datagrams for the GUI (GSE can bring thousands a second: only
+those are copied). The hex dump is laid out when a message arrives and
+drawn with `show_rows`, so a long dump costs only the rows on screen.
+
+**Squelch.** AM, NFM and WFM have a squelch with three methods
+(`analog_squelch.rs`), each with its own threshold:
+
+| method | measures | default | notes |
+|---|---|---|---|
+| Level | channel power, dBFS | −60 | moves with the gain |
+| SNR | C/N by the M2M4 moments estimator | 6 dB | gain-free; AM's modulation reads low (30 % mod tops out near 10 dB) |
+| Noise | quieting of the detector above the audio (FM discriminator; AM envelope over its mean), dB below noise alone | 8 dB | the classic FM noise squelch; its 0 dB is measured at each mode's default bandwidth |
+
+Smoothed at 10 Hz, decided every 64 samples with 2 dB hysteresis, the audio
+faded over 5 ms. Measured on simulated carriers (`squelch_sweep`), every
+method stays shut on noise; SNR 6 dB and Noise 8 dB open at about 5–8 dB
+C/N. Cost on broadcast FM: 5.7 % of a core without, 6.1 (level, SNR) to
+6.5 % (noise) with (`squelch_cost`). Settings: `squelch` = `off` | `level`
+| `snr` | `noise` (a number, as older prefs hold, means level at that dBFS),
+`squelch_level`, `squelch_snr`, `squelch_noise`.

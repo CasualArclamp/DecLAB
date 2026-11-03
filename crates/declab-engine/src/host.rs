@@ -27,8 +27,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use declab_api::{
-    Block, Card, Command, Decoder, DecoderFactory, Heard, InputSpec, Lock, Measurement, Picture, Service,
-    Sink, Tuning, WaterfallRow,
+    Block, Card, Command, DataPacket, Decoder, DecoderFactory, Heard, InputSpec, Location, Lock, Measurement,
+    Picture, Service, Sink, Tuning, WaterfallRow,
 };
 use declab_core::{Iq, SampleFormat};
 use declab_dsp::{Ddc, Resampler};
@@ -44,6 +44,10 @@ use crate::waterfall::Waterfall;
 const WORKER_QUEUE: usize = 16;
 /// Log lines kept for the GUI.
 const MAX_LOG: usize = 300;
+/// Data messages and locations kept for the GUI's tabs.
+const MAX_PACKETS: usize = 200;
+/// IP datagrams kept for the GUI's IP tab (the PCAP file gets them all).
+const MAX_DATAGRAMS: usize = 64;
 /// Small-waterfall rows kept for a GUI that has not collected them.
 const MAX_MINI_ROWS: usize = 256;
 /// Panel messages kept for a GUI that has not collected them.
@@ -164,6 +168,15 @@ pub struct DecoderView {
     /// IP datagrams (DVB-S2 GSE) and their bytes since the decoder started.
     pub ip_packets: u64,
     pub ip_bytes: u64,
+    /// The latest IP datagrams, each with its number (1: the first).
+    pub datagrams: VecDeque<(u64, Vec<u8>)>,
+    /// Data messages (digital voice's packet data, SDS), the latest, and
+    /// how many in all.
+    pub packets: VecDeque<DataPacket>,
+    pub packets_total: u64,
+    /// Location messages (LRRP), the latest, and how many in all.
+    pub locations: VecDeque<Location>,
+    pub locations_total: u64,
 }
 
 /// What the source thread is asked to do.
@@ -1186,6 +1199,15 @@ fn worker_thread(
         if !sink.ip.is_empty() {
             v.ip_packets += sink.ip.len() as u64;
             v.ip_bytes += sink.ip.iter().map(|p| p.len() as u64).sum::<u64>();
+            // Only the last few are copied: GSE can bring thousands a second.
+            let n = v.ip_packets;
+            let k = sink.ip.len().min(MAX_DATAGRAMS);
+            for (i, p) in sink.ip[sink.ip.len() - k..].iter().enumerate() {
+                v.datagrams.push_back((n - k as u64 + 1 + i as u64, p.clone()));
+            }
+            while v.datagrams.len() > MAX_DATAGRAMS {
+                v.datagrams.pop_front();
+            }
             if let Some(f) = vs.pcap_file.lock().unwrap().as_mut() {
                 use std::io::Write;
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
@@ -1225,6 +1247,16 @@ fn worker_thread(
         }
         if let Some(h) = sink.heard.take() {
             v.heard = Some(h);
+        }
+        v.packets_total += sink.packets.len() as u64;
+        v.packets.extend(sink.packets.drain(..));
+        while v.packets.len() > MAX_PACKETS {
+            v.packets.pop_front();
+        }
+        v.locations_total += sink.locations.len() as u64;
+        v.locations.extend(sink.locations.drain(..));
+        while v.locations.len() > MAX_PACKETS {
+            v.locations.pop_front();
         }
         for p in sink.pictures.drain(..) {
             v.pictures.insert(p.service, p);

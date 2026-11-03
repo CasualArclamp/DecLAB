@@ -156,6 +156,8 @@ pub fn ipv4_udp(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, payload: &[u
     ];
     p.extend_from_slice(&src);
     p.extend_from_slice(&dst);
+    let sum = super::lrrp::ipv4_checksum(&p);
+    p[10..12].copy_from_slice(&sum.to_be_bytes());
     let ulen = 8 + payload.len();
     p.extend_from_slice(&sport.to_be_bytes());
     p.extend_from_slice(&dport.to_be_bytes());

@@ -385,6 +385,15 @@ impl Tetra {
                 if let Some(f) = from {
                     self.heard.seen(now, &f.to_string(), "SDS");
                 }
+                out.packets.push(declab_api::DataPacket {
+                    at_s: now,
+                    channel: "SDS".into(),
+                    from: ssi(from),
+                    to: ssi(to),
+                    kind: format!("SDS type {kind}, {bits} bits"),
+                    crc_ok: true,
+                    bytes: data[..bits.div_ceil(8).min(data.len())].to_vec(),
+                });
                 let body = sds_text(kind, &data, bits);
                 self.note(
                     format!("SDS from {} to {}: {body}", ssi(from), ssi(to)),
