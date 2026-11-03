@@ -204,7 +204,9 @@ impl Nxdn {
             self.last_call = Some(LastCall {
                 what: short(&c.msg),
                 end_s: c.last_s,
-                len_s: c.last_s - c.start_s,
+                // From the speech (20 ms a frame): a file's blocks make the
+                // stream clock too coarse to time a short call by.
+                len_s: c.frames as f64 * 0.02,
                 ber,
             });
             out.log(format!(
