@@ -5,6 +5,8 @@
 
 # DecLAB
 
+If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
+
 **One software-defined radio receiver for everything on the air.** Point an
 RTL-SDR, Airspy or HackRF at the sky and DecLAB decodes terrestrial TV,
 digital radio, FM, pagers and two-way digital voice, all in one window, all
