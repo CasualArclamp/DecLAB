@@ -16,6 +16,7 @@ mod dvbt;
 #[cfg(feature = "ui")]
 mod gate_panel;
 mod heard;
+pub mod ism;
 mod level;
 mod nxdn;
 mod p25;
@@ -40,6 +41,7 @@ pub static ALL: &[&dyn DecoderFactory] = &[
     &analog::Factory(Mode::Cw),
     &voice::Factory,
     &pagers::Factory,
+    &ism::Factory,
     &level::Factory,
 ];
 

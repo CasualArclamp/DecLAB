@@ -219,6 +219,44 @@ pub struct HeardRadio {
     pub encrypted: bool,
 }
 
+/// The devices heard on an ISM band (weather sensors, remotes, tyre-
+/// pressure sensors, meters) since it was tuned, sent whole when it
+/// changes. Times are stream time, as for [`Heard`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Devices {
+    pub now_s: f64,
+    pub since_s: f64,
+    /// Most recently heard first.
+    pub devices: Vec<HeardDevice>,
+}
+
+/// One device: a model and its own identity (ID and channel).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HeardDevice {
+    /// "Nexus-TH", "Schrader-EG53MA4".
+    pub model: String,
+    /// "Weather and sensors", "Tyre pressure" …
+    pub kind: String,
+    pub id: String,
+    pub channel: String,
+    /// Its latest readings, short ("18.4 °C 57 %").
+    pub readings: String,
+    /// Its latest message, every field as label and value with its unit.
+    pub fields: Vec<(String, String)>,
+    /// Messages (repeats of one transmission count once).
+    pub count: u32,
+    pub first_s: f64,
+    pub last_s: f64,
+    /// RF frequency of its last message, Hz (0 if unknown), and its level.
+    pub freq_hz: f64,
+    pub rssi_db: f32,
+    pub snr_db: f32,
+    /// The battery says low.
+    pub battery_low: bool,
+    /// Seen in the last few seconds.
+    pub live: bool,
+}
+
 /// A bar like the margin bar of DecDVB-T's and DecSAT's cards: a reading on
 /// a fixed scale, ticked where the decoder needs it to be.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -347,6 +385,8 @@ pub struct Sink {
     pub services: Option<Vec<Service>>,
     /// Talkgroups and radios heard (digital voice), sent whole.
     pub heard: Option<Heard>,
+    /// Devices heard (ISM bands), sent whole.
+    pub devices: Option<Devices>,
     pub measurements: Vec<Measurement>,
     /// The card, when the decoder has one to show (else the GUI makes one
     /// from the measurements).
@@ -392,6 +432,7 @@ impl Sink {
         self.text.clear();
         self.services = None;
         self.heard = None;
+        self.devices = None;
         self.measurements.clear();
         self.card = None;
         self.constellation.clear();

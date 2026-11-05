@@ -673,6 +673,7 @@ dependencies = [
  "decdvbt-ts",
  "declab-api",
  "declab-dsp",
+ "declab-ism",
  "declab-pagers",
  "declab-pmr",
  "decsat-core",
@@ -744,6 +745,14 @@ dependencies = [
  "seify-hackrfone",
  "thiserror 2.0.21",
  "tracing",
+]
+
+[[package]]
+name = "declab-ism"
+version = "0.2.3"
+dependencies = [
+ "num-complex",
+ "rustfft",
 ]
 
 [[package]]
