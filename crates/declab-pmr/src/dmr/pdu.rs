@@ -145,8 +145,44 @@ impl FullLc {
                 target,
                 source,
             } => Some((source, target, false, opts)),
-            FullLc::Other { .. } => None,
+            FullLc::Other { flco, fid, bytes } => moto_call(flco, fid, &bytes),
         }
+    }
+
+    /// Capacity Plus's rest channel, from its own voice header (FLCO 4).
+    pub fn rest_lsn(&self) -> Option<u8> {
+        match *self {
+            FullLc::Other {
+                flco: 4,
+                fid: FID_MOTOROLA,
+                bytes,
+            } => Some(bytes[6] & 0x1f),
+            _ => None,
+        }
+    }
+}
+
+/// Motorola's feature set ID (TS 102 361-2 annex: FID 0x10).
+pub const FID_MOTOROLA: u8 = 0x10;
+
+/// A voice call in an LC under Motorola's FID: MOTOTRBO (Capacity Plus,
+/// IP Site Connect) sends the ETSI layouts with FID 0x10 instead of 0, and
+/// Capacity Plus's voice header is FLCO 4, the group as usual but the
+/// source in 16 bits after a byte holding the rest channel. Not in the
+/// ETSI specs; layout as SDRTrunk and DSD-FME read it, and checked on air
+/// (2026-11-05): FLCO 4 and the FLCO 0 that follows agree on group and
+/// source, and FLCO 4's rest channel matches the channel-status CSBK's.
+fn moto_call(flco: u8, fid: u8, b: &[u8; 9]) -> Option<(u32, u32, bool, ServiceOptions)> {
+    if fid != FID_MOTOROLA {
+        return None;
+    }
+    let opts = ServiceOptions(b[2]);
+    let (a, s) = (field(b, 24, 24), field(b, 48, 24));
+    match flco {
+        0 => Some((s, a, true, opts)),
+        3 => Some((s, a, false, opts)),
+        4 => Some((field(b, 56, 16), a, true, opts)),
+        _ => None,
     }
 }
 
@@ -175,7 +211,25 @@ impl fmt::Display for FullLc {
                 }
                 Ok(())
             }
-            FullLc::Other { flco, fid, .. } => write!(f, "LC FLCO {flco:#04x} FID {fid:#04x}"),
+            FullLc::Other { flco, fid, .. } => match self.call() {
+                Some((source, dst, group, opts)) => {
+                    if group {
+                        write!(f, "group call TG {dst} from {source}")?;
+                    } else {
+                        write!(f, "private call {source} → {dst}")?;
+                    }
+                    // Motorola sets service-option bits ETSI reserves:
+                    // only the ones it defines are named.
+                    if opts.0 & 0xcf != 0 {
+                        write!(f, " ({})", ServiceOptions(opts.0 & 0xcf))?;
+                    }
+                    if let Some(rest) = self.rest_lsn() {
+                        write!(f, ", rest LSN {rest}")?;
+                    }
+                    Ok(())
+                }
+                None => write!(f, "LC FLCO {flco:#04x} FID {fid:#04x}"),
+            },
         }
     }
 }
@@ -574,6 +628,31 @@ impl fmt::Display for Csbk {
                 };
                 write!(f, "P_CLEAR {to} back to the TSCC (LPCN {lpcn})")
             }
+            Csbk::Other {
+                opcode: 62,
+                fid: FID_MOTOROLA,
+                bytes,
+                ..
+            } => {
+                // Capacity Plus channel status: rest channel, then a bit a
+                // channel (LSN 1 first) for those carrying a call, and the
+                // group on each busy one in turn. As DSD-FME reads it;
+                // checked on air against the voice headers' groups.
+                write!(f, "Capacity Plus: rest LSN {}", bytes[2] & 0x1f)?;
+                let busy = (0..8).filter(|k| bytes[3] & (0x80 >> k) != 0);
+                let mut any = false;
+                for (n, k) in busy.enumerate() {
+                    match bytes.get(4 + n) {
+                        Some(&tg) if tg != 0 => write!(f, ", LSN {} TG {tg}", k + 1)?,
+                        _ => write!(f, ", LSN {} busy", k + 1)?,
+                    }
+                    any = true;
+                }
+                if !any {
+                    write!(f, ", all idle")?;
+                }
+                Ok(())
+            }
             Csbk::Other { opcode, fid, .. } => match (fid, csbk_alias(opcode)) {
                 (0, Some(a)) => write!(f, "{a}"),
                 _ => write!(f, "CSBK opcode {opcode} FID {fid:#04x}"),
@@ -713,6 +792,28 @@ impl fmt::Display for ShortLc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Capacity Plus as the PDUs arrive on air (2026-11-05), the IDs made up.
+    #[test]
+    fn capacity_plus() {
+        // Group 77, source 4321 (0x10e1), rest LSN 4.
+        let header = FullLc::parse(&[4, 16, 32, 0, 0, 77, 4, 0x10, 0xe1]);
+        assert_eq!(
+            header.call().map(|c| (c.0, c.1, c.2)),
+            Some((4321, 77, true))
+        );
+        assert_eq!(header.to_string(), "group call TG 77 from 4321, rest LSN 4");
+        let lc = FullLc::parse(&[0, 16, 48, 0, 0, 77, 0, 0x10, 0xe1]);
+        assert_eq!(lc.call().map(|c| (c.0, c.1, c.2)), Some((4321, 77, true)));
+        assert_eq!(lc.to_string(), "group call TG 77 from 4321");
+        let status = Csbk::parse(&[190, 16, 196, 96, 77, 91, 0, 0, 0, 0]);
+        assert_eq!(
+            status.to_string(),
+            "Capacity Plus: rest LSN 4, LSN 2 TG 77, LSN 3 TG 91"
+        );
+        let idle = Csbk::parse(&[190, 16, 228, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(idle.to_string(), "Capacity Plus: rest LSN 4, all idle");
+    }
 
     #[test]
     fn round_trips() {

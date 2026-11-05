@@ -197,6 +197,12 @@ fn short(lc: &FullLc) -> String {
     }
 }
 
+/// Who a call is between, and whether to a group: the same call even when
+/// its service options change (MOTOTRBO flips a reserved bit mid-call).
+fn who(lc: &FullLc) -> Option<(u32, u32, bool)> {
+    lc.call().map(|(src, dst, group, _)| (src, dst, group))
+}
+
 fn slot_name(s: u8) -> &'static str {
     if s == 0 { "TS1" } else { "TS2" }
 }
@@ -279,7 +285,7 @@ impl Dmr {
         let s = slot as usize;
         if self.calls[s]
             .as_ref()
-            .is_some_and(|c| c.lc.call() == lc.call())
+            .is_some_and(|c| who(&c.lc) == who(&lc))
         {
             return;
         }
@@ -348,7 +354,10 @@ impl Dmr {
         let same_kind = |a: &Csbk, b: &Csbk| std::mem::discriminant(a) == std::mem::discriminant(b);
         let grant = matches!(csbk, Csbk::Grant { .. });
         if !grant {
-            if self.last_csbk.contains(&csbk) {
+            // By what it says: Capacity Plus repeats the same status on
+            // both slots with the slot bit flipped.
+            let text = csbk.to_string();
+            if self.last_csbk.iter().any(|c| c.to_string() == text) {
                 return;
             }
             self.last_csbk.retain(|c| !same_kind(c, &csbk));
