@@ -25,6 +25,7 @@ cargo run --release -p declab-gui -- out/sim_dmr.cf32 --rate 48000 --decoder voi
 cargo run --release -p declab-gui -- out/sim_dmr.cf32 --rate 48000 --decoder voice --tab hex --screenshot out/x.png --after 9   # Digital voice's data tabs: heard, hex, lrrp, ip
 cargo run --release -p declab-cli -- run nfm --radio airspy --freq 446.05M --set squelch=noise --set squelch_noise=10   # squelch: off, level, snr or noise, each with its threshold
 cargo test -p declab-decoders --release squelch_sweep -- --ignored --nocapture   # each squelch method's reading against C/N
+cargo run --release -p declab-pagers --example pocsag_make -- out/sim_pocsag_m.cf32 20   # simulated on-site pager: POCSAG 512 Manchester; then declab-gui -- out/sim_pocsag_m.cf32 --rate 250000 --decoder pagers --chan 40k
 cargo run --release -p declab-pagers --example filetest -- IN.cf32   # pages and receiver CPU from a 50 kS/s pager channel, with and without the POCSAG Manchester chain
 cargo run --release -p declab-pmr --example dmr_sweep -- 4 800   # DMR sensitivity vs C/N (and CPU)
 cargo run --release -p declab-pmr --example dmr_file -- IN.cf32   # every DMR event of a real 24 kS/s channel, and the counters

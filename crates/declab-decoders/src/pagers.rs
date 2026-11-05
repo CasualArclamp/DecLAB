@@ -261,15 +261,12 @@ impl Pagers {
         let (frames, words, bad) = self.rx.stats();
         out.measure("Pages", (self.count_pocsag + self.count_flex) as f64, "");
         out.measure("FLEX frames", frames as f64, "");
-        let mut modes: Vec<String> = POCSAG_KEYS
+        let modes: Vec<String> = POCSAG_KEYS
             .iter()
             .zip(self.settings.pocsag)
             .filter(|(_, on)| *on)
             .map(|(k, _)| k.1.to_string())
             .collect();
-        if self.settings.manchester {
-            modes.push("512M".into());
-        }
         let listening = match (modes.is_empty(), self.settings.flex) {
             (false, true) => format!("POCSAG {} · FLEX", modes.join("/")),
             (false, false) => format!("POCSAG {}", modes.join("/")),

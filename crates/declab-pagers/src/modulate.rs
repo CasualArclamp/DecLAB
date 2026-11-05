@@ -52,6 +52,13 @@ impl SignalBuilder {
         self.on.extend(std::iter::repeat_n(false, n));
     }
 
+    /// Unmodulated carrier for `s` seconds.
+    pub fn carrier(&mut self, s: f64) {
+        let n = (s * self.rate) as usize;
+        self.freq.extend(std::iter::repeat_n(0.0, n));
+        self.on.extend(std::iter::repeat_n(true, n));
+    }
+
     /// Symbols 0–3 (lowest frequency first) at `baud`; `dev` is the outer
     /// deviation.
     pub fn symbols(&mut self, syms: &[u8], baud: u32, levels: u8, dev: f32) {
