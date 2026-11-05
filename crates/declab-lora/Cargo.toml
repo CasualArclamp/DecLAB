@@ -1,0 +1,13 @@
+# made by CasualArclamp
+[package]
+name = "declab-lora"
+description = "LoRa receiver (CSS demodulation, SF7-12, 62.5-500 kHz, presets found by itself) with Meshtastic and MeshCore packet decoding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+num-complex.workspace = true
+rustfft.workspace = true

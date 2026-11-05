@@ -17,6 +17,7 @@ mod dvbt;
 mod gate_panel;
 mod heard;
 pub mod ism;
+pub mod lora;
 mod level;
 mod nxdn;
 mod p25;
@@ -42,6 +43,7 @@ pub static ALL: &[&dyn DecoderFactory] = &[
     &voice::Factory,
     &pagers::Factory,
     &ism::Factory,
+    &lora::Factory,
     &level::Factory,
 ];
 

@@ -24,6 +24,12 @@ cargo run --release -p declab-gui -- out/sim_ism_433.920MHz_2500ksps.cs8 --decod
 cargo run --release -p declab-cli -- run ism --radio airspy --freq 433.92M --offset 0   # ISM devices live (868.3M for 868 MHz sensors)
 cargo run --release -p declab-ism --example filetest -- out/sim_ism_433.920MHz_2500ksps.cs8   # messages, and the receiver's CPU (and on noise alone)
 ISM_MODEL=Nexus-TH cargo test --release -p declab-ism debug_sample -- --ignored --nocapture   # one sample's pulses on the air against the ideal (ISM_AMP, ISM_OFF, ISM_SEED)
+cargo run --release -p declab-lora --example lora_make -- out/sim_lora_869.525MHz_1000ksps.cs8 30   # simulated 869.525 MHz: Meshtastic and MeshCore packets, each its own SNR, offset and ppm
+cargo run --release -p declab-gui -- out/sim_lora_869.525MHz_1000ksps.cs8 --decoder lora --chan 869.525M --set tab=packets --screenshot out/x.png --after 25   # LoRa mesh; tabs nodes, messages, packets, keys
+cargo run --release -p declab-cli -- run lora --radio airspy --freq 869.525M --gain 10,7,11 --offset 0   # LoRa mesh live (Meshtastic EU LongFast, MeshCore 250 kHz)
+cargo run --release -p declab-lora --example filetest -- out/sim_lora_869.525MHz_1000ksps.cs8   # every frame and what the meshes made of it, receiver CPU (and on noise)
+cargo run --release -p declab-lora --example lora_sweep -- 20 [LongFast]   # sensitivity per preset, and the SNR it reports
+LORA_BW=125000 LORA_SF=12 LORA_PPM=10 LORA_FREQ=8695 LORA_SNR=-15 LORA_DEBUG=1 cargo test --release -p declab-lora symbol_errors -- --ignored --nocapture   # one frame's symbols against those sent, with the receiver's trace
 cargo run -p declab-gui --example make_icon   # redraws apps/declab-gui/assets/icon.ico and icon-256.png (preview out/icon-preview.png)
 cargo run --release -p declab-pmr --example dmr_make -- out/sim_dmr.cf32 15   # simulated DMR repeater: call, Tier III CSBKs, LRRP
 cargo run --release -p declab-gui -- out/sim_dmr.cf32 --rate 48000 --decoder voice --screenshot out/x.png --after 8   # Digital voice: DMR, NXDN48, NXDN96, P25, TETRA detected by itself
@@ -98,6 +104,17 @@ the reference clone is `..\rtl_433-ref` (never commit it). A new device:
 a module with `DEVICES` and `SAMPLES` (rows as its slicer outputs them,
 valid checks, no real IDs), listed in `devices/mod.rs`; the tests then
 check it through its decoder, its slicer and the whole receiver.
+
+## LoRa mesh (Meshtastic, MeshCore)
+
+`crates/declab-lora`: the coding chain is ported from gr-lora_sdr, the
+Meshtastic field numbers from meshtastic/protobufs (`mt_names.rs` is
+generated from them), MeshCore's layouts from its docs. Reference clones
+are in `..\lora-ref` (gr-lora_sdr, protobufs, MeshCore; never commit them).
+The receiver works at one sample a chip: read the module docs of
+`receiver.rs` (the wrap's phase step) before changing it, and check with
+`lora_sweep` and `filetest` (CPU) after. Live captures and screenshots
+of real meshes carry node IDs, names and positions: never commit them.
 
 ## House rules
 

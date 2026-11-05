@@ -369,6 +369,14 @@ pub fn icon(painter: &egui::Painter, id: &str, p: Pos2, s: f32, ink: Color32) {
             painter.rect_filled(Rect::from_center_size(p, vec2(s * 0.9, 5.0)), 1.5, ink);
             painter.circle_filled(p + vec2(s * 0.8, 0.0), 2.6, ink);
         }
+        "lora" => {
+            // Up-chirps: a sawtooth of rising frequency.
+            for k in 0..3 {
+                let x0 = p.x - s * 0.9 + k as f32 * s * 0.6;
+                painter.line_segment([pos2(x0, p.y + s * 0.5), pos2(x0 + s * 0.6, p.y - s * 0.5)], st);
+                painter.line_segment([pos2(x0 + s * 0.6, p.y - s * 0.5), pos2(x0 + s * 0.6, p.y + s * 0.5)], st);
+            }
+        }
         "voice" | "dmr" | "nxdn" | "nxdn96" | "p25" | "tetra" => {
             // A handheld two-way radio: body, aerial, speaker slots.
             let r = Rect::from_center_size(p + vec2(0.0, s * 0.2), vec2(s * 0.9, s * 1.4));

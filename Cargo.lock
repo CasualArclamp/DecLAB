@@ -674,6 +674,7 @@ dependencies = [
  "declab-api",
  "declab-dsp",
  "declab-ism",
+ "declab-lora",
  "declab-pagers",
  "declab-pmr",
  "decsat-core",
@@ -749,6 +750,14 @@ dependencies = [
 
 [[package]]
 name = "declab-ism"
+version = "0.2.3"
+dependencies = [
+ "num-complex",
+ "rustfft",
+]
+
+[[package]]
+name = "declab-lora"
 version = "0.2.3"
 dependencies = [
  "num-complex",
