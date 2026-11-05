@@ -19,6 +19,11 @@ cargo run --release -p declab-gui -- out/sim_fm_98.000MHz_10Msps.cs8 --decoder w
 cargo run --release -p declab-gui -- --radio airspy --freq 98M --decoder wfm --wheel   # opens with the decoder wheel up
 cargo run --release -p declab-gui -- --radio airspy --freq 546M --chan 546M --decoder dvbt --optimise --screenshot out/x.png --after 90   # Airspy gain optimiser (also "Optimise gain" in the gain menu); logs each setting to stderr
 cargo run --release -p declab-gui -- ..\DecPagers\out\sim_pagers_153.000MHz_1Msps.cs8 --decoder pagers --chan 153.15M --screenshot out/x.png --after 10   # pagers (make the file with `decpagers sim`)
+cargo run --release -p declab-ism --example ism_make -- out/sim_ism_433.920MHz_2500ksps.cs8 40   # simulated ISM band: every device sample, own frequency and level, some overlapping
+cargo run --release -p declab-gui -- out/sim_ism_433.920MHz_2500ksps.cs8 --decoder ism --chan 433.92M --tab devices --screenshot out/x.png --after 38   # ISM devices (rtl_433's protocols); tabs devices, log, flex
+cargo run --release -p declab-cli -- run ism --radio airspy --freq 433.92M --offset 0   # ISM devices live (868.3M for 868 MHz sensors)
+cargo run --release -p declab-ism --example filetest -- out/sim_ism_433.920MHz_2500ksps.cs8   # messages, and the receiver's CPU (and on noise alone)
+ISM_MODEL=Nexus-TH cargo test --release -p declab-ism debug_sample -- --ignored --nocapture   # one sample's pulses on the air against the ideal (ISM_AMP, ISM_OFF, ISM_SEED)
 cargo run -p declab-gui --example make_icon   # redraws apps/declab-gui/assets/icon.ico and icon-256.png (preview out/icon-preview.png)
 cargo run --release -p declab-pmr --example dmr_make -- out/sim_dmr.cf32 15   # simulated DMR repeater: call, Tier III CSBKs, LRRP
 cargo run --release -p declab-gui -- out/sim_dmr.cf32 --rate 48000 --decoder voice --screenshot out/x.png --after 8   # Digital voice: DMR, NXDN48, NXDN96, P25, TETRA detected by itself
@@ -85,6 +90,14 @@ libxaac (DAB+ audio) builds from the `third_party/libxaac` submodule
 Copy `crates/declab-decoders/src/level.rs`, implement `Decoder` and
 `DecoderFactory` (see `crates/declab-api/src/lib.rs`), add `mod` and the
 factory to `ALL` in that crate's `lib.rs`.
+
+## ISM devices (rtl_433 ports)
+
+`crates/declab-ism/src/devices/*.rs` are ports of rtl_433's device files;
+the reference clone is `..\rtl_433-ref` (never commit it). A new device:
+a module with `DEVICES` and `SAMPLES` (rows as its slicer outputs them,
+valid checks, no real IDs), listed in `devices/mod.rs`; the tests then
+check it through its decoder, its slicer and the whole receiver.
 
 ## House rules
 

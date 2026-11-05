@@ -24,6 +24,7 @@ mod epg_view;
 mod external;
 mod freq_display;
 mod gain_opt;
+mod ism_tabs;
 mod panels;
 mod player;
 mod prefs;
@@ -80,8 +81,10 @@ struct Options {
     wheel: bool,
     /// `--scope NAME`: show this decoder scope (for screenshots).
     scope: Option<String>,
-    /// `--tab heard|hex|lrrp|ip`: Digital voice's tab to open on.
+    /// `--tab heard|hex|lrrp|ip`: Digital voice's tab to open on
+    /// (`devices|log|flex`: ISM devices').
     tab: data_tabs::Tab,
+    ism_tab: ism_tabs::Tab,
     /// `--play SID`: play this service once its streams are known.
     play: Option<u16>,
     /// `--in-app`: press the card's "▶ In app" once there is a service with
@@ -158,12 +161,15 @@ impl Options {
                 "--wheel" => o.wheel = true,
                 "--scope" => o.scope = Some(value("a scope name")?),
                 "--tab" => {
-                    o.tab = match value("heard, hex, lrrp or ip")?.as_str() {
-                        "heard" => data_tabs::Tab::Heard,
-                        "hex" => data_tabs::Tab::Hex,
-                        "lrrp" => data_tabs::Tab::Lrrp,
-                        "ip" => data_tabs::Tab::Ip,
-                        t => return Err(format!("--tab: no tab {t:?} (heard, hex, lrrp, ip)")),
+                    match value("heard, hex, lrrp, ip, devices, log or flex")?.as_str() {
+                        "heard" => o.tab = data_tabs::Tab::Heard,
+                        "hex" => o.tab = data_tabs::Tab::Hex,
+                        "lrrp" => o.tab = data_tabs::Tab::Lrrp,
+                        "ip" => o.tab = data_tabs::Tab::Ip,
+                        "devices" => o.ism_tab = ism_tabs::Tab::Devices,
+                        "log" => o.ism_tab = ism_tabs::Tab::Log,
+                        "flex" => o.ism_tab = ism_tabs::Tab::Flex,
+                        t => return Err(format!("--tab: no tab {t:?} (heard, hex, lrrp, ip, devices, log, flex)")),
                     }
                 }
                 "--settings" => o.settings = true,
@@ -374,6 +380,8 @@ struct App {
     tv: tv::Tv,
     /// Digital voice's tabs over the right-hand box: heard, hex, LRRP, IP.
     data_tabs: data_tabs::DataTabs,
+    /// ISM devices' tabs over the right-hand box.
+    ism_tabs: ism_tabs::IsmTabs,
     /// The settings window's page: None for General, else a decoder.
     settings_page: Option<usize>,
     chan_hz: f64,
@@ -536,6 +544,7 @@ impl App {
                 t
             },
             data_tabs: data_tabs::DataTabs::opening_on(opts.tab),
+            ism_tabs: ism_tabs::IsmTabs::opening_on(opts.ism_tab),
             settings_page: None,
             // (`--settings` opens on the running decoder's page: set in `new`.)
             chan_hz,
@@ -2037,6 +2046,7 @@ impl eframe::App for App {
                     .iter()
                     .any(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name));
                 let mut picked = None;
+                let mut ism_save = false;
                 ui.horizontal_top(|ui| {
                     let chan = self.chan_hz + self.lo_of(self.dec);
                     ui.allocate_ui_with_layout(
@@ -2074,6 +2084,28 @@ impl eframe::App for App {
                                 // services on their own.
                                 // Digital voice: talkgroups and radios, or its
                                 // data as hex, LRRP locations or IP.
+                                // ISM devices: the devices heard, the log, or its
+                                // panel (flex specs).
+                                if info.id == "ism" {
+                                    match self.ism_tabs.bar(ui, &self.view) {
+                                        ism_tabs::Tab::Devices => self.ism_tabs.devices(ui, &self.view),
+                                        ism_tabs::Tab::Log => self.ism_tabs.log(ui, &self.view),
+                                        ism_tabs::Tab::Flex => {
+                                            let mut cmds = Vec::new();
+                                            let panel = self.panels.get_mut(self.dec).and_then(|p| p.as_mut());
+                                            self.ism_tabs.flex(ui, panel, &mut cmds);
+                                            if !cmds.is_empty() {
+                                                if let Some(h) = &self.host {
+                                                    for c in cmds {
+                                                        h.command(c);
+                                                    }
+                                                }
+                                                ism_save = true;
+                                            }
+                                        }
+                                    }
+                                    return;
+                                }
                                 if info.family == declab_api::Family::Voice {
                                     match self.data_tabs.bar(ui, &self.view) {
                                         data_tabs::Tab::Heard => {
@@ -2127,6 +2159,9 @@ impl eframe::App for App {
                         },
                     );
                 });
+                if ism_save {
+                    self.save_settings(self.dec);
+                }
                 match picked {
                     Some(panels::Pick::Service(id)) => {
                         self.selected_service = Some(id);

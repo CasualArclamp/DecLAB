@@ -55,6 +55,18 @@ scope and milestones; update it when a decision changes.
   and pairs chips both ways; the plain decoder's pages at that rate are
   dropped while it is active (it can lock onto one chip a bit and slip).
   Setting `manchester` (on by default, 512 only): ~0.13 % of a core more.
+- (2026-11-05) **ISM devices**, like rtl_433 (user's choices): the `ism`
+  plug-in (`declab-decoders/src/ism.rs`) over `crates/declab-ism`. First
+  set: weather and temperature/humidity sensors (Oregon Scientific v2.1/v3,
+  Acurite, LaCrosse, Fine Offset/Ecowitt, Bresser, Nexus, Prologue,
+  Rubicson, Ambient F007TH, ThermoPro), remotes and security sensors
+  (generic EV1527/PT2262, Honeywell 345 MHz, Interlogix), TPMS (Schrader
+  family, Citroen, Renault, Toyota, Ford, Hyundai VDO, Kia), energy and
+  meters (CurrentCost, Efergy, ERT SCM/IDM/NetIDM), and rtl_433's flex
+  decoder. Ported from rtl_433 (GPL-2.0-or-later; a reference clone in
+  `..\rtl_433-ref`, never committed). GUI as the agreed mockup: card,
+  "Pulses"/"Bursts" scopes, Devices/Log/Flex tabs over the right-hand box
+  (§31).
 - (2026-10-27) **GUI interactions** asked for: middle-drag pans the spectrum
   and waterfall; a middle click (no drag) opens a radial decoder picker like
   a game's weapon wheel — scroll to step round it, or point at a slice, and
@@ -140,6 +152,7 @@ DecLAB is GPL-3.0-or-later, so DAB+ uses libxaac (§20).
 | V3 | P25 phase 1 in Digital voice: conventional calls (HDU, LDU1/2, TDU, TDULC), control channel TSBKs, IMBE vocoder (port of mbelib) | ✅ 2026-10-29 in simulation only; phase 2 (TDMA) and encrypted voice not decoded |
 | V4 | TETRA downlink in Digital voice: cell, calls, status, SDS; π/4-DQPSK coherent receiver; ACELP speech via a separate library | ✅ 2026-10-30 in simulation only; speech needs `tetra_acelp.dll` (private, not GPL); π/8-D8PSK, QAM and the uplink not decoded |
 | S1 | Network IQ source: raw IQ over TCP (connect or listen) or UDP, rtl_tcp recognised and tuned; SDR++'s IQ Exporter as the way in for radios without a driver here (SDRplay RSPduo) | ✅ 2026-11-03 against a stand-in sender (`net_send`); SDR++ itself not yet tried. Native SDRplay API next |
+| I1 | ISM devices (rtl_433's protocols): wideband burst finder, OOK/FSK pulse detection, rtl_433's slicers, device decoders from 29 rtl_433 files, flex decoder, heard-devices table, simulator | ✅ 2026-11-05 in simulation only: no real sensor heard yet |
 | later | DLL plug-ins; DVB-C (port of `Documents\DecSAT\dvbc_decode.py`); modulators |
 
 ## 4. Notes from M1a (2026-10-27)
@@ -1164,3 +1177,115 @@ and, for the first time, DVB-S2 carrying real video.
   (DecSAT's and DecDVB-T's players also run ffmpeg.exe); one would mean
   Media Foundation or a linked libavcodec. The button plays only the selected
   VFO's TS, as the services list does.
+
+## 31. ISM devices (2026-11-05)
+
+The `ism` decoder finds and decodes the short OOK and FSK bursts of
+weather sensors, remotes, door/window and security sensors, tyre-pressure
+sensors and meters, as rtl_433 does, anywhere in a wide channel.
+
+**Shape.** `crates/declab-ism`:
+
+| Module | What | From |
+|---|---|---|
+| `bits` | `BitBuffer` (50 rows × 128 bytes), CRCs, LFSR digests, UART framing, whitening | rtl_433 `bitbuffer.c`, `bit_util.c` |
+| `device` | `Device` (= `r_device`: coding, µs timings, decode fn, priority, disabled), `Message` (= `data_make`), field labels and units | rtl_433 `r_device.h`, `data.h` |
+| `slicer` | PCM (NRZ/RZ), PPM, PWM, Manchester zero-bit, DMC, PIWM raw/DC, NRZS | rtl_433 `pulse_slicer.c` (OSv1 not ported) |
+| `devices/*` | one module per rtl_433 device file, each with `DEVICES` and `SAMPLES` | rtl_433 `src/devices/*.c` |
+| `flex` | rtl_433's `-X` specs, every key flex.c parses | rtl_433 `flex.c` |
+| `burst` | the burst finder | new |
+| `pulse` | a burst's samples → OOK or FSK pulse packages | rules from rtl_433 `pulse_detect*.c`, levels new |
+| `receiver` | bursts → packages → every device whose coding fits, by priority; repeats folded; unknown packages described (pulse/gap widths, a flex spec to start from) | new |
+| `sim` | rows back into pulses (the slicers run backwards) and into OOK/FSK IQ | new |
+
+**Why not rtl_433's front end.** rtl_433 runs one envelope and one FM
+discriminator over its whole band (250 kS/s–1 MS/s): two sensors at once
+collide, and a narrow sensor competes with the whole band's noise. Here:
+
+- **Burst finder:** a 256-point FFT on every 256 samples of the 2.5 MS/s
+  channel (9.8 kHz bins, 102 µs frames; Hann). A bin is active 8 dB over
+  its floor (two frames averaged); the floor follows quiet bins (1/64 a
+  frame) and, inside an open burst's range, only creeps (1/1024), so a
+  weak burst cannot lift its own floor. Active bins within 3 bins are one
+  cluster; a cluster within 8 bins (FSK's other tone) of an open burst
+  joins it, else opens a new one where the last frame was active too (up
+  to 6 open). A burst closes after 25 ms quiet or 1.5 s; one with fewer
+  than 6 active frames is dropped.
+- **Cut-out:** confirmed bursts (3 active frames) are mixed down and
+  decimated ÷5 to 500 kS/s by a 9-tap triangle (boxcar²: its nulls sit on
+  every alias of 0 Hz), replayed from a 32 ms ring so the 2 ms before the
+  burst are kept. Noise opens ~26 bursts a second; cutting each out before
+  it was confirmed cost more than everything else. When the burst ends it
+  is re-centred on its power-weighted centre and filtered to its own
+  width (bins within 20 dB of its peak, +10 kHz, at least ±20 kHz): a
+  1 kbit/s OOK sensor keeps ~15 dB that a ±200 kHz cut would throw away.
+- **Pulses:** the envelope (smoothed over a quarter of the filter's
+  correlation time) is sliced half-way in amplitude (±12 % hysteresis, as
+  rtl_433) between the noise (20th percentile of the burst, which has its
+  quiet edges) and the carrier: the median of what is clearly carrier, not
+  the top percentile, which sits high on the noise and trimmed every pulse
+  by 2–3 µs, enough to split ERT meters' 30 µs chips. Pulses and dips
+  under 20 µs are spurious (rtl_433's 10 samples). Packages end on
+  rtl_433's rules (gap > 10× the longest pulse and 10 ms, or 100 ms).
+- **FSK:** a stretch of carrier (dips ≤ 100 µs ignored) of at least 0.8 ms
+  and 85 % on is tried as FSK: FM discriminator, two tones by 2-means,
+  accepted when they are ≥ 4 kHz apart and the spread about them is under
+  0.35 of the shift; high tone = pulse, as rtl_433. A package with FSK
+  found is FSK only.
+- **Slicers:** rtl_433's, except the reset limit is 10 % longer: ERT's is
+  64 µs against a 60 µs longest symbol, closer than edge jitter in noise.
+- **Bugs fixed on the way:** `BitBuffer::clear` now zeroes every row: a
+  decoder that shortens or rewrites rows left bits that the next device's
+  slicer ORed into (Honeywell failed after Oregon had run on the same
+  package). `invert` on whole-byte rows re-inverted the last byte (C's
+  `0xff >> 8` is 0).
+
+**Devices** (rtl_433's names, models, keys, priorities and off-by-default
+flags kept; 101 samples: made-up messages with valid checks, or rtl_433's
+own examples; no real IDs): Oregon Scientific v2.1/v3 (THGR122N … WGR800,
+PCR800, Owl CM1x0), Acurite (Tower, 5n1, 3n1, Atlas, 6045M, 515, leak,
+899, 896, 609TXC, 606TX, 986, 00275rm), LaCrosse TX141 family and IT+
+TX29/TX35, Fine Offset (WH2/WH5, WH24/WH65B, WH0290, WH25/WH32, WH51,
+WH0530/Alecto, WH1080/WH3080 OOK and FSK, Rosenborg), Ecowitt
+WH31E/WH40/WN20/WS68, Bresser 5in1/6in1/7in1 (and CO2, HCHO/VOC), Nexus,
+Prologue, Rubicson, Ambient F007TH, ThermoPro TX2, generic remote
+(EV1527), Honeywell, Interlogix, Schrader (5 kinds), Citroen, Renault,
+Toyota, Ford, Hyundai VDO, Kia, CurrentCost, Efergy e2, ERT SCM, IDM and
+NetIDM. Not ported from those files: Acurite 985 and 590TX; Oregon v1 and
+SL109H are other files; flex's `OOK_MC_OSV1` is refused.
+
+**Plug-in** (`ism.rs`): 2.5 MS/s, 2 MHz passed (433.05–434.79 or 868–870
+MHz in one go; drag the edges for less). Card: the latest device big, its
+fields, the SNR bar (10 dB marked), counts, the last five messages. Scopes
+"Pulses" (the last package's first 16 pulses) and "Bursts" (the last
+minute's bursts by frequency and age, the band's map under it). Each
+message is one log line, rtl_433 style, with its frequency and SNR; the
+same message again within 2 s counts as a repeat. `Sink::devices` (new in
+the API: `Devices`, `HeardDevice`) carries the heard list; the GUI's
+Devices tab sorts it by any column, click a row for every field. Flex tab:
+the decoder's panel (device groups, rtl_433's off-by-default decoders,
+unknown bursts to the log, 8 flex specs with Apply, and the packages
+nothing decoded with a flex spec to start from and a "use" button).
+Settings `weather`, `remotes`, `tpms`, `meters`, `flex`, `all`, `unknown`,
+`flex1`…`flex8`. The list clears on a retune.
+
+**Simulator:** `ism_make` writes every sample, each at its own frequency
+and level, some overlapping, in noise (cs8, 2.5 MS/s, tuning in the name).
+40 s of it: 118 transmissions, all decoded, 95 devices listed.
+
+**Tests:** each device's samples through its decoder; every sample rows →
+pulses → slicer; every sample over the air (its own offset, ~23 dB in a
+75 kHz channel) through the whole receiver; two bursts at once; the
+plug-in's log and devices list.
+
+**CPU** (`filetest`, fastest of 3, one core = 100 %, 2.5 MS/s): noise only
+1.9 % (the FFT); the simulated band, ~3 transmissions a second (busier
+than any real one), 4.3 %. In the GUI the decoder worker reads 5 %
+(including the host's cut to 2.5 MS/s). On the way: a 41-tap cut-out
+filter gave 8.0 %; the triangle 5.2 %; a plain ring and confirmed-only
+cut-outs 4.3 %.
+
+**Not done / to check on real signals:** no real sensor has been heard yet
+(433.92 MHz with the 2 MHz channel on the Airspy is the first thing to
+try, then 868.3 MHz); sensitivity not swept; 915 MHz's 26 MHz band needs
+several VFOs; many samples are made up, so field layouts rest on the port.

@@ -27,7 +27,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use declab_api::{
-    Block, Card, Command, DataPacket, Decoder, DecoderFactory, Heard, InputSpec, Location, Lock, Measurement,
+    Block, Card, Command, DataPacket, Decoder, DecoderFactory, Devices, Heard, InputSpec, Location, Lock, Measurement,
     Picture, Service, Sink, Tuning, WaterfallRow,
 };
 use declab_core::{Iq, SampleFormat};
@@ -157,6 +157,8 @@ pub struct DecoderView {
     pub services: Vec<Service>,
     /// Talkgroups and radios heard (digital voice), the latest list.
     pub heard: Option<Heard>,
+    /// Devices heard (ISM bands), the latest list.
+    pub devices: Option<Devices>,
     pub text: HashMap<u32, String>,
     /// The latest picture of each service.
     pub pictures: HashMap<u32, Picture>,
@@ -1278,6 +1280,9 @@ fn worker_thread(
         }
         if let Some(h) = sink.heard.take() {
             v.heard = Some(h);
+        }
+        if let Some(d) = sink.devices.take() {
+            v.devices = Some(d);
         }
         v.packets_total += sink.packets.len() as u64;
         v.packets.extend(sink.packets.drain(..));

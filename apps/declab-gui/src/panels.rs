@@ -502,7 +502,7 @@ pub fn services(ui: &mut Ui, view: &DecoderView, selected: Option<u32>) -> Optio
 }
 
 /// Seconds as m:ss (h:mm:ss past an hour).
-fn clock(s: f64) -> String {
+pub(crate) fn clock(s: f64) -> String {
     let s = s.max(0.0) as u64;
     if s >= 3600 {
         format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
@@ -515,14 +515,14 @@ fn clock(s: f64) -> String {
 /// (names A–Z, counts and times largest first, last heard most recent
 /// first) or, clicked again, the other way. Kept in egui's memory per table.
 #[derive(Clone, Copy, PartialEq)]
-struct SortBy {
-    col: usize,
-    reversed: bool,
+pub(crate) struct SortBy {
+    pub col: usize,
+    pub reversed: bool,
 }
 
 /// A table's header row of clickable column names (the sorted one marked
 /// ▼/▲); returns how to sort. `last` is the default column.
-fn sort_header(ui: &mut Ui, table: &str, cols: &[(&str, bool)], last: usize) -> SortBy {
+pub(crate) fn sort_header(ui: &mut Ui, table: &str, cols: &[(&str, bool)], last: usize) -> SortBy {
     let id = ui.id().with(("heard_sort", table));
     let mut by = ui.data(|d| d.get_temp::<SortBy>(id)).unwrap_or(SortBy { col: last, reversed: false });
     for (i, &(name, right)) in cols.iter().enumerate() {
@@ -548,7 +548,7 @@ fn sort_header(ui: &mut Ui, table: &str, cols: &[(&str, bool)], last: usize) -> 
 }
 
 /// "TG 2350" as ("TG ", 2350), so TG 9 sorts before TG 2350.
-fn natural(s: &str) -> (String, u64) {
+pub(crate) fn natural(s: &str) -> (String, u64) {
     let i = s.find(|c: char| c.is_ascii_digit()).unwrap_or(s.len());
     let n = s[i..].chars().take_while(char::is_ascii_digit).collect::<String>();
     (s[..i].to_string(), n.parse().unwrap_or(0))
