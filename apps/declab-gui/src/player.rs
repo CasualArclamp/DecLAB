@@ -409,7 +409,10 @@ impl TvWindow {
                 let (col, text) = if st.running && (st.frames_shown > 0 || st.audio.is_some()) {
                     (
                         Color32::from_rgb(110, 220, 110),
-                        if self.picture {
+                        // `clock` is "sound", "wall" or "waiting for the sound".
+                        if self.picture && st.clock.starts_with("waiting") {
+                            format!("playing · {}", st.clock)
+                        } else if self.picture {
                             format!("playing · timed by the {}", st.clock)
                         } else {
                             "playing".to_string()

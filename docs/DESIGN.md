@@ -891,10 +891,11 @@ Engine and GUI done; the CLI still runs one decoder.
   about 1.5 dB.
 - **Tested on simulation only** (`cargo run --release -p declab-decoders
   --example sat_make -- OUT s2ts|s2x|gse|dvbs [ES_N0] [SECONDS] [OFFSET_HZ]
-  [RS]`, cf32 at 4 S/symbol; and DecSAT's `decsat tx`): 8PSK 3/4 TS, S2X
+  [RS]`, cf32 at 4 S/symbol; and DecSAT's `decsat tx`): QPSK 1/2 TS
+  (`s2ts` is MODCOD 4; this said 8PSK 3/4 until §29), S2X
   (8PSK 25/36), QPSK GSE (546 UDP datagrams in the PCAP), DVB-S 3/4 down to
   6.5 dB, offsets of ±300 kHz, two unit tests. CPU: the demodulator is the
-  cost (8PSK 3/4 at 2 MS/s on a 8 MS/s channel, 49 % of a core; the FEC
+  cost (QPSK 1/2 at 2 MS/s on a 8 MS/s channel, 49 % of a core; the FEC
   thread ~20 %): decimating to 2-3 samples a symbol before the matched
   filter would roughly halve it.
 - **Not done:** ISI selection (the first TS stream is output; every stream is
@@ -1103,3 +1104,45 @@ oscillators (Universal 9750 / 10600, single-band 10750 / 11300).
 - The frequency display grew to 11 digits for 10 GHz and up.
 - `declab-gui --set KEY=VALUE` (repeatable) sets a setting of `--decoder`'s
   page for one run, as the CLI's `--set` does: `--set lo_hz=9750000000`.
+
+## 30. The player from the decoder card; checked on every DVB mode (2026-11-03)
+
+The player (§12: DecDVB-T's window, ffmpeg in a child process) was only
+reached from the services list. It was checked end to end on DVB-T, DVB-T2
+and, for the first time, DVB-S2 carrying real video.
+
+- **"▶ In app" under the card's scope**, as on DecSAT's VFO panel: shown
+  once the decoder's TS has a PMT with a video stream; plays the service
+  picked in the list if it has pictures, else the first that has, or brings
+  its window up if it is playing (`Tv::in_app_service`, `Tv::in_app`). Any
+  decoder that sends `Sink::ts` gets it (DVB-T/T2, sat). GUI `--in-app`
+  presses it once the service's type is known.
+- **Bug fixed: HD was squashed to 32:9.** The one-field path for HD (`field=top`,
+  §12) halves the lines but kept SAR 1:1, so the fit by display aspect made
+  1080i a 960×270 strip (the v0.2.x `gui_play.png` shows it). It now halves
+  the SAR too (`field=top,setsar=sar/2`): 16:9, ffmpeg's cost unchanged.
+- **A satellite carrier with a programme on it:** `sat_make` takes a TS file
+  (looped in place of the test packets; `TsBbFramer::with_packets` in
+  `decsat-mod`) and a new kind `s2tv` (8PSK 3/4, MODCOD 14, TS rate
+  4 355 051 bit/s at 2 MS/s), written as cs8 when OUT ends `.cs8`. A service
+  cut from a DVB-T capture by ffmpeg at that constant rate comes out of the
+  `sat` decoder bit-exact (86 694 of 86 694 packets) and plays in-app.
+  `s2ts` turned out to be QPSK 1/2 (MODCOD 4), not the 8PSK 3/4 §23 said.
+- The status line read "timed by the waiting for the sound" while the
+  pictures wait for the sound: now "playing · waiting for the sound".
+- **CPU** (one core = 100 %; GUI process, and ffmpeg's own; 12 s after 8 s,
+  two runs each, machine otherwise idle):
+
+  | source | GUI, no player | GUI, playing | ffmpeg |
+  |---|---|---|---|
+  | sat sim, SD MPEG-2 576i (DVB-S2 8PSK 3/4, 2 MS/s) | 94–95 % | 106–110 % | 21–31 % |
+  | C23, SD MPEG-2 576i (DVB-T) | 68–74 % | 84 % | 15–18 % |
+  | C30, HD H.264 1080i (DVB-T2) | 147–152 % | 155–171 % | 64–66 % |
+
+  The player's share of the GUI (the tap, the sound, a 960×540 texture a
+  picture) is 8–20 % of a core; ffmpeg's decode is the rest. "GPU decode"
+  (not measured here) moves HD's decode to the graphics card.
+- **Not done:** no ffmpeg-free decoder exists in any of the Dec* projects
+  (DecSAT's and DecDVB-T's players also run ffmpeg.exe); one would mean
+  Media Foundation or a linked libavcodec. The button plays only the selected
+  VFO's TS, as the services list does.

@@ -82,7 +82,10 @@ pub enum Deinterlace {
     /// shown at half its height or less (1080i in the 960×540 frame), where
     /// a field is all the lines that are shown anyway. On BBC One HD it cut
     /// ffmpeg from 52 % of a core to 38 % (yadif at full height was most of
-    /// the filtering). Not for SD: a 576i field is 288 lines.
+    /// the filtering). Not for SD: a 576i field is 288 lines. A field has
+    /// half the lines on the same screen height, so its pixels are twice as
+    /// tall: the sample aspect ratio is halved with them, or the fit below
+    /// (by display aspect) would show 1080i at 32:9.
     Field,
 }
 
@@ -92,7 +95,7 @@ impl Deinterlace {
         match self {
             Deinterlace::Bob => "yadif=mode=send_field:deint=interlaced",
             Deinterlace::Frame => "yadif=mode=send_frame:deint=interlaced",
-            Deinterlace::Field => "field=top",
+            Deinterlace::Field => "field=top,setsar=sar/2",
         }
     }
 }
@@ -343,7 +346,7 @@ mod tests {
         assert!(vf(Deinterlace::Bob).starts_with("yadif=mode=send_field:deint=interlaced,"));
         assert!(vf(Deinterlace::Frame).starts_with("yadif=mode=send_frame:deint=interlaced,"));
         assert_eq!(Deinterlace::default(), Deinterlace::Bob);
-        assert!(vf(Deinterlace::Field).starts_with("field=top,"));
+        assert!(vf(Deinterlace::Field).starts_with("field=top,setsar=sar/2,"));
     }
 
     #[test]
