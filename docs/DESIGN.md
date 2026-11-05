@@ -553,6 +553,16 @@ TS2) at falling C/N, with C/N measured in 12.5 kHz.
   opcode 62 Capacity Plus, 0x06 Connect Plus, 0x08/0x68 Hytera), ETSI
   Tier III PDUs (with Motorola's too: Capacity Max) and LRRP (Motorola's
   protocol): "DMR · repeater · MOTOTRBO Capacity Plus".
+- (2026-11-05) **MOTOTRBO calls under FID 0x10.** A Capacity Plus
+  system on air showed no talkgroups: its calls come in LCs with
+  Motorola's FID, FLCO 0 (group) and, in the voice header, FLCO 4 (group
+  in bytes 3–5, rest LSN in byte 6, source in bytes 7–8). `FullLc::call()`
+  now reads them (`moto_call`, layouts as SDRTrunk and DSD-FME have them;
+  FLCO 4 and FLCO 0 agree on group and source on air). The channel-status
+  CSBK (opcode 62) is shown: rest LSN, then each busy LSN's group. Calls
+  are matched by source, destination and type only (`who`), since
+  MOTOTRBO flips a reserved service-option bit mid-call, which had split
+  each call into many; CSBK lines are deduplicated by their text.
 
 ## 15. NXDN48 (2026-10-29)
 
