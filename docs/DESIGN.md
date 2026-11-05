@@ -47,6 +47,14 @@ scope and milestones; update it when a decision changes.
   order: 2 or 4 bands) and "Eye"; the GUI opens on "Symbols"
   (`DecoderFactory::default_scope`, new). Low-SNR receiver: tone
   correlators, per-tone AFC, Chase BCH (see DecPagers' DESIGN §3a).
+- (2026-11-05) **POCSAG Manchester**: a cheap on-site paging transmitter
+  seen on air sends POCSAG 512 Manchester-coded (each bit as its complement
+  then itself, 1024 chips/s, ±3.9 kHz, ~0.9 s of bare carrier first). Its
+  preamble looks like plain 512, so the plain decoder took it and then lost
+  sync at the codewords. `pocsag::ManchesterDecoder` runs a 1024-baud chain
+  and pairs chips both ways; the plain decoder's pages at that rate are
+  dropped while it is active (it can lock onto one chip a bit and slip).
+  Setting `manchester` (on by default, 512 only): ~0.13 % of a core more.
 - (2026-10-27) **GUI interactions** asked for: middle-drag pans the spectrum
   and waterfall; a middle click (no drag) opens a radial decoder picker like
   a game's weapon wheel — scroll to step round it, or point at a slice, and

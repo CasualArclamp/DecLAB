@@ -294,6 +294,81 @@ impl PocsagDecoder {
     }
 }
 
+/// POCSAG sent Manchester-coded, as some cheap on-site paging transmitters
+/// do: each bit is two half-bit chips, the complement first and then the
+/// bit (so 512 bit/s goes out as 1024 chips/s with a transition mid-bit).
+/// The preamble then looks like plain POCSAG at the bit rate, but the
+/// codewords do not. Not in M.584; seen on air 2026-11-05.
+///
+/// Fed chips from a slicer at twice the bit rate. Which chip starts a bit
+/// is not known, so two decoders each take one pairing; the wrong one
+/// never finds sync.
+pub struct ManchesterDecoder {
+    pairs: [PocsagDecoder; 2],
+    /// Soft value of the previous chip (+ upper frequency), and the parity
+    /// of the next chip.
+    prev: f32,
+    odd: bool,
+}
+
+impl ManchesterDecoder {
+    /// `baud` is the bit rate (the chip rate is twice it).
+    pub fn new(baud: u32) -> Self {
+        ManchesterDecoder {
+            pairs: [PocsagDecoder::new(baud), PocsagDecoder::new(baud)],
+            prev: 0.0,
+            odd: false,
+        }
+    }
+
+    pub fn set_charset(&mut self, c: Charset) {
+        for d in &mut self.pairs {
+            d.set_charset(c);
+        }
+    }
+
+    pub fn baud(&self) -> u32 {
+        self.pairs[0].baud()
+    }
+
+    /// One chip: `soft` signed (+ upper frequency), any scale.
+    pub fn push(&mut self, soft: f32) {
+        // The bit is the second chip, and the first is its complement, so
+        // half their difference is the matched-filter output for the bit.
+        let bit = 0.5 * (soft - self.prev);
+        self.pairs[usize::from(self.odd)].push(bit > 0.0, bit.abs());
+        self.prev = soft;
+        self.odd = !self.odd;
+    }
+
+    pub fn in_sync(&self) -> bool {
+        self.pairs.iter().any(PocsagDecoder::in_sync)
+    }
+
+    pub fn drain(&mut self, out: &mut Vec<Page>) {
+        let start = out.len();
+        for d in &mut self.pairs {
+            d.drain(out);
+        }
+        for p in &mut out[start..] {
+            p.flags = "Manchester".into();
+        }
+    }
+
+    pub fn finish(&mut self) {
+        for d in &mut self.pairs {
+            d.finish();
+        }
+    }
+
+    /// Codewords seen and how many were beyond repair.
+    pub fn counts(&self) -> (u64, u64) {
+        self.pairs
+            .iter()
+            .fold((0, 0), |(w, b), d| (w + d.codewords, b + d.bad_words))
+    }
+}
+
 /// Bits taken `n` at a time, the first on air as the least significant.
 fn lsb_first(bits: &[bool], n: usize) -> impl Iterator<Item = u8> + '_ {
     bits.chunks_exact(n).map(|c| {

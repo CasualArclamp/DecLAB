@@ -82,6 +82,19 @@ impl SignalBuilder {
         self.symbols(&syms, baud, 2, POCSAG_DEV);
     }
 
+    /// POCSAG Manchester-coded (see [`pocsag::ManchesterDecoder`]): each
+    /// bit as its complement then itself, at twice `baud` chips a second.
+    pub fn pocsag_manchester(&mut self, baud: u32, msgs: &[PocsagMessage]) {
+        let syms: Vec<u8> = pocsag::encode(msgs)
+            .iter()
+            .flat_map(|&b| {
+                let s = if b { 0 } else { 3 };
+                [3 - s, s]
+            })
+            .collect();
+        self.symbols(&syms, 2 * baud, 2, POCSAG_DEV);
+    }
+
     pub fn flex(&mut self, f: &FlexFrame) {
         self.flex_dev(f, FLEX_DEV, f.data.len());
     }
