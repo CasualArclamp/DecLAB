@@ -2106,6 +2106,23 @@ impl eframe::App for App {
                                     }
                                     return;
                                 }
+                                // LoRa mesh: its panel is the tabs (nodes,
+                                // messages, packets, keys).
+                                if info.id == "lora" {
+                                    let mut cmds = Vec::new();
+                                    if let Some(Some(p)) = self.panels.get_mut(self.dec) {
+                                        p.ui(ui, &mut cmds);
+                                    }
+                                    if !cmds.is_empty() {
+                                        if let Some(h) = &self.host {
+                                            for c in cmds {
+                                                h.command(c);
+                                            }
+                                        }
+                                        ism_save = true;
+                                    }
+                                    return;
+                                }
                                 if info.family == declab_api::Family::Voice {
                                     match self.data_tabs.bar(ui, &self.view) {
                                         data_tabs::Tab::Heard => {

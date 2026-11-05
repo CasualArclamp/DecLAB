@@ -67,6 +67,20 @@ scope and milestones; update it when a decision changes.
   `..\rtl_433-ref`, never committed). GUI as the agreed mockup: card,
   "Pulses"/"Bursts" scopes, Devices/Log/Flex tabs over the right-hand box
   (§31).
+- (2026-11-05) **LoRa mesh** (user's choices): the `lora` plug-in
+  (`declab-decoders/src/lora.rs`) over `crates/declab-lora`: LoRa CSS
+  demodulation at every SF 7–12 and bandwidth 62.5/125/250/500 kHz at
+  once (the presets found by themselves), the header, coding rates and
+  CRC; Meshtastic packets (radio header, AES-CTR with the presets'
+  default key, protobuf payloads: text, position, node info, telemetry,
+  routing, traceroute, neighbours, waypoints, map reports) and MeshCore
+  packets (header, route, path, adverts, acks, control) plus MeshCore's
+  Public channel (its key is published; the MAC checks it). GUI as the
+  agreed mockup: card, "Dechirp" scope, Nodes/Messages/Packets/Keys tabs
+  over the right-hand box (§32). Coding chain ported from gr-lora_sdr
+  (GPL-3.0-or-later), field numbers from meshtastic/protobufs (GPL-3.0),
+  layouts from MeshCore (MIT); reference clones in `..\lora-ref`, never
+  committed.
 - (2026-10-27) **GUI interactions** asked for: middle-drag pans the spectrum
   and waterfall; a middle click (no drag) opens a radial decoder picker like
   a game's weapon wheel — scroll to step round it, or point at a slice, and
@@ -153,6 +167,7 @@ DecLAB is GPL-3.0-or-later, so DAB+ uses libxaac (§20).
 | V4 | TETRA downlink in Digital voice: cell, calls, status, SDS; π/4-DQPSK coherent receiver; ACELP speech via a separate library | ✅ 2026-10-30 in simulation only; speech needs `tetra_acelp.dll` (private, not GPL); π/8-D8PSK, QAM and the uplink not decoded |
 | S1 | Network IQ source: raw IQ over TCP (connect or listen) or UDP, rtl_tcp recognised and tuned; SDR++'s IQ Exporter as the way in for radios without a driver here (SDRplay RSPduo) | ✅ 2026-11-03 against a stand-in sender (`net_send`); SDR++ itself not yet tried. Native SDRplay API next |
 | I1 | ISM devices (rtl_433's protocols): wideband burst finder, OOK/FSK pulse detection, rtl_433's slicers, device decoders from 29 rtl_433 files, flex decoder, heard-devices table, simulator | ✅ 2026-11-05 in simulation only: no real sensor heard yet |
+| L1 | LoRa mesh: CSS receiver for every preset at once, Meshtastic (default keys) and MeshCore (adverts, Public channel) packets, nodes/messages/packets tabs, simulator | ✅ 2026-11-05 in simulation; live, real LoRa frames (another 0x12 user) decode with good CRCs; no Meshtastic/MeshCore heard yet (§32) |
 | later | DLL plug-ins; DVB-C (port of `Documents\DecSAT\dvbc_decode.py`); modulators |
 
 ## 4. Notes from M1a (2026-10-27)
@@ -1289,3 +1304,111 @@ cut-outs 4.3 %.
 (433.92 MHz with the 2 MHz channel on the Airspy is the first thing to
 try, then 868.3 MHz); sensitivity not swept; 915 MHz's 26 MHz band needs
 several VFOs; many samples are made up, so field layouts rest on the port.
+
+## 32. LoRa mesh: Meshtastic and MeshCore (2026-11-05)
+
+The `lora` decoder finds LoRa frames of any preset in its channel and
+reads the two meshes most people run on them.
+
+**Shape.** `crates/declab-lora`:
+
+| Module | What | From |
+|---|---|---|
+| `codec` | gray, diagonal interleaver, Hamming 4/5–4/8, explicit header and its checksum, whitening, payload CRC; both ways | gr-lora_sdr (GPL-3.0-or-later) |
+| `receiver` | half-band branches, preamble detectors, synchronisation, drift tracking, symbol decisions | new (steps of gr-lora_sdr's `frame_sync`) |
+| `meshtastic` | radio header, channel hash, AES-CTR, `Data` and its payloads | Meshtastic firmware layouts, meshtastic/protobufs (GPL-3.0) |
+| `mt_names` | port, hardware, role and routing-error names | generated from meshtastic/protobufs |
+| `meshcore` | header, transport codes, path, adverts, group text (AES-ECB, HMAC), acks, control | MeshCore docs and source (MIT) |
+| `proto`, `crypto` | protobuf wire format; AES-128/256, SHA-256, HMAC, base64 (no new dependencies) | protobuf.dev, FIPS-197, FIPS 180-4, RFC 2104/4648 |
+| `sim` | phase-exact LoRa modulator (carrier offset and crystal error), sample packets of both meshes | new |
+
+**Receiver.** The plug-in asks for 1 MS/s with 400 kHz passed: from a 10
+MS/s radio the host's cut is then a plain ÷10 (it decimates to at least
+2.5 × the bandwidth; at 900 kHz it went ÷4 and a 2/5 resampler, and the
+worker read ~30 % of a core instead of ~15 %). The 500 kHz presets lose
+their outer 50 kHz each side (sensitivity, not decoding; they are not
+allowed in the EU's 869.4–869.65 MHz sub-band). Four 23-tap half-bands
+make branches at 500, 250, 125 and 62.5 kS/s, one sample a chip.
+
+- *Detection:* per branch and SF, every other window of 2^SF samples is
+  dechirped and FFT'd; three in a row with the peak within two bins and
+  over ln N + 3.5 times the mean bin start a frame. CPU is the FFTs:
+  ~1.5 % of a core on noise for all 24 combinations (the Keys tab turns
+  bandwidths and SFs off).
+- *The wrap's phase step* is what makes one sample a chip hard: a chirp
+  late by a fraction τ of a sample is e^(−j2πτ) out of phase from its
+  frequency wrap on, which moved peaks by up to a bin for mid-range
+  symbols. Every measurement is made on windows with no wrap inside
+  (preamble and down-chirps moved onto the symbols once the integer
+  offset is known), and each payload symbol is decided, its step put
+  right, and decided again.
+- *Fractions of a bin* come from a zoomed DFT of the main lobe: the
+  neighbouring bins are bent by the half-bands at the chirp's jump (a
+  three-bin estimator, complex or magnitude, was off by up to 0.3 bin).
+- *Clock drift* (a crystal moves chip rate and carrier together; 10 ppm at
+  SF11 is 0.02 sample a symbol, several samples over a long frame): the
+  preamble's slope, weighed against the carrier offset's guess (which is
+  wrong when the VFO is off the nominal frequency), then a second-order
+  loop on each symbol's phase across its wrap, −π × the timing error
+  whatever the symbol. (The peak's position cannot tell timing from
+  frequency: a loop on it drifted off and slipped.)
+- *Decisions:* the header block and LDRO symbols in fours (the four bins'
+  power summed); Hamming by nearest codeword.
+
+**Measured** (`lora_sweep`, 40-byte frames with ±3 ppm and offsets; 50 %
+point, in the signal's bandwidth; Semtech's figure after): SF7/250 −6.5
+dB (−7.5), SF9/250 −13 (−12.5), SF11/250 −18.7 (−17.5), SF12/125 −22
+(−20), SF8/62.5 −11 (−10). The reported SNR is within 0.4 dB. Clean
+frames decode at offsets up to a quarter of the bandwidth and ±20 ppm.
+CPU (`filetest`, fastest of 3): 1.9 % of a core on the simulated channel,
+1.5 % on noise; the GUI's decoder worker on the 1 MS/s file reads 2 %.
+Live from the Airspy (10 MS/s) the worker reads 14–15 %: the host's ÷10
+cut is ~13 % of it (the ISM decoder's worker, ÷2 and a 1/2 resampler to
+2.5 MS/s, reads ~39 % live).
+
+**Live** (Airspy R2, LNA 10 mixer 7 VGA 11, 869.525 MHz, 2026-11-05):
+in 3 minutes 161 frames, all SF8 at 125 kHz with sync word 0x12 and 2–4
+byte payloads (a private LoRa user's, not MeshCore's layout), 158 with a
+good CRC, at −12 to +8 dB: a real chip's header checksum, whitening and
+CRC agree with this chain. Ten minutes more: 507 frames from the same
+users (SF8/125, one SF7/125), 94 % with a good CRC. No Meshtastic or
+MeshCore packet was heard in those 13 minutes, so the meshes' layers are
+checked against their sources and the simulation only. Those frames had
+also been taken for MeshCore ("reserved" types): `meshcore::decode` now
+wants each type's shape (version 1, whole AES blocks, minimum lengths).
+
+**Meshes.** The sync word says which: 0x2B Meshtastic, 0x12 MeshCore (and
+RadioLib's other private users). Meshtastic: every preset's default
+channel (name = preset, key "AQ==") is tried by its hash; the nonce is
+the packet ID and sender; a `Data` that parses with a known port is the
+right key. PKI direct messages (channel hash 0) cannot be read and say
+so. MeshCore: adverts (key, name, type, position; the signature is not
+checked), group text on Public and on any `#hashtag` channel added (key
+= SHA-256 of the name), checked by its 2-byte HMAC; direct messages show
+their two hashes. Nodes: Meshtastic by number (names from node info,
+hardware and role, telemetry fields), MeshCore by advert key.
+
+**Plug-in.** Card: preset name (Meshtastic's, else "SF8 · 62.5 kHz"), the
+SNR bar ticked at what the SF needs, offset, drift, sender, type, hops.
+Scope "Dechirp": the latest frame's symbols (time across, value up) with
+each symbol's dechirped spectrum as a small waterfall under it. Tabs over
+the right-hand box: Nodes (sortable, click for everything it said),
+Messages, Packets (click for fields, bytes and decrypted bytes), Keys
+(bandwidths and SFs watched, extra Meshtastic and MeshCore channels, bad
+CRCs to the log). Settings `bw`, `sf`, `mt_channels`, `mc_channels`,
+`bad_crc`; `--set tab=messages` opens a tab. Lists clear on a retune.
+
+**Simulator:** `lora_make` writes 1 MS/s cs8 or cf32 with every sample
+packet (Meshtastic node info, text, position, telemetry, environment, a
+PKI message; MeshCore adverts, Public text, a direct message, an ack; at
+250 kHz SF11 and 62.5 kHz SF8), each at its own SNR, offset and ppm: 30
+s, 29 packets, all decoded.
+
+**Not done / to check:** a signal is found within about a quarter of its
+bandwidth of the VFO (put one VFO on each mesh channel: Meshtastic EU
+LongFast and MeshCore's 250 kHz preset share 869.525 MHz, MeshCore's
+narrow preset is at 869.618); implicit-header frames (LoRaWAN downlinks)
+are not decoded; two frames of the same SF and bandwidth at once lose
+the second; Meshtastic's PKI and MeshCore's direct messages need keys
+the decoder does not have.
+
