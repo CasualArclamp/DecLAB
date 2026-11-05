@@ -240,7 +240,12 @@ fn row(ui: &mut egui::Ui, i: usize, r: &Row, on: bool, can_remove: bool, acts: &
     p.text(
         pos2(rt, rect.min.y + 7.0),
         Align2::RIGHT_TOP,
-        format!("{:.3} MHz", r.freq_hz / 1e6),
+        // A Ku-band downlink (behind an LNB) in GHz, to fit beside the name.
+        if r.freq_hz >= 10e9 {
+            format!("{:.5} GHz", r.freq_hz / 1e9)
+        } else {
+            format!("{:.3} MHz", r.freq_hz / 1e6)
+        },
         FontId::monospace(15.0),
         Color32::from_gray(235),
     );

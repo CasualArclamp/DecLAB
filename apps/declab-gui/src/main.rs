@@ -99,6 +99,9 @@ struct Options {
     vfos: Vec<(String, f64)>,
     /// `--rail-closed`: start with the VFO list collapsed.
     rail_closed: bool,
+    /// `--set KEY=VALUE` (repeatable): a setting of the `--decoder`'s panel,
+    /// as the CLI's `--set` (`lo_hz=9750000000` for an LNB, say).
+    sets: Vec<(String, String)>,
     screenshot: Option<PathBuf>,
     after: f64,
 }
@@ -168,6 +171,11 @@ impl Options {
                     o.vfos.push((id.to_string(), parse_hz(hz)?));
                 }
                 "--rail-closed" => o.rail_closed = true,
+                "--set" => {
+                    let v = value("KEY=VALUE")?;
+                    let (k, val) = v.split_once('=').ok_or("--set: KEY=VALUE, like lo_hz=9750000000")?;
+                    o.sets.push((k.to_string(), val.to_string()));
+                }
                 "--bias-tee" => o.bias_tee = true,
                 "--play" => {
                     o.play = Some(
@@ -574,6 +582,11 @@ impl App {
                 None => eprintln!("--vfo: no decoder {id:?}"),
             }
         }
+        if let Some(Some(p)) = app.panels.get_mut(app.dec) {
+            for (k, v) in &app.opts.sets {
+                p.restore(k, v);
+            }
+        }
         if app.settings_open {
             app.settings_page = Some(app.dec);
         }
@@ -741,6 +754,22 @@ impl App {
 
     fn factory(&self) -> &'static dyn DecoderFactory {
         declab_decoders::ALL[self.dec]
+    }
+
+    /// The LNB local oscillator decoder `dec`'s settings name, Hz (0: none;
+    /// only the satellite page has one). Its frequencies are shown and typed
+    /// as the downlink's, IF + L.O.; the radio and the band stay on the IF.
+    fn lo_of(&self, dec: usize) -> f64 {
+        let Some(Some(p)) = self.panels.get(dec) else {
+            return 0.0;
+        };
+        p.settings()
+            .into_iter()
+            .find_map(|c| match c {
+                declab_api::Command::Set { key, value } if key == "lo_hz" => value.parse().ok(),
+                _ => None,
+            })
+            .unwrap_or(0.0)
     }
 
     /// Where a radio starts: the remembered centre if the radio can tune
@@ -1526,9 +1555,10 @@ impl App {
         let colour = family_colour(self.factory().info().family);
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let mut hz = self.chan_hz;
-            if freq_display::show(ui, &mut hz, 0.0, 6e9, 40.0) {
-                self.tune_channel(hz);
+            let lo = self.lo_of(self.dec);
+            let mut hz = self.chan_hz + lo;
+            if freq_display::show(ui, &mut hz, lo, 6e9 + lo, 40.0) {
+                self.tune_channel(hz - lo);
             }
             ui.add_space(14.0);
             ui.vertical(|ui| {
@@ -1681,6 +1711,9 @@ impl App {
                     }
                     ui.label(RichText::new("centre").color(Color32::GRAY));
                     ui.label(RichText::new(format!("{:.3} MHz", self.center_hz / 1e6)).color(Color32::WHITE));
+                    if lo > 0.0 {
+                        ui.label(RichText::new(format!("IF · L.O. {:.3} MHz", lo / 1e6)).color(Color32::GRAY));
+                    }
                     let rec = self.stats.recording.as_ref().map(|(_, b)| *b);
                     if running {
                         let label = match rec {
@@ -1908,7 +1941,7 @@ impl eframe::App for App {
                     n: s.n,
                     colour: s.colour,
                     decoder: declab_decoders::ALL[dec].info().name,
-                    freq_hz: chan,
+                    freq_hz: chan + self.lo_of(dec),
                     status: vfo::status_of(view, running),
                     lock: view.lock,
                     cpu: view.cpu_percent,
@@ -2000,7 +2033,7 @@ impl eframe::App for App {
                     .any(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name));
                 let mut picked = None;
                 ui.horizontal_top(|ui| {
-                    let chan = self.chan_hz;
+                    let chan = self.chan_hz + self.lo_of(self.dec);
                     ui.allocate_ui_with_layout(
                         egui::vec2(widths[0], h),
                         egui::Layout::top_down(egui::Align::Min),
@@ -2158,7 +2191,7 @@ impl eframe::App for App {
                 self.follow_zoom(px, ctx.input(|i| i.max_texture_side));
                 let tex = self.ring.update(&ctx, &self.history);
                 let sel = self.slots.get(self.cur);
-                let label = format!("{} {} {:.4}", sel.map_or(1, |s| s.n), info.name, self.chan_hz / 1e6);
+                let label = format!("{} {} {:.4}", sel.map_or(1, |s| s.n), info.name, (self.chan_hz + self.lo_of(self.dec)) / 1e6);
                 let chan_colour = sel.map_or(colour, |s| s.colour);
                 let idle = match (&self.host, &self.error) {
                     (_, Some(e)) => e.clone(),
@@ -2194,6 +2227,7 @@ impl eframe::App for App {
                         .then(|| format!("moving the band · centre {:.3} MHz", self.view_hz / 1e6)),
                     inert: self.wheel.is_some(),
                     idle_text: &idle,
+                    lnb_lo_hz: self.lo_of(self.dec),
                 };
                 if !skip.contains("band") {
                     actions = band::show(ui, &inp);
