@@ -9,8 +9,8 @@ If you've found this worth your time, please consider [donating via PayPal](http
 
 **One software-defined radio receiver for everything on the air.** Point an
 RTL-SDR, Airspy or HackRF at the sky and DecLAB decodes terrestrial TV,
-digital radio, FM, pagers, two-way digital voice and the ISM bands' sensors
-and remotes, all in one window, all
+digital radio, FM, pagers, two-way digital voice, the ISM bands' sensors
+and remotes, and LoRa meshes, all in one window, all
 in Rust, all from one portable `.exe`.
 
 | | Modes |
@@ -21,6 +21,7 @@ in Rust, all from one portable `.exe`.
 | 〰️ **Analog** | FM with RDS, NFM, AM, USB, LSB, DSB and CW; squelch by level, SNR or noise |
 | 📟 **Pagers** | POCSAG and FLEX |
 | 🌡️ **ISM devices** | Weather stations and sensors, remotes and door/window sensors, tyre-pressure sensors, energy monitors and meters on 433, 868, 315, 345 and 915 MHz, as [rtl_433](https://github.com/merbanan/rtl_433) decodes them (Oregon Scientific, Acurite, LaCrosse, Fine Offset/Ecowitt, Bresser, Nexus and more), plus your own flex decoders; bursts found anywhere in a 2 MHz channel, several at once |
+| 📡 **LoRa mesh** | Meshtastic and MeshCore: every LoRa preset (SF7–12, 62.5–500 kHz) found by itself; Meshtastic's default channels decrypted (text, positions, node info, telemetry), MeshCore's adverts and Public channel; nodes, messages and packets tables |
 | 🎙️ **Digital voice** | DMR (Tier I, II and III, LRRP positions), NXDN48, NXDN96, P25 phase 1 and TETRA, detected by itself; data as a hex dump, LRRP table and IP view |
 
 **Several decoders at once.** Run up to eight VFOs on one radio, each with its
@@ -63,6 +64,12 @@ latest readings; the band's bursts, the last one's pulses, and a log line a
 message.
 
 ![ISM devices](docs/images/ism.jpg)
+
+**LoRa mesh:** Meshtastic and MeshCore nodes, messages and every packet,
+with the preset it was sent on, its SNR against what it needs, and the
+symbols of the last frame.
+
+![LoRa mesh](docs/images/lora.jpg)
 
 **The decoder wheel:** middle-click anywhere to pick a decoder.
 
@@ -158,7 +165,12 @@ borrows from them: [mbelib](https://github.com/szechyjs/mbelib) (AMBE+2 and
 IMBE), DSD, MMDVMHost, SDRTrunk, Dream and welle.io. The ISM device
 decoders, pulse slicers and flex decoder are ported from
 [rtl_433](https://github.com/merbanan/rtl_433) (GPL-2.0-or-later), credited
-in each file. DAB+ audio is decoded by
+in each file. The LoRa coding chain is ported from
+[gr-lora_sdr](https://github.com/tapparelj/gr-lora_sdr) (GPL-3.0-or-later);
+the Meshtastic field numbers come from
+[meshtastic/protobufs](https://github.com/meshtastic/protobufs) (GPL-3.0)
+and MeshCore's layouts from [MeshCore](https://github.com/meshcore-dev/MeshCore)
+(MIT). DAB+ audio is decoded by
 [libxaac](https://github.com/ittiam-systems/libxaac) (Apache-2.0).
 
 ## Licence
