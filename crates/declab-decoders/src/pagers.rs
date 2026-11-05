@@ -69,6 +69,8 @@ impl DecoderFactory for Factory {
 struct Settings {
     /// POCSAG 512, 1200, 2400.
     pocsag: [bool; 3],
+    /// POCSAG 512 Manchester-coded, as some on-site paging transmitters send.
+    manchester: bool,
     flex: bool,
     /// FLEX date/time and system words as log lines.
     system: bool,
@@ -79,6 +81,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             pocsag: [true; 3],
+            manchester: true,
             flex: true,
             system: false,
             charset: Charset::Auto,
@@ -113,6 +116,7 @@ impl Settings {
         }
         match key {
             "flex" => self.flex = on()?,
+            "manchester" => self.manchester = on()?,
             "system" => self.system = on()?,
             "charset" => {
                 self.charset = match value {
@@ -135,6 +139,7 @@ impl Settings {
                 .filter(|(_, on)| *on)
                 .map(|(k, _)| k.1)
                 .collect(),
+            manchester: if self.manchester { vec![512] } else { vec![] },
             flex: self.flex,
             system_words: self.system,
             charset: self.charset,
@@ -191,7 +196,8 @@ impl Pagers {
             self.fixed_bits += u64::from(p.corrected_bits);
             self.bad_words += u64::from(p.bad_words);
             self.last_page_s = Some(self.now_s);
-            let label = format!("{} {}", p.mode(), p.capcode);
+            let m = if p.flags == "Manchester" { "M" } else { "" };
+            let label = format!("{}{m} {}", p.mode(), p.capcode);
             let mut value = p.kind.tag().to_string();
             if !p.text.is_empty() {
                 value = format!("{value}  {}", p.text);
@@ -255,12 +261,15 @@ impl Pagers {
         let (frames, words, bad) = self.rx.stats();
         out.measure("Pages", (self.count_pocsag + self.count_flex) as f64, "");
         out.measure("FLEX frames", frames as f64, "");
-        let modes: Vec<String> = POCSAG_KEYS
+        let mut modes: Vec<String> = POCSAG_KEYS
             .iter()
             .zip(self.settings.pocsag)
             .filter(|(_, on)| *on)
             .map(|(k, _)| k.1.to_string())
             .collect();
+        if self.settings.manchester {
+            modes.push("512M".into());
+        }
         let listening = match (modes.is_empty(), self.settings.flex) {
             (false, true) => format!("POCSAG {} · FLEX", modes.join("/")),
             (false, false) => format!("POCSAG {}", modes.join("/")),
@@ -354,6 +363,10 @@ mod panel {
                 })
                 .collect();
             v.push(Command::Set {
+                key: "manchester".into(),
+                value: onoff(self.s.manchester),
+            });
+            v.push(Command::Set {
                 key: "flex".into(),
                 value: onoff(self.s.flex),
             });
@@ -391,6 +404,17 @@ mod panel {
                             }
                         }
                     });
+                    ui.end_row();
+                    ui.label("POCSAG Manchester");
+                    if ui
+                        .checkbox(&mut self.s.manchester, "512 (on-site pagers)")
+                        .changed()
+                    {
+                        commands.push(Command::Set {
+                            key: "manchester".into(),
+                            value: onoff(self.s.manchester),
+                        });
+                    }
                     ui.end_row();
                     ui.label("FLEX");
                     if ui

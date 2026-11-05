@@ -12,13 +12,16 @@ use crate::Page;
 use crate::flex::FlexDecoder;
 use crate::fsk::{Slicer, Symbol};
 use crate::modulate::{FLEX_DEV, POCSAG_DEV};
-use crate::pocsag::{self, Charset, PocsagDecoder};
+use crate::pocsag::{self, Charset, ManchesterDecoder, PocsagDecoder};
 use crate::tones::ToneBank;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReceiverConfig {
     /// POCSAG bit rates to listen for.
     pub pocsag: Vec<u32>,
+    /// POCSAG bit rates to listen for Manchester-coded (see
+    /// [`ManchesterDecoder`]).
+    pub manchester: Vec<u32>,
     pub flex: bool,
     /// Report FLEX BIW date/time/system words.
     pub system_words: bool,
@@ -29,6 +32,7 @@ impl Default for ReceiverConfig {
     fn default() -> Self {
         ReceiverConfig {
             pocsag: pocsag::RATES.to_vec(),
+            manchester: vec![512],
             flex: true,
             system_words: false,
             charset: Charset::Auto,
@@ -42,6 +46,11 @@ pub struct Receiver {
     /// Discriminator scale: radians a sample → Hz.
     hz_per_rad: f32,
     pocsag: Vec<Chain<PocsagDecoder>>,
+    manchester: Vec<Chain<ManchesterDecoder>>,
+    /// Sample count until which each Manchester chain was last active: the
+    /// plain decoder at its bit rate can lock onto one chip of each bit and
+    /// then slip into false pages, so its pages are dropped meanwhile.
+    manchester_until: Vec<u64>,
     flex: Option<Chain<FlexDecoder>>,
     samples: u64,
     fm: Vec<f32>,
@@ -87,6 +96,15 @@ trait Feed {
 impl Feed for PocsagDecoder {
     fn feed(&mut self, s: &Symbol) {
         self.push(s.sym > 1, s.rel[0]);
+    }
+    fn synced(&self) -> bool {
+        self.in_sync()
+    }
+}
+
+impl Feed for ManchesterDecoder {
+    fn feed(&mut self, s: &Symbol) {
+        self.push(s.soft);
     }
     fn synced(&self) -> bool {
         self.in_sync()
@@ -156,6 +174,7 @@ const TAP_EYE: usize = 8192;
 enum Source {
     Flex,
     Pocsag(usize),
+    Manchester(usize),
     None,
 }
 
@@ -171,6 +190,21 @@ impl Receiver {
                     disc: Slicer::new(rate, b, 2, b),
                     timing: Slicer::for_energy(rate, b, 2),
                     bank: ToneBank::new(rate, b, 2, f64::from(POCSAG_DEV), b),
+                    dec: d,
+                }
+            })
+            .collect();
+        // Chips at twice the bit rate, each a 2-FSK symbol.
+        let manchester = cfg
+            .manchester
+            .iter()
+            .map(|&b| {
+                let mut d = ManchesterDecoder::new(b);
+                d.set_charset(cfg.charset);
+                Chain {
+                    disc: Slicer::new(rate, 2 * b, 2, 2 * b),
+                    timing: Slicer::for_energy(rate, 2 * b, 2),
+                    bank: ToneBank::new(rate, 2 * b, 2, f64::from(POCSAG_DEV), 2 * b),
                     dec: d,
                 }
             })
@@ -191,6 +225,8 @@ impl Receiver {
             prev: Iq::new(1.0, 0.0),
             hz_per_rad: (rate / std::f64::consts::TAU) as f32,
             pocsag,
+            manchester_until: vec![0; cfg.manchester.len()],
+            manchester,
             flex,
             samples: 0,
             fm: Vec::new(),
@@ -235,12 +271,37 @@ impl Receiver {
             t.source = self.describe(source);
             t.synced = synced;
         }
+        let end = self.samples + fm.len() as u64;
+        for (i, c) in self.manchester.iter_mut().enumerate() {
+            let before = out.len();
+            c.run(
+                fm,
+                iq,
+                tap.as_mut().filter(|_| source == Source::Manchester(i)),
+            );
+            c.dec.drain(out);
+            if c.dec.in_sync() || out.len() > before {
+                // A batch plus a second of grace for the plain decoder's
+                // last page to flush.
+                self.manchester_until[i] = end + (2.0 * self.rate) as u64;
+            }
+        }
         for (i, c) in self.pocsag.iter_mut().enumerate() {
             // Rust note: `filter` on an `Option` keeps it only when the test
             // holds, so the tap goes to the followed decoder and `None` to
             // the others.
             c.run(fm, iq, tap.as_mut().filter(|_| source == Source::Pocsag(i)));
+            let before = out.len();
             c.dec.drain(out);
+            let baud = c.dec.baud();
+            let shadowed = self
+                .manchester
+                .iter()
+                .zip(&self.manchester_until)
+                .any(|(m, &until)| m.dec.baud() == baud && until > self.samples);
+            if shadowed {
+                out.truncate(before);
+            }
         }
         if let Some(c) = &mut self.flex {
             c.run(fm, iq, tap.as_mut().filter(|_| source == Source::Flex));
@@ -278,6 +339,9 @@ impl Receiver {
         if let Some(i) = self.pocsag.iter().position(|p| p.dec.in_sync()) {
             return (Source::Pocsag(i), true);
         }
+        if let Some(i) = self.manchester.iter().position(|p| p.dec.in_sync()) {
+            return (Source::Manchester(i), true);
+        }
         let idle = if self.flex.is_some() {
             Source::Flex
         } else if self.pocsag.is_empty() {
@@ -301,6 +365,9 @@ impl Receiver {
                 _ => "FLEX".into(),
             },
             Source::Pocsag(i) => format!("POCSAG {}", self.pocsag[i].dec.baud()),
+            Source::Manchester(i) => {
+                format!("POCSAG {} Manchester", self.manchester[i].dec.baud())
+            }
             Source::None => String::new(),
         }
     }
@@ -314,9 +381,23 @@ impl Receiver {
     /// End of input: report messages still in progress.
     pub fn finish(&mut self, out: &mut Vec<Page>) {
         let start = out.len();
-        for c in &mut self.pocsag {
+        for c in &mut self.manchester {
             c.dec.finish();
             c.dec.drain(out);
+        }
+        for c in &mut self.pocsag {
+            c.dec.finish();
+            let before = out.len();
+            c.dec.drain(out);
+            let baud = c.dec.baud();
+            if self
+                .manchester
+                .iter()
+                .zip(&self.manchester_until)
+                .any(|(m, &until)| m.dec.baud() == baud && until > self.samples)
+            {
+                out.truncate(before);
+            }
         }
         if let Some(c) = &mut self.flex {
             c.dec.finish();
@@ -336,8 +417,13 @@ impl Receiver {
     /// FLEX frames decoded and POCSAG codewords seen, for a status line.
     pub fn stats(&self) -> (u64, u64, u64) {
         let frames = self.flex.as_ref().map_or(0, |f| f.dec.frames);
-        let words = self.pocsag.iter().map(|p| p.dec.codewords).sum();
-        let bad = self.pocsag.iter().map(|p| p.dec.bad_words).sum();
+        let mut words: u64 = self.pocsag.iter().map(|p| p.dec.codewords).sum();
+        let mut bad: u64 = self.pocsag.iter().map(|p| p.dec.bad_words).sum();
+        for m in &self.manchester {
+            let (w, b) = m.dec.counts();
+            words += w;
+            bad += b;
+        }
         (frames, words, bad)
     }
 }
@@ -464,6 +550,29 @@ mod tests {
                 "FLEX {baud}/{levels}: {got:#?}"
             );
         }
+    }
+
+    /// As a cheap on-site transmitter seen on air (2026-11-05): POCSAG 512
+    /// Manchester-coded, ±3.9 kHz, after most of a second of bare carrier.
+    /// The plain 512 decoder takes its preamble but must not make pages.
+    #[test]
+    fn pocsag_manchester() {
+        let rate = 50_000.0;
+        let mut sig = SignalBuilder::new(rate);
+        sig.silence(0.3);
+        sig.pocsag_manchester(512, &pocsag_msgs("M"));
+        sig.silence(0.3);
+        let iq = sig.to_iq(-700.0, Some(15.0), 1.0 / 9600.0, 5);
+        let pages = decode(&iq, rate);
+        assert_eq!(pages.len(), 3, "{pages:#?}");
+        assert_eq!(pages[0].text, "POCSAG M alpha");
+        assert_eq!(pages[1].text, "0800-123 456");
+        assert_eq!(pages[2].kind, Kind::Tone);
+        assert!(
+            pages
+                .iter()
+                .all(|p| p.baud == 512 && p.flags == "Manchester")
+        );
     }
 
     /// As a real transmitter seen on air (2026-10-28): FLEX 1600/2 at
