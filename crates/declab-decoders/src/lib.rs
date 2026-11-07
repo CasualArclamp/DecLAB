@@ -21,6 +21,7 @@ pub mod lora;
 mod level;
 mod nxdn;
 mod p25;
+mod p25p2;
 mod pagers;
 mod sat;
 mod tetra;

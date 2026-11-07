@@ -7,6 +7,8 @@
 //! - [`conv`]: the K = 5 convolutional code (NXDN), soft Viterbi.
 //! - [`dmr`]: DMR Tier I/II/III (ETSI TS 102 361).
 //! - [`nxdn`]: NXDN48 conventional voice and signalling.
+//! - [`p25`], [`p25p2`]: P25 phase 1 (C4FM) and phase 2 (TDMA traffic
+//!   channels, H-DQPSK).
 //! - [`vocoder`]: AMBE+2 speech, ported from mbelib.
 //!
 //! P25 and TETRA follow, on the same front end where they can.
@@ -20,5 +22,6 @@ pub mod fec;
 pub mod fsk4;
 pub mod nxdn;
 pub mod p25;
+pub mod p25p2;
 pub mod tetra;
 pub mod vocoder;

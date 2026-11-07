@@ -5,8 +5,8 @@
 //! channels turned into frequencies once the identifier updates have been
 //! heard.
 //!
-//! Encrypted calls are logged but not played. Phase 2 (TDMA) is not
-//! decoded.
+//! Encrypted calls are logged but not played. Phase 2 (TDMA) traffic
+//! channels are `p25p2.rs`.
 
 use std::collections::{HashMap, VecDeque};
 use crate::heard::HeardList;

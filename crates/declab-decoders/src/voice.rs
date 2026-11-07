@@ -1,9 +1,9 @@
 // made by CasualArclamp
 //! Digital voice: one decoder that finds out which mode the channel carries.
 //!
-//! DMR, NXDN48, NXDN96, P25 phase 1 and TETRA are decoded side by side
+//! DMR, NXDN48, NXDN96, P25 phases 1 and 2 and TETRA are decoded side by side
 //! from the same channel: TETRA (25 kHz wide) takes it at 72 kS/s, the
-//! 4FSK modes at 24 kS/s after one shared decimation by 3 (each receiver
+//! 4FSK modes and P25 phase 2 at 24 kS/s after one shared decimation by 3 (each receiver
 //! then filters to its own band). Their SNR gates keep
 //! the modes that are not there quiet, so whichever one locks is the one
 //! on the air: it drives the card, the scope and the sound. The others
@@ -19,7 +19,7 @@ use declab_api::{
 use declab_pmr::fsk4::Iq;
 use declab_pmr::nxdn::Mode;
 
-use crate::{dmr, nxdn, p25, tetra};
+use crate::{dmr, nxdn, p25, p25p2, tetra};
 
 pub struct Factory;
 
@@ -29,8 +29,8 @@ impl DecoderFactory for Factory {
             id: "voice",
             name: "Digital voice",
             family: Family::Voice,
-            standard: "DMR (ETSI TS 102 361), NXDN48, NXDN96, P25 phase 1, TETRA (EN 300 392-2)",
-            summary: "DMR Tier I/II/III, NXDN48, NXDN96, P25 and TETRA, the mode detected by itself",
+            standard: "DMR (ETSI TS 102 361), NXDN48, NXDN96, P25 phases 1 and 2, TETRA (EN 300 392-2)",
+            summary: "DMR Tier I/II/III, NXDN48, NXDN96, P25 phase 1 and 2 and TETRA, the mode detected by itself",
         }
     }
 
@@ -58,6 +58,7 @@ impl DecoderFactory for Factory {
             nxdn::gate(Mode::Nxdn48),
             nxdn::gate(Mode::Nxdn96),
             p25::gate(),
+            p25p2::gate(),
             tetra::gate(),
         ];
         for (g, key) in gates.iter_mut().zip(KEYS) {
@@ -68,16 +69,17 @@ impl DecoderFactory for Factory {
 }
 
 /// Each mode's gate setting, in the order of `Voice::modes`.
-const KEYS: [&str; 5] = [
+const KEYS: [&str; 6] = [
     "snr_gate_dmr",
     "snr_gate_nxdn48",
     "snr_gate_nxdn96",
     "snr_gate_p25",
+    "snr_gate_p25p2",
     "snr_gate_tetra",
 ];
 
 /// The modes, for the log.
-const LISTENING: &str = "DMR, NXDN48, NXDN96, P25 and TETRA";
+const LISTENING: &str = "DMR, NXDN48, NXDN96, P25 (phases 1 and 2) and TETRA";
 
 /// 72 kS/s to 24 kS/s for the 4FSK modes: a 9 kHz low-pass (the widest of
 /// them, DMR and NXDN96, occupy about ±6.25 kHz), every third output kept.
@@ -156,6 +158,7 @@ impl Voice {
                 mk("NXDN48", nxdn::Factory(Mode::Nxdn48).create()),
                 mk("NXDN96", nxdn::Factory(Mode::Nxdn96).create()),
                 mk("P25", p25::Factory.create()),
+                mk("P25p2", p25p2::Factory.create()),
                 mk("TETRA", tetra::Factory.create()),
             ],
             active: None,
@@ -268,6 +271,13 @@ impl Decoder for Voice {
     }
 
     fn command(&mut self, cmd: Command, out: &mut Sink) {
+        if let Command::Set { key, .. } = &cmd
+            && key == "p25p2_seed"
+            && let Some(m) = self.modes.iter_mut().find(|m| m.name == "P25p2")
+        {
+            m.dec.command(cmd, out);
+            return;
+        }
         if let Command::Set { key, value } = &cmd
             && let Some(i) = KEYS.iter().position(|k| k == key)
         {
@@ -488,6 +498,12 @@ mod tests {
         let (bp, _) = declab_pmr::p25::sim::call(0x293, &p25lc, 2);
         iq.extend(declab_pmr::p25::sim::modulate(&bp, RATE, 0.1));
         iq.extend_from_slice(&gap);
+        let p2call = declab_pmr::p25p2::sim::Call { group: 202, source: 2_020_202, algid: 0x80 };
+        let seed = declab_pmr::p25p2::scramble::seed(0xBEE00, 0x3A1, 0x293);
+        let (b2, p2frames) = declab_pmr::p25p2::sim::channel(seed, [Some(p2call), None], 2);
+        assert_eq!(p2frames, 36);
+        iq.extend(declab_pmr::p25p2::sim::modulate(&b2, RATE, 0.1));
+        iq.extend_from_slice(&gap);
         let mut cell = declab_pmr::tetra::sim::Cell::new(234, 1234, 17);
         let (bt, _) = declab_pmr::tetra::sim::call(&mut cell, 9001, 4_000_123, 10);
         iq.extend(declab_pmr::tetra::sim::modulate(&bt, RATE, 0.1));
@@ -529,6 +545,7 @@ mod tests {
             ("TG 77", "1234"),
             ("TG 9", "4321"),
             ("TG 101", "1234567"),
+            ("TG 202", "2020202"),
             ("TG 9001", "4000123"),
         ] {
             assert!(heard.contains(&(g.into(), r.into())), "{g} {r}: {heard:?}");
@@ -544,7 +561,13 @@ mod tests {
             pos("detected NXDN96"),
         );
         assert!(a < b && b < c && c < pos("detected P25"), "{log:#?}");
-        assert!(pos("detected P25") < pos("detected TETRA"), "{log:#?}");
+        assert!(pos("detected P25") < pos("detected P25p2"), "{log:#?}");
+        assert!(pos("detected P25p2") < pos("detected TETRA"), "{log:#?}");
+        assert!(
+            log.iter()
+                .any(|l| l == "P25p2 TS1: group call TG 202 from 2020202"),
+            "{log:#?}"
+        );
         assert!(
             log.iter()
                 .any(|l| l == "TETRA call 77 to 9001 from 4000123 on TS2"),
@@ -569,9 +592,8 @@ mod tests {
             "{log:#?}"
         );
         // Every voice frame spoken, once: 18 (DMR) + 32 + 48 (NXDN) + 36 (P25)
-        // frames of
-        // 20 ms at 48 kHz.
-        assert_eq!(sound, (18 + 32 + 48 + 36) * 960, "{log:#?}");
+        // + 36 (P25 phase 2) frames of 20 ms at 48 kHz.
+        assert_eq!(sound, (18 + 32 + 48 + 36 + 36) * 960, "{log:#?}");
         // No mode other than the one on the air logs anything.
         assert!(
             !log.iter()

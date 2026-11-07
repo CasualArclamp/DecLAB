@@ -163,7 +163,7 @@ DecLAB is GPL-3.0-or-later, so DAB+ uses libxaac (§20).
 | V1 | RTL-SDR source; DMR Tier I/II/III + packet data + LRRP (`declab-pmr`, `dmr` plug-in), weak-signal receiver | ✅ 2026-10-29 in simulation only: no real DMR capture yet. AMBE+2 vocoder (port of mbelib) plays 2026-10-29 |
 | V2 | NXDN48 conventional voice (`nxdn` plug-in), SNR gate in DMR and NXDN | ✅ 2026-10-29 in simulation only; NXDN trunking (CAC), data calls and NXDN96 not yet |
 | V2b | One "Digital voice" decoder detecting DMR, NXDN48 and NXDN96; NXDN96 | ✅ 2026-10-29 in simulation only; NXDN96 voice is half-rate (EHR) only |
-| V3 | P25 phase 1 in Digital voice: conventional calls (HDU, LDU1/2, TDU, TDULC), control channel TSBKs, IMBE vocoder (port of mbelib) | ✅ 2026-10-29 in simulation only; phase 2 (TDMA) and encrypted voice not decoded |
+| V3 | P25 phase 1 in Digital voice: conventional calls (HDU, LDU1/2, TDU, TDULC), control channel TSBKs, IMBE vocoder (port of mbelib) | ✅ 2026-10-29 in simulation only; phase 2 (TDMA) added 2026-11-08 (§33); encrypted voice not decoded |
 | V4 | TETRA downlink in Digital voice: cell, calls, status, SDS; π/4-DQPSK coherent receiver; ACELP speech via a separate library | ✅ 2026-10-30 in simulation only; speech needs `tetra_acelp.dll` (private, not GPL); π/8-D8PSK, QAM and the uplink not decoded |
 | S1 | Network IQ source: raw IQ over TCP (connect or listen) or UDP, rtl_tcp recognised and tuned; SDR++'s IQ Exporter as the way in for radios without a driver here (SDRplay RSPduo) | ✅ 2026-11-03 against a stand-in sender (`net_send`); SDR++ itself not yet tried. Native SDRplay API next |
 | I1 | ISM devices (rtl_433's protocols): wideband burst finder, OOK/FSK pulse detection, rtl_433's slicers, device decoders from 29 rtl_433 files, flex decoder, heard-devices table, simulator | ✅ 2026-11-05 in simulation only: no real sensor heard yet |
@@ -1411,4 +1411,50 @@ narrow preset is at 869.618); implicit-header frames (LoRaWAN downlinks)
 are not decoded; two frames of the same SF and bandwidth at once lose
 the second; Meshtastic's PKI and MeshCore's direct messages need keys
 the decoder does not have.
+
+## 33. P25 phase 2 (2026-11-08)
+
+- **Inside Digital voice** as a sixth mode (`P25p2`), on the shared 24 kS/s
+  channel. Outbound traffic channels only (the site's H-DQPSK, 6000
+  symbols a second); the inbound H-CPM and a phase 2 control channel's
+  LCCH are not decoded (an LCCH is counted and the card says "TDMA
+  control channel").
+- **Layouts** after OP25 (GPL-3.0-or-later: `p25p2_framer`, `_isch`,
+  `_duid`, `_tdma`, `_vf`, `apps/tdma/lfsr.py`), MAC message fields after
+  DSD-FME; the TIA documents (BBAB, BBAC) are sold, not published.
+  Reference clones in `..\op25-ref` and `..\dsd-fme-ref` (never commit).
+- **Receiver** (`declab-pmr/src/p25p2`): AFC, complex RRC matched filter,
+  differential detection one symbol apart (arg × 4/π gives ±1, ±3, so the
+  phase 1 level fit and LLRs carry over). Hunts the 20-symbol S-ISCH with
+  the SNR gate, confirms on the next timeslot's ISCH; locked, each 180-
+  symbol timeslot's ISCH is decoded ML over its 129 codewords (timing,
+  level, AFC, and the timeslot number from an I-ISCH). Bursts are decoded
+  only behind an ISCH that decoded: a dead carrier's zeros read as a 4V
+  burst (that DUID's codeword is all zeros).
+- **FEC:** FACCH/SACCH are RS (63,35) shortened and punctured (punctured
+  parity as erasures; a second try also erases the four least reliable
+  hexbits), CRC-12; the 2V burst's ESS is RS (44,16). Voice frames are
+  DMR's 72-bit AMBE+2 frame (same interleave and FEC: `dmr::ambe`), four
+  in a 4V burst, two in a 2V.
+- **Scrambling found from the air:** the 4320-bit superframe sequence is
+  linear in its 44-bit seed (WACN · system · NAC), and so is every RS
+  parity check read bit by bit; one clean scrambled ACCH gives 114–132
+  equations in 44 unknowns (`scramble::Model::recover`). All must agree,
+  so a bit error just means waiting for the next burst. The seed is
+  inverted back to WACN/system/NAC for the card. Found seeds are kept for
+  the process and tried first, so a retune to another channel of the same
+  system descrambles at once. `p25p2_seed` = `WACN-SYSTEM-NAC` sets one by
+  hand. Voice before the seed is known is counted ("held"), not played.
+- **Sweep** (`p25p2_sweep`, 2 calls, 300 Hz off): voice frames right 83 %
+  at 8 dB C/N in 12.5 kHz, 97 % at 10, 100 % at 15; the seed is found in
+  0.5–0.6 s from 8 dB up (about 1 dB below where voice is usable, so it
+  is not the limit). Two minutes of noise: best S-ISCH fit 5.1 dB, no
+  timeslot locked even with the gate off (the next-ISCH check). CPU
+  0.14 % of a core decoding, 0.19 % hunting.
+- About 3 dB short of phase 1 (twice the bit rate in the same channel,
+  differential detection). Coherent detection as TETRA's would buy ~2 dB:
+  not done.
+- **GUI check:** `p25p2_make` writes a call on each slot (TS2 encrypted);
+  the card shows both slots, the system line from the found seed, the
+  heard list both talkgroups, and TS1 plays.
 

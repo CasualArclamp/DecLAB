@@ -47,6 +47,8 @@ cargo run --release -p declab-pmr --example nxdn_file -- IN.cf32 [96] [bits]   #
 cargo run --release -p declab-pmr --example nxdn_sweep -- 4 800 - [96]   # NXDN48 (or 96) sensitivity, SNR gate on noise, CPU
 cargo run --release -p declab-pmr --example p25_make -- out/sim_p25.cf32 14   # simulated P25 call and control channel (then --decoder voice)
 cargo run --release -p declab-pmr --example p25_sweep -- 4 300   # P25 sensitivity, SNR gate on noise, CPU
+cargo run --release -p declab-pmr --example p25p2_make -- out/sim_p25p2.cf32 15   # simulated P25 phase 2 traffic channel, a call on each slot (then --rate 48000 --decoder voice)
+cargo run --release -p declab-pmr --example p25p2_sweep -- 4 300   # P25 phase 2 sensitivity, seed recovery time, gate on noise, CPU
 cargo run --release -p declab-pmr --example tetra_make -- out/sim_tetra.cf32 12   # simulated TETRA cell and call (then --rate 72000 --decoder voice)
 cargo run --release -p declab-pmr --example tetra_sweep -- 4 500 [diff]   # TETRA sensitivity, gate on noise, CPU (diff: differential detection)
 cargo run --release -p declab-pmr --example tetra_file -- IN.cf32   # a 72 kS/s TETRA carrier's fit slot by slot (lock losses, re-alignments)
@@ -115,6 +117,13 @@ The receiver works at one sample a chip: read the module docs of
 `receiver.rs` (the wrap's phase step) before changing it, and check with
 `lora_sweep` and `filetest` (CPU) after. Live captures and screenshots
 of real meshes carry node IDs, names and positions: never commit them.
+
+## P25 phase 2
+
+`crates/declab-pmr/src/p25p2`: layouts ported from OP25, MAC fields from
+DSD-FME; reference clones in `..\op25-ref` and `..\dsd-fme-ref` (never
+commit them). The scrambling seed is solved for from the channel's own
+ACCHs (`scramble.rs` module docs) or set with `p25p2_seed`.
 
 ## House rules
 
