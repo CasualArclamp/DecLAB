@@ -62,6 +62,12 @@ const FFT_MAX: usize = 16384;
 const FFT_SETTLE_S: f64 = 0.25;
 /// Frames a second while a source runs: decoders report 60 times a second.
 const FPS: f64 = 60.0;
+/// The Pluto's rate unless chosen: wide enough for any narrowband decoder and
+/// light on its USB link.
+const PLUTO_RATE: f64 = 2.5e6;
+/// The Pluto's rates on offer (0.26-61.44 MS/s; below 2.083 the FPGA's ×8
+/// decimator is used).
+const PLUTO_RATES: [f64; 10] = [1e6, 2e6, 2.5e6, 4e6, 5e6, 6e6, 8e6, 10e6, 12.5e6, 20e6];
 /// Retunes while the band is being dragged, at most this often.
 const RETUNE_EVERY: Duration = Duration::from_millis(90);
 
@@ -75,6 +81,8 @@ struct Options {
     /// `--iq TYPE` its sample type.
     net: Option<String>,
     iq: Option<declab_io::NetSample>,
+    /// `--pluto-uri auto|usb|ip:HOST`: where the Pluto is.
+    pluto_uri: Option<String>,
     decoder: Option<String>,
     chan: Option<f64>,
     zoom: Option<f64>,
@@ -143,10 +151,11 @@ impl Options {
                 }
                 "--decoder" => o.decoder = Some(value("a decoder id")?),
                 "--radio" => {
-                    o.radio = Some(match value("airspy, hackrf or rtlsdr")?.as_str() {
+                    o.radio = Some(match value("airspy, hackrf, rtlsdr or pluto")?.as_str() {
                         "airspy" => SourceKind::Airspy,
                         "hackrf" => SourceKind::HackRf,
                         "rtlsdr" | "rtl" => SourceKind::RtlSdr,
+                        "pluto" | "plutoplus" => SourceKind::Pluto,
                         r => return Err(format!("unknown radio {r:?}")),
                     })
                 }
@@ -154,6 +163,7 @@ impl Options {
                     o.net = Some(value("tcp://HOST:PORT, listen://ADDR:PORT or udp://ADDR:PORT")?);
                     o.radio = Some(SourceKind::Network);
                 }
+                "--pluto-uri" => o.pluto_uri = Some(value("auto, usb or ip:HOST")?),
                 "--iq" => {
                     let t = value("int8, uint8, int16, int32 or float32")?;
                     o.iq = Some(declab_io::NetSample::parse(&t).ok_or(format!("--iq: no sample type {t:?}"))?);
@@ -198,7 +208,7 @@ impl Options {
                 "--screenshot" => o.screenshot = Some(value("a .png path")?.into()),
                 "--after" => o.after = value("seconds")?.parse().map_err(|_| "--after: seconds")?,
                 "-h" | "--help" => {
-                    return Err("declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr] \
+                    return Err("declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr|pluto] [--pluto-uri URI] \
                                 [--net URL --iq TYPE] [--decoder ID] [--chan HZ] [--zoom Z] [--wheel] [--screenshot OUT.png] [--after SECS]"
                         .into());
                 }
@@ -282,6 +292,8 @@ enum SourceKind {
     Airspy,
     HackRf,
     RtlSdr,
+    /// ADALM-PLUTO or Pluto+, receive only (`declab_io::pluto`).
+    Pluto,
     /// Raw IQ from another program over TCP or UDP (`declab_io::net`).
     Network,
     File,
@@ -293,6 +305,7 @@ impl SourceKind {
             SourceKind::Airspy => "Airspy R2 / HydraSDR",
             SourceKind::HackRf => "HackRF One",
             SourceKind::RtlSdr => "RTL-SDR",
+            SourceKind::Pluto => "ADALM-PLUTO / Pluto+",
             SourceKind::Network => "Network IQ",
             SourceKind::File => "IQ file",
         }
@@ -302,6 +315,7 @@ impl SourceKind {
             SourceKind::Airspy => "airspy",
             SourceKind::HackRf => "hackrf",
             SourceKind::RtlSdr => "rtlsdr",
+            SourceKind::Pluto => "pluto",
             SourceKind::Network => "net",
             SourceKind::File => "file",
         }
@@ -317,6 +331,9 @@ enum Control {
     Airspy(declab_io::AirspyControl),
     #[cfg(feature = "rtlsdr")]
     RtlSdr(declab_io::RtlSdrControl),
+    /// No bias tee on a Pluto: `apply_bias_tee` passes it by.
+    #[cfg(feature = "pluto")]
+    Pluto(declab_io::PlutoControl),
 }
 
 struct App {
@@ -348,6 +365,13 @@ struct App {
     rtl_agc: bool,
     rtl_db10: u16,
     rtl_ppm: f64,
+    /// The Pluto: where it is (`auto`, `usb`, `ip:HOST`), its rate, the
+    /// AGC or the manual gain in dB, and whether to refuse Tezuka's 8-bit IQ.
+    pluto_uri: String,
+    pluto_rate: f64,
+    pluto_agc: bool,
+    pluto_db: f64,
+    pluto_16bit: bool,
     /// Network IQ: where from (a `tcp://`, `listen://` or `udp://` URL),
     /// the sample type and the rate the sender says it sends.
     net_url: String,
@@ -454,6 +478,7 @@ impl App {
                 Some("file") => SourceKind::File,
                 Some("rtlsdr") => SourceKind::RtlSdr,
                 Some("net") => SourceKind::Network,
+                Some("pluto") => SourceKind::Pluto,
                 _ => SourceKind::Airspy,
             });
         let file = opts
@@ -491,6 +516,19 @@ impl App {
             rtl_agc: prefs::get(&p, "rtlsdr_agc") == Some("1"),
             rtl_db10: prefs::num(&p, "rtlsdr_gain").unwrap_or(declab_io::RtlGains::default().db10),
             rtl_ppm: prefs::num(&p, "rtlsdr_ppm").unwrap_or(0.0),
+            pluto_uri: opts
+                .pluto_uri
+                .clone()
+                .or_else(|| prefs::get(&p, "pluto_uri").map(String::from))
+                .unwrap_or_else(|| "auto".into()),
+            pluto_rate: opts
+                .rate
+                .filter(|_| kind == SourceKind::Pluto)
+                .or(prefs::num(&p, "pluto_rate"))
+                .unwrap_or(PLUTO_RATE),
+            pluto_agc: prefs::get(&p, "pluto_agc") == Some("1"),
+            pluto_db: prefs::num(&p, "pluto_gain").unwrap_or(50.0),
+            pluto_16bit: prefs::get(&p, "pluto_16bit") == Some("1"),
             net_url: opts
                 .net
                 .clone()
@@ -830,6 +868,7 @@ impl App {
             SourceKind::Airspy => 10e6,
             SourceKind::HackRf => self.hack_rate,
             SourceKind::RtlSdr => declab_io::rtlsdr_proto::SAMPLE_RATE_HZ as f64,
+            SourceKind::Pluto => self.pluto_rate,
             SourceKind::Network => self.net_rate,
             SourceKind::File => self.file_rate,
         }
@@ -926,6 +965,25 @@ impl App {
                 };
                 let src = RtlSdrSource::open(s).map_err(|e| e.to_string())?;
                 self.control = Control::RtlSdr(src.control());
+                Ok(Box::new(src))
+            }
+            #[cfg(feature = "pluto")]
+            SourceKind::Pluto => {
+                use declab_io::{EightBit, PlutoSettings, PlutoSource};
+                use declab_io::pluto::{FREQ_MAX_HZ, FREQ_MIN_HZ};
+                let centre = self.live_centre(FREQ_MIN_HZ, FREQ_MAX_HZ, self.pluto_rate);
+                let s = PlutoSettings {
+                    // Rust note: `PlutoUri` implements `FromStr`, so `parse`
+                    // turns the text field into one (or the reason it can't).
+                    uri: self.pluto_uri.parse()?,
+                    center_hz: centre as f64,
+                    sample_rate: self.pluto_rate,
+                    bandwidth: None,
+                    gain: self.pluto_gain(),
+                    eight_bit: if self.pluto_16bit { EightBit::Off } else { EightBit::Auto },
+                };
+                let src = PlutoSource::open(s).map_err(|e| e.to_string())?;
+                self.control = Control::Pluto(src.control());
                 Ok(Box::new(src))
             }
             #[allow(unreachable_patterns)]
@@ -1220,6 +1278,7 @@ impl App {
             Control::Airspy(c) => c.set_bias_tee(on),
             #[cfg(feature = "rtlsdr")]
             Control::RtlSdr(c) => c.set_bias_tee(on),
+            // The Pluto has none (and is not offered the switch).
             _ => Ok(()),
         };
         if let Err(e) = r {
@@ -1259,9 +1318,79 @@ impl App {
                     self.error = Some(e.to_string());
                 }
             }
+            #[cfg(feature = "pluto")]
+            Control::Pluto(c) => {
+                if let Err(e) = c.set_gain(self.pluto_gain()) {
+                    self.error = Some(e.to_string());
+                }
+            }
             _ => {}
         }
         self.save_prefs();
+    }
+
+    #[cfg(feature = "pluto")]
+    fn pluto_gain(&self) -> declab_io::PlutoGain {
+        if self.pluto_agc { declab_io::PlutoGain::Agc } else { declab_io::PlutoGain::Manual(self.pluto_db) }
+    }
+
+    /// The Pluto's settings: where it is, its rate and gain, and what it
+    /// said about itself once open (link, firmware, 8- or 16-bit IQ).
+    /// A new address, rate or sample width opens it again.
+    fn pluto_ui(&mut self, ui: &mut egui::Ui, running: bool) {
+        let mut reopen = false;
+        let r = ui
+            .add(egui::TextEdit::singleline(&mut self.pluto_uri).desired_width(110.0))
+            .on_hover_text(
+                "auto: USB (needs ADI's Pluto USB driver, WinUSB), else ip:192.168.2.1; \
+                 usb; ip:ADDRESS for a Pluto+ on Ethernet. Receive only.",
+            );
+        reopen |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.label(RichText::new("rate").color(Color32::GRAY));
+        let before = self.pluto_rate;
+        egui::ComboBox::from_id_salt("pluto_rate")
+            .selected_text(format!("{:.2} MS/s", self.pluto_rate / 1e6))
+            .show_ui(ui, |ui| {
+                for r in PLUTO_RATES {
+                    ui.selectable_value(&mut self.pluto_rate, r, format!("{:.2} MS/s", r / 1e6));
+                }
+            })
+            .response
+            .on_hover_text("A Pluto on USB carries about 6.8 MS/s of 16-bit IQ (13 of 8-bit); a Pluto+ on Gigabit Ethernet more.");
+        reopen |= self.pluto_rate != before;
+        let title = if self.pluto_agc { "gain AGC".to_string() } else { format!("gain {:.0} dB", self.pluto_db) };
+        let mut wide = self.pluto_16bit;
+        ui.menu_button(title, |ui| {
+            let mut ch = ui.checkbox(&mut self.pluto_agc, "AGC (slow attack)").changed();
+            ui.add_enabled_ui(!self.pluto_agc, |ui| {
+                ch |= ui.add(egui::Slider::new(&mut self.pluto_db, -3.0..=71.0).step_by(1.0).text("dB")).changed();
+            });
+            if ch {
+                self.apply_gains();
+            }
+            ui.separator();
+            ui.checkbox(&mut wide, "16-bit IQ")
+                .on_hover_text("Tezuka firmware streams 8-bit IQ, which halves the link's load; tick for 16-bit.");
+        });
+        if wide != self.pluto_16bit {
+            self.pluto_16bit = wide;
+            reopen = true;
+        }
+        #[cfg(feature = "pluto")]
+        if let Control::Pluto(c) = &self.control {
+            let i = c.info();
+            ui.label(
+                RichText::new(format!("{} · {} · {}-bit", i.link, i.firmware, if i.eight_bit { 8 } else { 16 }))
+                    .color(Color32::GRAY),
+            )
+            .on_hover_text(&i.model);
+        }
+        if reopen {
+            self.save_prefs();
+            if running {
+                self.start();
+            }
+        }
     }
 
     fn rtl_gains(&self) -> declab_io::RtlGains {
@@ -1452,6 +1581,11 @@ impl App {
             ("rtlsdr_agc", if self.rtl_agc { "1" } else { "0" }.into()),
             ("rtlsdr_gain", self.rtl_db10.to_string()),
             ("rtlsdr_ppm", format!("{:.1}", self.rtl_ppm)),
+            ("pluto_uri", self.pluto_uri.clone()),
+            ("pluto_rate", format!("{:.0}", self.pluto_rate)),
+            ("pluto_agc", if self.pluto_agc { "1" } else { "0" }.into()),
+            ("pluto_gain", format!("{:.0}", self.pluto_db)),
+            ("pluto_16bit", if self.pluto_16bit { "1" } else { "0" }.into()),
             ("net_url", self.net_url.clone()),
             ("net_iq", self.net_sample.label().into()),
             ("net_rate", format!("{:.0}", self.net_rate)),
@@ -1581,7 +1715,7 @@ impl App {
                     ui.label(RichText::new("source").color(Color32::GRAY));
                     let before = self.kind;
                     egui::ComboBox::from_id_salt("source").selected_text(self.kind.label()).show_ui(ui, |ui| {
-                        for k in [SourceKind::Airspy, SourceKind::HackRf, SourceKind::RtlSdr, SourceKind::Network, SourceKind::File] {
+                        for k in [SourceKind::Airspy, SourceKind::HackRf, SourceKind::RtlSdr, SourceKind::Pluto, SourceKind::Network, SourceKind::File] {
                             ui.selectable_value(&mut self.kind, k, k.label());
                         }
                     });
@@ -1687,6 +1821,7 @@ impl App {
                             }
                         }
                         SourceKind::Network => self.network_ui(ui, running),
+                        SourceKind::Pluto => self.pluto_ui(ui, running),
                         SourceKind::RtlSdr => {
                             ui.label(RichText::new("rate").color(Color32::GRAY));
                             ui.label(RichText::new("2.048 MS/s").color(Color32::WHITE));
@@ -1720,7 +1855,7 @@ impl App {
                             });
                         }
                     }
-                    if !matches!(self.kind, SourceKind::File | SourceKind::Network) {
+                    if !matches!(self.kind, SourceKind::File | SourceKind::Network | SourceKind::Pluto) {
                         self.bias_tee_ui(ui);
                     }
                     ui.label(RichText::new("centre").color(Color32::GRAY));

@@ -13,6 +13,7 @@ default = []
 hackrf = ["declab-io/hackrf"]
 airspy = ["declab-io/airspy"]
 rtlsdr = ["declab-io/rtlsdr"]
+pluto = ["declab-io/pluto"]
 
 [dependencies]
 declab-api = { path = "../declab-api", default-features = false }

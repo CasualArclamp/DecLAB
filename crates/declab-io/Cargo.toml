@@ -1,7 +1,7 @@
 # made by CasualArclamp
 [package]
 name = "declab-io"
-description = "DecLAB I/O: IQ file replay/record and the HackRF One, Airspy R2 and RTL-SDR front ends"
+description = "DecLAB I/O: IQ file replay/record and the HackRF One, Airspy R2, RTL-SDR and ADALM-PLUTO front ends"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -23,6 +23,9 @@ airspy = ["dep:nusb", "dep:futures-lite"]
 # Receive only; the bias tee is off unless asked. The chips' logic is plain code,
 # built and tested without the feature.
 rtlsdr = ["dep:nusb"]
+# Live ADALM-PLUTO / Pluto+ front end (from DecDVB-T): its IIOD protocol in
+# pure Rust over USB (nusb, WinUSB) or TCP. No libiio, no DLLs. Receive only.
+pluto = ["dep:nusb", "dep:futures-lite"]
 
 [dependencies]
 declab-core = { path = "../declab-core" }

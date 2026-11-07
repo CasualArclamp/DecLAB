@@ -6,10 +6,11 @@
 //! declab selftest <decoder>
 //! declab run <decoder> --file <capture> [--rate HZ] [--freq HZ] [--offset HZ]
 //!                      [--bandwidth HZ] [--seconds S] [--realtime]
-//! declab run <decoder> --radio hackrf|airspy|rtlsdr --freq HZ [--rate HZ] [--offset HZ]
+//! declab run <decoder> --radio hackrf|airspy|rtlsdr|pluto --freq HZ [--rate HZ] [--offset HZ]
 //!                      [--gain AMP,LNA,VGA | DB | agc] [--ppm PPM] [--bias-tee] [--seconds S] [--record OUT.cs8] [--record-channel OUT.cf32]
 //!                      [--set KEY=VALUE] [--ts OUT.ts] [--pcap OUT.pcap] [--card] [--udp ADDR:PORT] [--http ADDR:PORT]
 //!                      [--sound]   (runs are silent unless --sound)
+//!                      [--pluto-uri auto|usb|ip:HOST] [--pluto-16bit]   (the Pluto, receive only)
 //! declab run <decoder> --net tcp://HOST:PORT|listen://ADDR:PORT|udp://ADDR:PORT
 //!                      --rate HZ [--iq int8|uint8|int16|int32|float32] [--freq HZ] …
 //!                      (raw IQ from SDR++'s IQ Exporter, GNU Radio, an rtl_tcp server…)
@@ -93,7 +94,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     } else if let Some(url) = o.get("--net") {
         open_net(url, &o)?
     } else {
-        bail!("give --file <capture>, --radio hackrf|airspy|rtlsdr or --net tcp://HOST:PORT");
+        bail!("give --file <capture>, --radio hackrf|airspy|rtlsdr|pluto or --net tcp://HOST:PORT");
     };
 
     let live = source.is_live();
@@ -319,6 +320,44 @@ fn open_rtlsdr(_: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
     bail!("built without the rtlsdr feature")
 }
 
+/// The ADALM-PLUTO or Pluto+, receive only: `--pluto-uri` (auto: USB, else
+/// 192.168.2.1; `ip:ADDRESS` for a Pluto+ on Ethernet), `--gain DB|agc`,
+/// `--rate` (default 2.5 MS/s; 0.26-61.44 MS/s, though USB carries about
+/// 6.8 MS/s at 16-bit), `--pluto-16bit` to refuse Tezuka's 8-bit IQ.
+#[cfg(feature = "pluto")]
+fn open_pluto(o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    use declab_io::{EightBit, PlutoGain, PlutoSettings, PlutoSource};
+    let gain = match o.get("--gain") {
+        Some(g) if g.eq_ignore_ascii_case("agc") => PlutoGain::Agc,
+        Some(g) => PlutoGain::Manual(g.parse().with_context(|| format!("--gain takes dB or agc for the Pluto, not {g:?}"))?),
+        None => PlutoGain::default(),
+    };
+    let s = PlutoSettings {
+        // Rust note: `parse()` goes through `PlutoUri`'s `FromStr`; its
+        // error is a `String`, which `map_err` makes an anyhow error.
+        uri: o.get("--pluto-uri").unwrap_or("auto").parse().map_err(anyhow::Error::msg)?,
+        center_hz: o.hz("--freq")?.context("--freq")?,
+        sample_rate: o.hz("--rate")?.unwrap_or(PLUTO_RATE),
+        bandwidth: None,
+        gain,
+        eight_bit: if o.flag("--pluto-16bit") { EightBit::Off } else { EightBit::Auto },
+    };
+    let src = PlutoSource::open(s)?;
+    let i = src.control().info().clone();
+    println!("Pluto: {} over {}, firmware {}, {}-bit IQ", i.model, i.link, i.firmware, if i.eight_bit { 8 } else { 16 });
+    Ok(Box::new(src))
+}
+
+/// The Pluto's default rate: wide enough for any narrowband decoder and
+/// light on its USB link.
+#[cfg(feature = "pluto")]
+const PLUTO_RATE: f64 = 2.5e6;
+
+#[cfg(not(feature = "pluto"))]
+fn open_pluto(_: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    bail!("built without the pluto feature")
+}
+
 /// Raw IQ over the network. The stream carries no rate, so `--rate` is
 /// required; `--freq` only labels the band (an rtl_tcp server is tuned to it).
 fn open_net(url: &str, o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
@@ -344,7 +383,8 @@ fn open_radio(name: &str, o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
         // The HydraSDR RFOne speaks the Airspy R2's protocol.
         "airspy" | "hydrasdr" => open_airspy(o),
         "rtlsdr" | "rtl" => open_rtlsdr(o),
-        other => bail!("unknown radio {other:?} (hackrf, airspy, hydrasdr or rtlsdr)"),
+        "pluto" | "plutoplus" => open_pluto(o),
+        other => bail!("unknown radio {other:?} (hackrf, airspy, hydrasdr, rtlsdr or pluto)"),
     }
 }
 

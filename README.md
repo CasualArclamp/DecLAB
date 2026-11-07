@@ -8,7 +8,7 @@
 If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
 
 **One software-defined radio receiver for everything on the air.** Point an
-RTL-SDR, Airspy, HydraSDR or HackRF at the sky and DecLAB decodes terrestrial TV,
+RTL-SDR, Airspy, HydraSDR, HackRF or ADALM-PLUTO at the sky and DecLAB decodes terrestrial TV,
 digital radio, FM, pagers, two-way digital voice, the ISM bands' sensors
 and remotes, and LoRa meshes, all in one window, all
 in Rust, all from one portable `.exe`.
@@ -107,6 +107,11 @@ Radios need the WinUSB driver, installed once with
 [Zadig](https://zadig.akeo.ie/). DecLAB talks to them through its own pure
 Rust drivers.
 
+**ADALM-PLUTO and Pluto+ (receive only).** Over USB the Pluto needs ADI's
+Pluto USB driver (WinUSB); or give its network address, `ip:192.168.2.1`.
+A Pluto+ on Ethernet is `ip:ADDRESS`. Tezuka firmware streams 8-bit IQ,
+which DecLAB uses by itself, so USB carries about 13 MS/s instead of 6.8.
+
 **Any other radio, over the network.** "Network IQ" takes raw IQ from
 another program: SDR++'s IQ Exporter (so an SDRplay RSPduo or anything else
 SDR++ drives), GNU Radio's TCP or UDP sinks, or an rtl_tcp server (which
@@ -134,6 +139,7 @@ declab list                                                    # the decoders
 declab run dab --file 11d_222.064MHz_4.096Msps.cs8 --service "classic fm" --wav out.wav
 declab run voice --radio rtlsdr --freq 439.5M --gain 40.2 --card
 declab run wfm --radio airspy --freq 98M --offset 1.2M
+declab run wfm --radio pluto --freq 98M --pluto-uri ip:192.168.2.1 --gain agc
 declab run wfm --net tcp://127.0.0.1:7777 --iq int8 --rate 10M --freq 98M --offset 0.8M
 ```
 

@@ -76,11 +76,15 @@ cargo run --release -p declab-cli -- selftest level
 cargo run --release -p declab-cli -- run wfm --file x_98.000MHz_10Msps.cs8 --offset 1.2M --realtime
 cargo run --release -p declab-cli -- run nfm --radio airspy --freq 446.05M --offset 0
 cargo run --release -p declab-cli -- run usb --radio hackrf --freq 14.2M --gain 1,32,20
+cargo run --release -p declab-cli -- run wfm --radio pluto --freq 98M --rate 2.5M --gain 50   # ADALM-PLUTO / Pluto+, receive only (--pluto-uri auto|usb|ip:HOST, --gain DB|agc, --pluto-16bit)
+cargo test -p declab-io --features pluto live_pluto -- --ignored --nocapture   # a Pluto attached (env PLUTO_URI, default auto)
 ```
 
 Only an Airspy R2 is plugged in at the moment (the HackRF is not). All
-three drivers (HackRF, Airspy, RTL-SDR) are pure Rust over nusb and need the
-WinUSB driver. The user's own
+the drivers (HackRF, Airspy, RTL-SDR, Pluto) are pure Rust over nusb and need the
+WinUSB driver (the Pluto also works over TCP). The Pluto driver
+(`declab-io/src/pluto*`, from DecDVB-T) is receive only: it never opens the
+transmit side. The user's own
 DecDVB-T GUI may be holding the Airspy ("Access is denied"): never kill it.
 
 **Network IQ** (`declab-io/src/net.rs`) takes headerless IQ from another

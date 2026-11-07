@@ -2,7 +2,7 @@
 //! IQ input and output for DecLAB (from DecDVB-T's Airspy branch).
 //!
 //! Everything upstream of the demodulator talks to an [`IqSource`]: an IQ file
-//! (replay), the live HackRF One, Airspy R2 or RTL-SDR, or IQ over the
+//! (replay), the live HackRF One, Airspy R2, RTL-SDR or ADALM-PLUTO, or IQ over the
 //! network ([`net`]). Recording goes out through [`IqFileWriter`].
 
 pub mod file;
@@ -20,6 +20,8 @@ mod usb;
 pub mod airspy;
 #[cfg(feature = "hackrf")]
 pub mod hackrf;
+#[cfg(feature = "pluto")]
+pub mod pluto;
 
 pub use net::{NetIqControl, NetIqSettings, NetIqSource, NetMode, NetSample};
 pub use file::{IqFileReader, IqFileWriter, NameHint, format_from_path, name_hint};
@@ -32,6 +34,10 @@ pub use rtlsdr::{RtlInfo, RtlSdrControl, RtlSdrSource, rtlsdr_info};
 #[cfg(feature = "airspy")]
 pub use airspy::{
     AirspyControl, AirspyGains, AirspyInfo, AirspyPreset, AirspySettings, AirspySource, airspy_info,
+};
+#[cfg(feature = "pluto")]
+pub use pluto::{
+    EightBit, PlutoControl, PlutoGain, PlutoInfo, PlutoSettings, PlutoSource, PlutoUri,
 };
 #[cfg(feature = "hackrf")]
 pub use hackrf::{HackRfControl, HackRfGains, HackRfSettings, HackRfSource};

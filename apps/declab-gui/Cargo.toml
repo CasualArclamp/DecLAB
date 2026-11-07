@@ -13,11 +13,12 @@ name = "declab-gui"
 path = "src/main.rs"
 
 [features]
-# All three radio drivers are pure Rust over nusb (no SDKs, no DLLs), so all are on.
-default = ["hackrf", "airspy", "rtlsdr"]
+# All the radio drivers are pure Rust over nusb (no SDKs, no DLLs), so all are on.
+default = ["hackrf", "airspy", "rtlsdr", "pluto"]
 hackrf = ["declab-engine/hackrf"]
 airspy = ["declab-engine/airspy"]
 rtlsdr = ["declab-engine/rtlsdr"]
+pluto = ["declab-engine/pluto"]
 
 [dependencies]
 declab-api = { path = "../../crates/declab-api" }
