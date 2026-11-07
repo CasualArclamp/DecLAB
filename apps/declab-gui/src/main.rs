@@ -1487,10 +1487,24 @@ impl App {
         if let Control::Pluto(c) = &self.control {
             let i = c.info();
             ui.label(
-                RichText::new(format!("{} · {} · {}-bit", i.link, i.firmware, if i.eight_bit { 8 } else { 16 }))
-                    .color(Color32::GRAY),
+                RichText::new(format!(
+                    "{} · {} · {}-bit{}",
+                    i.link,
+                    i.firmware,
+                    if i.eight_bit { 8 } else { 16 },
+                    match c.lost() {
+                        0 => String::new(),
+                        n => format!(" · {n} lost"),
+                    }
+                ))
+                .color(if c.lost() > 0 { Color32::from_rgb(230, 170, 60) } else { Color32::GRAY }),
             )
-            .on_hover_text(&i.model);
+            .on_hover_text(format!(
+                "{}\nThe link delivers {:.2} MS/s. Blocks lost: what the link could not carry \
+                 (lower the rate, use 8-bit IQ with Tezuka firmware, or a Pluto+ on Ethernet).",
+                i.model,
+                c.delivered_rate() / 1e6
+            ));
         }
         if reopen {
             self.save_prefs();
