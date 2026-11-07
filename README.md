@@ -8,7 +8,7 @@
 If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
 
 **One software-defined radio receiver for everything on the air.** Point an
-RTL-SDR, Airspy or HackRF at the sky and DecLAB decodes terrestrial TV,
+RTL-SDR, Airspy, HydraSDR or HackRF at the sky and DecLAB decodes terrestrial TV,
 digital radio, FM, pagers, two-way digital voice, the ISM bands' sensors
 and remotes, and LoRa meshes, all in one window, all
 in Rust, all from one portable `.exe`.
@@ -27,8 +27,8 @@ in Rust, all from one portable `.exe`.
 **Several decoders at once.** Run up to eight VFOs on one radio, each with its
 own decoder, sound and settings. The VFO list down the left collapses to a
 strip of numbered discs; click a channel on the band to select it, ctrl+click
-to add one. **Bias tee** for an LNA or active antenna on the Airspy R2,
-HackRF One and RTL-SDR Blog: off at every start, switched on by you.
+to add one. **Bias tee** for an LNA or active antenna on the Airspy R2
+(and HydraSDR RFOne), HackRF One and RTL-SDR Blog: off at every start, switched on by you.
 
 ## Screenshots
 

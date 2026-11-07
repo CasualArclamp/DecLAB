@@ -341,9 +341,10 @@ fn open_net(url: &str, o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
 fn open_radio(name: &str, o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
     match name {
         "hackrf" => open_hackrf(o),
-        "airspy" => open_airspy(o),
+        // The HydraSDR RFOne speaks the Airspy R2's protocol.
+        "airspy" | "hydrasdr" => open_airspy(o),
         "rtlsdr" | "rtl" => open_rtlsdr(o),
-        other => bail!("unknown radio {other:?} (hackrf, airspy or rtlsdr)"),
+        other => bail!("unknown radio {other:?} (hackrf, airspy, hydrasdr or rtlsdr)"),
     }
 }
 

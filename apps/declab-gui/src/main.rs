@@ -290,7 +290,7 @@ enum SourceKind {
 impl SourceKind {
     fn label(self) -> &'static str {
         match self {
-            SourceKind::Airspy => "Airspy R2",
+            SourceKind::Airspy => "Airspy R2 / HydraSDR",
             SourceKind::HackRf => "HackRF One",
             SourceKind::RtlSdr => "RTL-SDR",
             SourceKind::Network => "Network IQ",

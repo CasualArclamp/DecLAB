@@ -41,7 +41,7 @@ use futures_lite::future::block_on;
 use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient, RequestBuffer};
 
 use self::convert::RealToIq;
-use self::proto::{Command, Dir, Step};
+use self::proto::{Command, Dir, Model, Step};
 use crate::IqSource;
 
 const VID: u16 = 0x1d50;
@@ -213,8 +213,8 @@ impl Usb {
             .find(|d| d.vendor_id() == VID && d.product_id() == PID)
             .ok_or_else(|| {
                 Error::Other(
-                    "no Airspy found (USB 1D50:60A1). Is it plugged in, not in use by another \
-                     program, and on the WinUSB driver?"
+                    "no Airspy R2 or HydraSDR found (USB 1D50:60A1). Is it plugged in, not in \
+                     use by another program, and on the WinUSB driver?"
                         .into(),
                 )
             })?;
@@ -281,6 +281,15 @@ impl Usb {
         }
     }
 
+    /// The firmware's version string (it names the model).
+    fn firmware(&self) -> Result<String> {
+        let raw = self.control(&proto::version_string_read())?;
+        Ok(String::from_utf8_lossy(&raw)
+            .trim_end_matches('\0')
+            .trim()
+            .to_string())
+    }
+
     /// The device's rate list, and the index of 10 MS/s in it.
     fn rate_index(&self) -> Result<u16> {
         let n = proto::parse_u32(&self.control(&proto::sample_rate_count())?)?;
@@ -295,6 +304,8 @@ pub struct AirspyInfo {
     /// libairspy's board id (0 is an Airspy One/R2/Mini).
     pub board_id: u8,
     pub board_name: &'static str,
+    /// "Airspy R2" or "HydraSDR RFOne" (see [`proto::Model`]).
+    pub model: &'static str,
     pub firmware: String,
     /// The complex sample rates the device lists, Hz.
     pub sample_rates: Vec<u32>,
@@ -314,16 +325,13 @@ fn board_name(id: u8) -> &'static str {
 pub fn airspy_info() -> Result<AirspyInfo> {
     let usb = Usb::open()?;
     let board_id = usb.control(&proto::board_id_read())?[0];
-    let raw = usb.control(&proto::version_string_read())?;
-    let firmware = String::from_utf8_lossy(&raw)
-        .trim_end_matches('\0')
-        .trim()
-        .to_string();
+    let firmware = usb.firmware()?;
     let n = proto::parse_u32(&usb.control(&proto::sample_rate_count())?)?;
     let list = usb.control(&proto::sample_rate_list(n))?;
     Ok(AirspyInfo {
         board_id,
         board_name: board_name(board_id),
+        model: Model::from_firmware(&firmware).name(),
         firmware,
         sample_rates: proto::parse_sample_rates(&list, n)?,
     })
@@ -334,6 +342,7 @@ pub fn airspy_info() -> Result<AirspyInfo> {
 #[derive(Clone)]
 pub struct AirspyControl {
     usb: Arc<Usb>,
+    model: Model,
     settings: Arc<Mutex<AirspySettings>>,
     overflows: Arc<AtomicU64>,
 }
@@ -343,9 +352,14 @@ impl AirspyControl {
         *self.settings.lock().unwrap()
     }
 
+    /// "Airspy R2" or "HydraSDR RFOne", from the firmware it reported at open.
+    pub fn model(&self) -> &'static str {
+        self.model.name()
+    }
+
     /// Retune. Takes effect within a USB transfer or two.
     pub fn set_center(&self, hz: u64) -> Result<()> {
-        self.usb.control(&proto::set_freq(hz)?)?;
+        self.usb.control(&proto::set_freq(self.model, hz)?)?;
         self.settings.lock().unwrap().center_hz = hz;
         Ok(())
     }
@@ -449,12 +463,16 @@ impl AirspySource {
             )));
         }
         // Checked before any USB access.
-        proto::set_freq(settings.center_hz)?;
+        proto::set_freq(Model::AirspyR2, settings.center_hz)?;
         let gains = settings.gains.clamped();
 
         let usb = Arc::new(Usb::open()?);
+        // Only names the radio: an unreadable version string is no reason
+        // to fail.
+        let model = Model::from_firmware(&usb.firmware().unwrap_or_default());
         let rate_index = usb.rate_index()?;
         let steps = proto::start_sequence(&proto::StartParams {
+            model,
             center_hz: settings.center_hz,
             rate_index,
             lna: gains.lna,
@@ -510,6 +528,7 @@ impl AirspySource {
             },
             control: AirspyControl {
                 usb,
+                model,
                 settings: Arc::new(Mutex::new(AirspySettings { gains, ..settings })),
                 overflows,
             },
@@ -590,7 +609,8 @@ impl IqSource for AirspySource {
     fn describe(&self) -> String {
         let s = self.control.settings();
         format!(
-            "Airspy R2 @ {:.4} MHz, {:.2} MS/s, LNA {} Mixer {} VGA {}{}",
+            "{} @ {:.4} MHz, {:.2} MS/s, LNA {} Mixer {} VGA {}{}",
+            self.control.model.name(),
             s.center_hz as f64 / 1e6,
             s.sample_rate as f64 / 1e6,
             s.gains.lna,
