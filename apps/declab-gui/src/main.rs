@@ -45,6 +45,9 @@ use std::time::{Duration, Instant};
 use declab_api::{DecoderFactory, Family, Panel};
 use declab_engine::meter::CpuGauge;
 use declab_engine::{DecoderView, Host, HostOptions, MAX_VFOS, Stats};
+
+/// How long a followed call's VFO stays after its grant and its voice stop.
+const FOLLOW_HANG: Duration = Duration::from_secs(4);
 use declab_io::{IqFileReader, IqSource, format_from_path, name_hint};
 use eframe::egui::{self, Color32, RichText};
 use waterfall::{History, RingImage};
@@ -391,6 +394,10 @@ struct App {
     /// values are the fields below (`dec`, `chan_hz`, `bandwidth_hz`, `scope`,
     /// `selected_service`, `view`). See `vfo.rs`.
     slots: Vec<vfo::Slot>,
+    /// Open a VFO for each call a control channel grants.
+    follow_calls: bool,
+    /// The latest follow events, for the rail.
+    follow_notes: std::collections::VecDeque<String>,
     cur: usize,
     /// The VFO list down the left is open (else a strip of numbered discs).
     rail_open: bool,
@@ -553,6 +560,8 @@ impl App {
             slots: Vec::new(),
             cur: 0,
             rail_open: prefs::get(&p, "vfo_rail") != Some("0") && !opts.rail_closed,
+            follow_calls: prefs::get(&p, "follow_calls") != Some("0"),
+            follow_notes: std::collections::VecDeque::new(),
             dec,
             panels: declab_decoders::ALL
                 .iter()
@@ -664,6 +673,7 @@ impl App {
             scope: self.scope.clone(),
             selected_service: self.selected_service,
             view: DecoderView::default(),
+            follow: None,
         }
     }
 
@@ -745,8 +755,105 @@ impl App {
             scope: f.default_scope().to_string(),
             selected_service: None,
             view: DecoderView::default(),
+            follow: None,
         });
         self.slots.len() - 1
+    }
+
+    fn follow_note(&mut self, s: String) {
+        eprintln!("follow: {s}");
+        self.follow_notes.push_back(s);
+        while self.follow_notes.len() > 6 {
+            self.follow_notes.pop_front();
+        }
+    }
+
+    /// Calls the control channels granted: a VFO opened for each new one
+    /// (the oldest follower closed to make room), kept while the grant
+    /// repeats or the call is heard, closed [`FOLLOW_HANG`] after.
+    fn follow_calls(&mut self) {
+        let Some(h) = &self.host else { return };
+        let reqs = h.take_follows();
+        let now = Instant::now();
+        for s in &mut self.slots {
+            if let (Some(f), Some(v)) = (&mut s.follow, s.vid)
+                && h.vfo_lock(v) == Some(declab_api::Lock::Locked)
+            {
+                f.busy = now;
+            }
+        }
+        if !self.follow_calls {
+            // Switched off: the followers go once their calls are over.
+            for s in &mut self.slots {
+                if let Some(f) = &mut s.follow {
+                    f.wanted = f.wanted.min(now - FOLLOW_HANG);
+                }
+            }
+        }
+        // Rust note: the switch is copied out first; a closure reading
+        // `self` would hold it borrowed for the whole loop.
+        let on = self.follow_calls;
+        for (from, req) in reqs.into_iter().filter(|_| on) {
+            let near = |s: &vfo::Slot| (s.chan_hz - req.hz).abs() < 2_000.0;
+            if let Some(s) = self.slots.iter_mut().find(|s| near(s)) {
+                if let Some(f) = &mut s.follow {
+                    f.wanted = now;
+                    f.encrypted = req.encrypted;
+                    f.label = req.label;
+                }
+                continue;
+            }
+            let mhz = req.hz / 1e6;
+            if (req.hz - self.center_hz).abs() > 0.45 * self.rate() {
+                let note = format!("{} on {mhz:.5} MHz: outside the radio's span", req.label);
+                if self.follow_notes.back() != Some(&note) {
+                    self.follow_note(note);
+                }
+                continue;
+            }
+            let Some(dec) = self.slots.iter().find(|s| s.vid == Some(from)).map(|s| s.dec) else { continue };
+            if self.slots.len() >= MAX_VFOS {
+                let oldest = (0..self.slots.len())
+                    .filter(|&i| self.slots[i].follow.is_some())
+                    .min_by_key(|&i| self.slots[i].follow.as_ref().map(|f| f.opened));
+                match oldest {
+                    Some(i) => {
+                        let gone = self.slots[i].follow.as_ref().map(|f| f.label.clone()).unwrap_or_default();
+                        self.remove_slot(i);
+                        self.follow_note(format!("closed {gone} to make room"));
+                    }
+                    None => {
+                        self.follow_note(format!("{} on {mhz:.5} MHz: no VFO free", req.label));
+                        continue;
+                    }
+                }
+            }
+            let i = self.push_slot(dec, req.hz, false);
+            if let (Some(h), Some(v)) = (&self.host, self.slots[i].vid) {
+                h.set_vfo_follower(v, true);
+            }
+            let lock = if req.encrypted { " (encrypted)" } else { "" };
+            self.follow_note(format!("{}{lock} on {mhz:.5} MHz", req.label));
+            self.slots[i].follow = Some(vfo::Following {
+                label: req.label,
+                encrypted: req.encrypted,
+                opened: now,
+                wanted: now,
+                busy: now,
+            });
+        }
+        // Calls over: closed from the end so the indices hold.
+        for i in (0..self.slots.len()).rev() {
+            let done = self.slots[i]
+                .follow
+                .as_ref()
+                .is_some_and(|f| now.duration_since(f.wanted.max(f.busy)) > FOLLOW_HANG);
+            if done {
+                let label = self.slots[i].follow.as_ref().map(|f| f.label.clone()).unwrap_or_default();
+                self.remove_slot(i);
+                self.follow_note(format!("{label}: over"));
+            }
+        }
     }
 
     /// Somewhere in the radio's span clear of the other VFOs.
@@ -1568,6 +1675,7 @@ impl App {
             ("chan", format!("{:.0}", self.chan_hz)),
             ("zoom", format!("{:.3}", self.zoom)),
             ("vfo_rail", if self.rail_open { "1" } else { "0" }.into()),
+            ("follow_calls", if self.follow_calls { "1" } else { "0" }.into()),
             ("volume", format!("{:.2}", self.volume)),
             ("hackrf_rate", format!("{:.0}", self.hack_rate)),
             ("hackrf_amp", if self.hack_amp { "1" } else { "0" }.into()),
@@ -2060,6 +2168,7 @@ impl eframe::App for App {
             mark = Instant::now();
         };
         self.poll();
+        self.follow_calls();
         self.step_optimiser();
         lap(0, &mut self.frame_cost);
         self.cpu.poll();
@@ -2091,7 +2200,15 @@ impl eframe::App for App {
                     colour: s.colour,
                     decoder: declab_decoders::ALL[dec].info().name,
                     freq_hz: chan + self.lo_of(dec),
-                    status: vfo::status_of(view, running),
+                    status: match &s.follow {
+                        Some(f) => format!(
+                            "↪ {}{} · {}",
+                            f.label,
+                            if f.encrypted { " 🔒" } else { "" },
+                            vfo::status_of(view, running)
+                        ),
+                        None => vfo::status_of(view, running),
+                    },
                     lock: view.lock,
                     cpu: view.cpu_percent,
                     level_db: vfo::level_of(view),
@@ -2102,12 +2219,21 @@ impl eframe::App for App {
             })
             .collect();
         let rail_was = self.rail_open;
-        let acts = vfo::rail(ui, &rows, self.cur, &mut self.rail_open, MAX_VFOS);
+        let acts = vfo::rail(
+            ui,
+            &rows,
+            self.cur,
+            &mut self.rail_open,
+            MAX_VFOS,
+            &mut self.follow_calls,
+            &self.follow_notes,
+        );
         if rail_was != self.rail_open {
             self.save_prefs();
         }
         for a in acts {
             match a {
+                vfo::Act::FollowChanged => self.save_prefs(),
                 vfo::Act::Select(i) => self.select_slot(i),
                 vfo::Act::ToggleMute(i) => self.toggle_mute(i),
                 vfo::Act::Remove(i) => self.remove_slot(i),

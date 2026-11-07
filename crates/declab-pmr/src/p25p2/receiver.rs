@@ -88,6 +88,17 @@ fn known_seeds() -> &'static std::sync::Mutex<Vec<u64>> {
     S.get_or_init(Default::default)
 }
 
+/// Tell every phase 2 receiver in the process about a seed heard elsewhere
+/// (a phase 1 control channel's network status, WACN and system, with its
+/// NAC): tried first, so a followed call descrambles from its first burst.
+pub fn remember_seed(seed: u64) {
+    if let Ok(mut v) = known_seeds().lock()
+        && !v.contains(&seed)
+    {
+        v.push(seed);
+    }
+}
+
 /// Undo the scrambling of a burst's soft bits (from burst dibit 10, two a
 /// dibit) in timeslot `ts`: flip the bits the sequence set. The DUID is
 /// sent clear.

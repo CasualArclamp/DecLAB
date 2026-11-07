@@ -49,6 +49,8 @@ cargo run --release -p declab-pmr --example p25_make -- out/sim_p25.cf32 14   # 
 cargo run --release -p declab-pmr --example p25_sweep -- 4 300   # P25 sensitivity, SNR gate on noise, CPU
 cargo run --release -p declab-pmr --example p25p2_make -- out/sim_p25p2.cf32 15   # simulated P25 phase 2 traffic channel, a call on each slot (then --rate 48000 --decoder voice)
 cargo run --release -p declab-pmr --example p25p2_sweep -- 4 300   # P25 phase 2 sensitivity, seed recovery time, gate on noise, CPU
+cargo run --release -p declab-pmr --example p25_trunk_make -- out/sim_p25_trunk.cf32 18   # trunked P25 site: phase 1 control channel granting a phase 2 call
+cargo run --release -p declab-gui -- out/sim_p25_trunk.cf32 --rate 240000 --freq 851M --decoder voice --chan 850.95M --screenshot out/x.png --after 9   # call following: a VFO opens on the grant, closes after
 cargo run --release -p declab-pmr --example tetra_make -- out/sim_tetra.cf32 12   # simulated TETRA cell and call (then --rate 72000 --decoder voice)
 cargo run --release -p declab-pmr --example tetra_sweep -- 4 500 [diff]   # TETRA sensitivity, gate on noise, CPU (diff: differential detection)
 cargo run --release -p declab-pmr --example tetra_file -- IN.cf32   # a 72 kS/s TETRA carrier's fit slot by slot (lock losses, re-alignments)

@@ -50,6 +50,20 @@ pub struct Slot {
     pub selected_service: Option<u32>,
     /// What its decoder last said (the selected one's is the app's `view`).
     pub view: DecoderView,
+    /// Opened by itself to follow a call a control channel granted.
+    pub follow: Option<Following>,
+}
+
+/// A VFO opened to follow a granted call.
+pub struct Following {
+    /// The call ("TG 4001").
+    pub label: String,
+    pub encrypted: bool,
+    pub opened: std::time::Instant,
+    /// The control channel last granted it (grants repeat while it stands).
+    pub wanted: std::time::Instant,
+    /// Its decoder last had a call.
+    pub busy: std::time::Instant,
 }
 
 /// What the rail shows of one VFO.
@@ -71,6 +85,8 @@ pub struct Row {
 
 /// What was clicked in the rail.
 pub enum Act {
+    /// The "follow calls" switch was flipped.
+    FollowChanged,
     Select(usize),
     ToggleMute(usize),
     Remove(usize),
@@ -114,6 +130,8 @@ pub fn rail(
     selected: usize,
     open: &mut bool,
     max: usize,
+    follow: &mut bool,
+    notes: &std::collections::VecDeque<String>,
 ) -> Vec<Act> {
     let mut acts = Vec::new();
     let width = if *open { OPEN_W } else { SHUT_W };
@@ -127,7 +145,7 @@ pub fn rail(
         )
         .show(ctx_ui, |ui| {
             if *open {
-                open_rail(ui, rows, selected, open, max, &mut acts);
+                open_rail(ui, rows, selected, open, max, follow, notes, &mut acts);
             } else {
                 shut_rail(ui, rows, selected, open, max, &mut acts);
             }
@@ -135,12 +153,15 @@ pub fn rail(
     acts
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_rail(
     ui: &mut egui::Ui,
     rows: &[Row],
     selected: usize,
     open: &mut bool,
     max: usize,
+    follow: &mut bool,
+    notes: &std::collections::VecDeque<String>,
     acts: &mut Vec<Act>,
 ) {
     ui.add_space(8.0);
@@ -174,6 +195,25 @@ fn open_rail(
             for (i, r) in rows.iter().enumerate() {
                 row(ui, i, r, i == selected, rows.len() > 1, acts);
                 ui.add_space(6.0);
+            }
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                if ui
+                    .checkbox(follow, "follow calls")
+                    .on_hover_text(
+                        "Open a VFO for each call a trunked control channel grants (P25), \
+                         and close it a few seconds after the call",
+                    )
+                    .changed()
+                {
+                    acts.push(Act::FollowChanged);
+                }
+            });
+            for n in notes.iter().rev() {
+                ui.horizontal(|ui| {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(n).small().color(Color32::GRAY));
+                });
             }
         });
 }

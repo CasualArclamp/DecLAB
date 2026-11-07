@@ -1458,3 +1458,41 @@ the decoder does not have.
   the card shows both slots, the system line from the found seed, the
   heard list both talkgroups, and TS1 plays.
 
+## 34. Following trunked calls (2026-11-08)
+
+The user's choices: follow every grant (encrypted ones marked, not
+played), close a follower after a hang time, replace the oldest follower
+when all eight VFOs are in use, and the first call to speak keeps the
+sound.
+
+- **API:** `Sink::follow` carries `Follow { hz, label, encrypted }`. The
+  P25 phase 1 decoder sends one for every group, unit-to-unit grant and
+  grant update whose band its identifier updates have given; repeated
+  while the control channel repeats the grant. Digital voice passes them
+  on from whichever mode heard them.
+- **Engine:** the worker queues them per VFO (`Host::take_follows`).
+  `Host::set_vfo_follower` marks a VFO opened for a call: among those, the
+  first to speak keeps the sound until it has been quiet `SPEAKER_HOLD`
+  (1 s), as DMR's two slots share one speaker. `Host::vfo_lock` reads a
+  VFO's lock cheaply.
+- **GUI policy** (`App::follow_calls`, each frame): a grant within 2 kHz
+  of a VFO refreshes it (or is left to a VFO the user put there); else,
+  inside 90 % of the radio's span, a VFO with the requesting decoder opens
+  there (the oldest follower closed if all are taken; never the user's).
+  The radio is never retuned: the control channel keeps its place, and a
+  grant outside the span is noted as missed. A follower closes 4 s after
+  both its grants and its call (lock `Locked`) stop. The rail shows "↪ TG
+  4001" on followers, a "follow calls" switch (kept in the prefs, on by
+  default) and the last few follow events. Followers are not in the
+  prefs.
+- **Phase 2 seeds from the control channel:** the phase 1 decoder hands
+  NET_STS_BCST's WACN and system, with the control channel's NAC, to the
+  phase 2 receivers (`p25p2::receiver::remember_seed`), so a followed TDMA
+  call descrambles from its first ACCH rather than waiting to solve for it.
+- `IDEN_UPDATE_TDMA` (51) is now what the simulator sends for a two-slot
+  band (it sent 61, which reads back as one slot).
+- **Check:** `p25_trunk_make` (240 kS/s, control channel and a phase 2
+  call 90 kHz apart): the follower opens on the grant, locks and plays
+  TS1, and closes 4 s after the call. The command-line app does not
+  follow calls.
+

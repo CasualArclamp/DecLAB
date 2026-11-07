@@ -208,6 +208,8 @@ impl Decoder for Voice {
                 out.locations.push(l);
             }
             out.ip.append(&mut m.sink.ip);
+            // A control channel's grants, from whichever mode heard them.
+            out.follow.append(&mut m.sink.follow);
         }
         // Keep the mode that is on the air while it stays locked; else take
         // whichever has locked.

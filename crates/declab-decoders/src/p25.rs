@@ -239,9 +239,37 @@ impl P25 {
         }
     }
 
+    /// A grant's call, for the host to follow, once its band is known.
+    fn follow(&self, band: u8, ch: u16, label: String, encrypted: bool, out: &mut Sink) {
+        if let Some(b) = self.bands.get(&band) {
+            out.follow.push(declab_api::Follow { hz: b.downlink_hz(ch), label, encrypted });
+        }
+    }
+
     fn tsbk(&mut self, t: Tsbk, out: &mut Sink) {
         if let Tsbk::Iden { id, band } = t {
             self.bands.insert(id, band);
+        }
+        match t {
+            Tsbk::GroupGrant { opts, band, channel, group, .. } => {
+                self.follow(band, channel, format!("TG {group}"), opts.encrypted(), out);
+            }
+            Tsbk::UnitGrant { band, channel, target, source } => {
+                self.follow(band, channel, format!("{source} → {target}"), false, out);
+            }
+            Tsbk::GroupGrantUpdate { a, b } => {
+                for (band, ch, group) in std::iter::once(a).chain(b) {
+                    self.follow(band, ch, format!("TG {group}"), false, out);
+                }
+            }
+            Tsbk::NetStatus { wacn, system, .. } => {
+                // Phase 2 traffic channels are scrambled with WACN, system
+                // and the NAC: hand the seed to them.
+                if let Some(nac) = self.rx.stats.nac {
+                    declab_pmr::p25p2::receiver::remember_seed(declab_pmr::p25p2::scramble::seed(wacn, system, nac));
+                }
+            }
+            _ => {}
         }
         let text = match t {
             Tsbk::GroupGrant {
@@ -482,7 +510,7 @@ mod tests {
         let mut iq = sim::modulate(&bits, RATE, 0.1);
         sim::add_noise(&mut iq, RATE, 20.0, 200.0, 4);
         let mut d = Factory.create();
-        let (mut log, mut sound) = (Vec::new(), 0usize);
+        let (mut log, mut sound, mut follow) = (Vec::new(), 0usize, Vec::new());
         let tuning = Tuning {
             center_hz: 0.0,
             sample_rate: RATE,
@@ -499,8 +527,15 @@ mod tests {
             let mut sink = Sink::default();
             d.process(&block, &mut sink);
             log.append(&mut sink.log);
+            follow.append(&mut sink.follow);
             sound += sink.audio.iter().map(|a| a.samples.len()).sum::<usize>();
         }
+        // Each grant after the band is known asks for the call to be
+        // followed.
+        assert!(
+            follow.iter().any(|f| (f.hz - 851_106_250.0).abs() < 1.0 && f.label == "TG 101" && !f.encrypted),
+            "{follow:?}"
+        );
         assert!(
             log.iter().any(|l| l == "group call TG 101 from 1234567"),
             "{log:#?}"

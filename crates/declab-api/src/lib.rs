@@ -367,6 +367,9 @@ pub struct Location {
 #[derive(Default)]
 pub struct Sink {
     pub lock: Lock,
+    /// Calls on other frequencies the host may open a VFO for (a trunked
+    /// control channel's grants), repeated while the grant stands.
+    pub follow: Vec<Follow>,
     /// 188-byte MPEG transport-stream packets (DVB-T/T2, DVB-S/S2 TS mode).
     pub ts: Vec<[u8; 188]>,
     /// IPv4/IPv6 datagrams (DVB-S2 GSE, DVB-RCS2 return, DMR packet data):
@@ -423,6 +426,7 @@ impl Sink {
     /// Ready for the next call, keeping the vectors' capacity so the loop
     /// does not allocate.
     pub fn clear(&mut self) {
+        self.follow.clear();
         self.ts.clear();
         self.ip.clear();
         self.packets.clear();
@@ -442,6 +446,18 @@ impl Sink {
         self.retune_by_hz = None;
         self.custom.clear();
     }
+}
+
+/// A call another channel carries (a trunked control channel's grant): the
+/// host may open a VFO there with the decoder that made the request, and
+/// close it once the call is over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Follow {
+    /// The call's RF frequency (downlink), Hz.
+    pub hz: f64,
+    /// What it is, for the log and the rail ("TG 4001").
+    pub label: String,
+    pub encrypted: bool,
 }
 
 /// What the app asks of a running decoder.

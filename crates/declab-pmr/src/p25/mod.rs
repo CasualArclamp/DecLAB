@@ -532,7 +532,8 @@ impl Tsbk {
                 set(30, 8, 0x80);
                 set(38, 10, (band.spacing_hz / 125.0) as u64);
                 set(48, 32, (band.base_hz / 5.0) as u64);
-                61
+                // A TDMA band (two slots a carrier) is IDEN_UPDATE_TDMA.
+                if band.slots == 2 { 51 } else { 61 }
             }
             Tsbk::RfssStatus {
                 system,

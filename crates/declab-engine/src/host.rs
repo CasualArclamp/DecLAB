@@ -27,7 +27,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use declab_api::{
-    Block, Card, Command, DataPacket, Decoder, DecoderFactory, Devices, Heard, InputSpec, Location, Lock, Measurement,
+    Block, Card, Command, DataPacket, Decoder, DecoderFactory, Devices, Follow, Heard, InputSpec, Location, Lock, Measurement,
     Picture, Service, Sink, Tuning, WaterfallRow,
 };
 use declab_core::{Iq, SampleFormat};
@@ -248,7 +248,12 @@ struct Shared {
     running: AtomicBool,
     /// Blocks handed to workers and not yet decoded (summed over VFOs).
     in_flight: AtomicUsize,
+    /// The following VFO whose call has the sound, and when it last spoke.
+    speaker: Mutex<Option<(VfoId, Instant)>>,
 }
+
+/// Quiet after which a followed call lets another have the sound.
+pub const SPEAKER_HOLD: Duration = Duration::from_secs(1);
 
 /// What one VFO's worker and the GUI share.
 struct VfoShared {
@@ -266,6 +271,12 @@ struct VfoShared {
     chan_file: Mutex<Option<std::io::BufWriter<std::fs::File>>>,
     /// This VFO's volume against the master (0 mutes it), `f32` bits.
     gain: AtomicU32,
+    /// Its id, for the shared speaker.
+    id: VfoId,
+    /// Opened to follow a call: its sound waits its turn (`Shared::speaker`).
+    follower: AtomicBool,
+    /// Follow requests from its decoder not yet taken by the app.
+    follow: Mutex<Vec<Follow>>,
     /// The primary VFO may retune the radio when its decoder asks (a
     /// decoder following a drifting signal); the others only move their own
     /// channel, since the radio is theirs too.
@@ -273,8 +284,11 @@ struct VfoShared {
 }
 
 impl VfoShared {
-    fn new(drives_source: bool) -> VfoShared {
+    fn new(id: VfoId, drives_source: bool) -> VfoShared {
         VfoShared {
+            id,
+            follower: AtomicBool::new(false),
+            follow: Mutex::new(Vec::new()),
             view: Mutex::new(DecoderView::default()),
             custom: Mutex::new(VecDeque::new()),
             mini_rows: Mutex::new(VecDeque::new()),
@@ -333,6 +347,7 @@ impl Host {
             handoff_dropped: Mutex::new(0),
             volume: AtomicU32::new(0.8f32.to_bits()),
             running: AtomicBool::new(true),
+            speaker: Mutex::new(None),
             in_flight: AtomicUsize::new(0),
         });
         let (cmd, cmd_rx) = mpsc::channel();
@@ -370,7 +385,7 @@ impl Host {
         self.next_id += 1;
         let info = factory.info();
         let spec = factory.input(self.source_rate);
-        let vs = Arc::new(VfoShared::new(self.vfos.is_empty()));
+        let vs = Arc::new(VfoShared::new(id, self.vfos.is_empty()));
         {
             let mut v = vs.view.lock().unwrap();
             v.id = info.id;
@@ -466,6 +481,29 @@ impl Host {
         if let Some(v) = self.vfo(id) {
             let _ = v.tx.send(WorkerMsg::Command(c));
         }
+    }
+
+    /// Mark a VFO as opened to follow a call: among such VFOs the first to
+    /// speak keeps the sound until it has been quiet [`SPEAKER_HOLD`].
+    pub fn set_vfo_follower(&self, id: VfoId, on: bool) {
+        if let Some(v) = self.vfo(id) {
+            v.vs.follower.store(on, Ordering::Relaxed);
+        }
+    }
+
+    /// Follow requests the VFOs' decoders have made since the last call,
+    /// with the VFO that made each.
+    pub fn take_follows(&self) -> Vec<(VfoId, Follow)> {
+        self.vfos
+            .iter()
+            .flat_map(|v| std::mem::take(&mut *v.vs.follow.lock().unwrap()).into_iter().map(move |f| (v.id, f)))
+            .collect()
+    }
+
+    /// A VFO's lock as of its decoder's latest report (cheaper than
+    /// [`Host::vfo_view`]).
+    pub fn vfo_lock(&self, id: VfoId) -> Option<Lock> {
+        self.vfo(id).map(|v| v.vs.view.lock().unwrap().lock)
     }
 
     /// A VFO's volume against the master: 1.0 as is, 0.0 muted.
@@ -1172,6 +1210,20 @@ fn worker_thread(
                 }
                 Target::Offset(o) => target = Target::Offset(o + d),
                 Target::At(f) => target = Target::At(f + d),
+            }
+        }
+        if !sink.follow.is_empty() {
+            let mut q = vs.follow.lock().unwrap();
+            q.extend(sink.follow.drain(..));
+            let over = q.len().saturating_sub(64);
+            q.drain(..over);
+        }
+        if !sink.audio.is_empty() && vs.follower.load(Ordering::Relaxed) {
+            // Followed calls take turns: the one speaking keeps the sound.
+            let mut sp = sh.speaker.lock().unwrap();
+            match *sp {
+                Some((other, t)) if other != vs.id && t.elapsed() < SPEAKER_HOLD => sink.audio.clear(),
+                _ => *sp = Some((vs.id, Instant::now())),
             }
         }
         if !sink.audio.is_empty() {
