@@ -57,6 +57,7 @@ cargo run --release -p declab-pmr --example tetra_file -- IN.cf32   # a 72 kS/s 
 cargo run --release -p declab-cli -- run voice --radio rtlsdr --freq 439.5M --gain 40.2 --card
 cargo run --release -p declab-cli -- run dab --file ../DecDAB/captures/11d_long_222.064MHz_4.096Msps_amp.cs8 --service "classic fm" --wav out/x.wav --card   # DAB/DAB+ (DecDAB's captures); AAC by libxaac
 cargo run --release -p declab-gui -- ../DecDAB/captures/11d_long_222.064MHz_4.096Msps_amp.cs8 --decoder dab --screenshot out/x.png --after 12
+cargo run --release -p declab-cli --example dab_slides -- FILE OFFSET_HZ OUT_DIR [SECONDS]   # every DAB+ service of a block at once: X-PAD apps, MOT groups and errors per service, slides written to OUT_DIR (DAB_DUMP=SID,SID writes those services' raw PAD fields, in hex)
 cargo run --release -p declab-cli -- run wfm --radio airspy --freq 98M --bias-tee   # antenna-port power for an LNA (off unless given; also --bias-tee on declab-gui)
 cargo run --release -p declab-decoders --example sat_make -- out/sim_sat_gse.cf32 gse 10 6 -120000   # simulated satellite carrier (s2ts, s2tv, s2x, gse, dvbs), 8 MS/s
 cargo run --release -p declab-cli -- run sat --file out/sim_sat_gse.cf32 --rate 8M --bandwidth 3M --pcap out/x.pcap --ts out/x.ts --set symbol_rate=2000000 --card   # DVB-S/S2/S2X; GSE to PCAP, TS to a file

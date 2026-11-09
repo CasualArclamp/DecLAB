@@ -16,6 +16,8 @@ const GREY: Color32 = Color32::from_gray(154);
 const BOX: Color32 = Color32::from_rgb(24, 24, 24);
 /// The scope's side, points.
 const SCOPE: f32 = 150.0;
+/// A DAB slide's largest width, points (TS 101 499 slides are 320 by 240).
+const SLIDE_WIDTH: f32 = 320.0;
 
 /// Format a reading: few digits for big numbers, more for small ones.
 pub fn value(v: f64) -> String {
@@ -179,6 +181,12 @@ pub fn scope_and_card(
         });
     });
     pick
+}
+
+/// The picture to show: the shown service's, as its text is. Going by the
+/// list leaves out a picture from before a retune.
+pub fn slide_of(view: &DecoderView, selected: Option<u32>) -> Option<&declab_api::Picture> {
+    view.pictures.get(&shown_service(view, selected)?)
 }
 
 /// A card for a decoder that sends none: its measurements as details.
@@ -467,7 +475,39 @@ pub enum Pick {
     Tune(f64),
 }
 
-pub fn services(ui: &mut Ui, view: &DecoderView, selected: Option<u32>) -> Option<Pick> {
+pub fn services(
+    ui: &mut Ui,
+    view: &DecoderView,
+    selected: Option<u32>,
+    slide: Option<&egui::TextureHandle>,
+) -> Option<Pick> {
+    let Some(t) = slide else {
+        return service_list(ui, view, selected);
+    };
+    // The slide beside the list. The left box can grow past its half of
+    // the window, so the width is what the window really shows of this one.
+    let room = ui.available_width().min(ui.ctx().content_rect().right() - ui.cursor().left() - 12.0);
+    let [w, h] = t.size().map(|n| n as f32);
+    let scale = ((room * 0.45).min(SLIDE_WIDTH) / w).min(ui.available_height() / h).min(1.0);
+    let size = vec2(w * scale, h * scale);
+    let mut pick = None;
+    ui.horizontal_top(|ui| {
+        let list = vec2(room - size.x - 10.0, ui.available_height());
+        let down = egui::Layout::top_down(egui::Align::Min);
+        pick = ui
+            .allocate_ui_with_layout(list, down, |ui| {
+                // One row a service, cut rather than wrapped at this width.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                service_list(ui, view, selected)
+            })
+            .inner;
+        ui.add_space(10.0);
+        ui.add(egui::Image::new(t).fit_to_exact_size(size).corner_radius(3));
+    });
+    pick
+}
+
+fn service_list(ui: &mut Ui, view: &DecoderView, selected: Option<u32>) -> Option<Pick> {
     let mut pick = None;
     // Everything scrolls: a multiplex has a dozen services or more, and
     // the box must not grow out of the panel.

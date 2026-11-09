@@ -418,6 +418,9 @@ struct App {
     chan_hz: f64,
     bandwidth_hz: f64,
     selected_service: Option<u32>,
+    /// The slide on show: its bytes, to notice a new one, and its texture
+    /// (`None` if it would not decode).
+    slide: Option<(Vec<u8>, Option<egui::TextureHandle>)>,
     volume: f32,
     /// The top bar's mute: the volume is kept, the sound is off.
     muted: bool,
@@ -597,6 +600,7 @@ impl App {
             chan_hz,
             bandwidth_hz: 0.0,
             selected_service: None,
+            slide: None,
             volume: prefs::num(&p, "volume").unwrap_or(0.8),
             muted: false,
             scope: opts.scope.clone().unwrap_or_else(|| declab_decoders::ALL[dec].default_scope().to_string()),
@@ -1714,6 +1718,31 @@ impl App {
         ]);
     }
 
+    /// Keep the slide's texture up to date with the view. A JPEG is decoded
+    /// only when a new one arrives, so this costs a compare per frame.
+    fn update_slide(&mut self, ctx: &egui::Context) {
+        let Some(p) = panels::slide_of(&self.view, self.selected_service) else {
+            self.slide = None;
+            return;
+        };
+        if self.slide.as_ref().is_some_and(|(b, _)| *b == p.bytes) {
+            return;
+        }
+        let texture = match image::load_from_memory(&p.bytes) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                let ci = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+                Some(ctx.load_texture("slide", ci, egui::TextureOptions::LINEAR))
+            }
+            Err(e) => {
+                eprintln!("slide ({} bytes): {e}", p.bytes.len());
+                None
+            }
+        };
+        self.slide = Some((p.bytes.clone(), texture));
+    }
+
     /// Take what the host has made since the last frame.
     /// A name for what is received (recordings are named after it).
     fn stream_name(&self) -> String {
@@ -2321,6 +2350,7 @@ impl eframe::App for App {
                     .iter()
                     .any(|m| !self.view.scopes.iter().any(|(n, _)| *n == m.name));
                 let mut picked = None;
+                self.update_slide(ui.ctx());
                 let mut ism_save = false;
                 ui.horizontal_top(|ui| {
                     let chan = self.chan_hz + self.lo_of(self.dec);
@@ -2402,7 +2432,7 @@ impl eframe::App for App {
                                     match self.data_tabs.bar(ui, &self.view) {
                                         data_tabs::Tab::Heard => {
                                             if let Some(p) =
-                                                panels::services(ui, &self.view, self.selected_service)
+                                                panels::services(ui, &self.view, self.selected_service, None)
                                             {
                                                 picked = Some(p);
                                             }
@@ -2440,8 +2470,9 @@ impl eframe::App for App {
                                 {
                                     Some(m) => self.big_rows = panels::big_waterfall(ui, m).max(64),
                                     None => {
+                                        let slide = self.slide.as_ref().and_then(|(_, t)| t.as_ref());
                                         if let Some(p) =
-                                            panels::services(ui, &self.view, self.selected_service)
+                                            panels::services(ui, &self.view, self.selected_service, slide)
                                         {
                                             picked = Some(p);
                                         }

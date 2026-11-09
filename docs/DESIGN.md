@@ -819,7 +819,13 @@ voice mode.
   sub-channel) restarts when its description changes.
 - **Shown:** card with the ensemble, codec, sub-channel, AUs, RS and a MER
   gauge (10.5 dB for clean EEP 3-A, DecDAB's figure); the DLS as the
-  service's text; slideshow images as its pictures; the constellation.
+  service's text; slideshow images as its pictures, beside the services
+  list; the constellation.
+- **Slideshow on air:** checked with `dab_slides` on four ensembles at once.
+  Some stations send MOT in the 4-byte short X-PAD, where the data group
+  length indicator does not fit: 3 bytes sit beside its contents indicator
+  and the last comes in the next X-PAD, so `PadDecoder` gathers it. At
+  about 30 bytes a second such a slide takes minutes to arrive.
 - **CLI:** `--service NAME` picks a service, `--wav PATH` writes the sound
   (the host's WAV tap; a new rate or channel count starts it over).
 - **Not yet:** SPI/EPG and other packet-mode data, TII, the channel

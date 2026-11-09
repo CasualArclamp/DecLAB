@@ -123,6 +123,9 @@ pub struct PadDecoder {
     mot_buf: Vec<u8>,
     /// From the last data group length indicator (app 1).
     mot_len: Option<usize>,
+    /// The indicator's 4 bytes as they arrive: a short X-PAD has room for 3
+    /// next to its contents indicator, the last comes in the next X-PAD.
+    dgli: Vec<u8>,
     dls: Dls,
     mot: Box<MotDecoder>,
     pub stats: PadStats,
@@ -157,6 +160,7 @@ impl PadDecoder {
             dls_buf: Vec::new(),
             mot_buf: Vec::new(),
             mot_len: None,
+            dgli: Vec::with_capacity(4),
             dls: Dls::default(),
             mot: Box::new(MotDecoder::new()),
             stats: PadStats::default(),
@@ -185,6 +189,7 @@ impl PadDecoder {
             (0, _) => return,
             (1, true) => {
                 let Some(app) = x(0) else { return };
+                self.dgli.clear();
                 subs.push((app & 0x1F, 3));
                 pos = 1;
             }
@@ -193,6 +198,7 @@ impl PadDecoder {
                 pos = 0;
             }
             (2, true) => {
+                self.dgli.clear();
                 pos = 0;
                 for _ in 0..4 {
                     let Some(b) = x(pos) else { return };
@@ -242,8 +248,16 @@ impl PadDecoder {
         match app {
             1 => {
                 // Data group length indicator: rfa (2), length (14), CRC.
-                if data.len() >= 4 && crc16_ok(&data[..4]) {
-                    self.mot_len = Some(((data[0] as usize & 0x3F) << 8) | data[1] as usize);
+                // Later continuations hold only padding: full at 4 bytes,
+                // it takes no more until the next contents indicator.
+                let room = 4 - self.dgli.len();
+                if room == 0 {
+                    return;
+                }
+                self.dgli.extend_from_slice(&data[..room.min(data.len())]);
+                if self.dgli.len() == 4 && crc16_ok(&self.dgli) {
+                    self.mot_len =
+                        Some(((self.dgli[0] as usize & 0x3F) << 8) | self.dgli[1] as usize);
                 }
             }
             2 => {
@@ -461,7 +475,9 @@ mod tests {
         let mut dec = PadDecoder::new();
         let mut ev = Vec::new();
         for _ in 0..20 {
-            let Some(group) = enc.next_data_group() else { break };
+            let Some(group) = enc.next_data_group() else {
+                break;
+            };
             // The length indicator: rfa 00, 14-bit length, CRC.
             let mut dgli = vec![(group.len() >> 8) as u8 & 0x3F, group.len() as u8];
             let c = crc16_ccitt(&dgli);
@@ -491,7 +507,9 @@ mod tests {
             }
         }
         let mot = ev.iter().find_map(|e| match e {
-            PadEvent::Mot { name, mime, data, .. } => Some((name.clone(), mime.clone(), data.clone())),
+            PadEvent::Mot {
+                name, mime, data, ..
+            } => Some((name.clone(), mime.clone(), data.clone())),
             _ => None,
         });
         let (name, mime, data) = mot.expect("the picture");
@@ -499,6 +517,72 @@ mod tests {
         assert_eq!(data, pic);
         assert_eq!(dec.stats.mot_errors, 0);
         assert!(dec.stats.apps[1] > 0 && dec.stats.apps[12] > 0 && dec.stats.apps[13] > 0);
+    }
+
+    /// A slideshow picture in short X-PADs, as some stations send it
+    /// (seen on air): the length indicator split over two X-PADs, the MOT
+    /// data group in 4-byte pieces, a label cutting in part way through and
+    /// the group picked up again by a MOT continuation indicator.
+    #[test]
+    fn slideshow_picture_out_of_short_xpad() {
+        use crate::mot::MotEncoder;
+        let mut pic = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        pic.extend((0..300u32).map(|i| (i * 11 + 5) as u8));
+        pic.extend([0xFF, 0xD9]);
+        let mut enc = MotEncoder::header_mode();
+        enc.set_segment_size(200).unwrap();
+        enc.add_file("cover.jpg", pic.clone()).unwrap();
+        let mut dec = PadDecoder::new();
+        let mut ev = Vec::new();
+        for _ in 0..20 {
+            let Some(group) = enc.next_data_group() else {
+                break;
+            };
+            let mut dgli = vec![(group.len() >> 8) as u8 & 0x3F, group.len() as u8];
+            let c = crc16_ccitt(&dgli);
+            dgli.extend_from_slice(&c.to_be_bytes());
+            dec.push(
+                &field(&[1, dgli[0], dgli[1], dgli[2]], false, true),
+                &mut ev,
+            );
+            dec.push(&field(&[dgli[3], 0, 0, 0], false, false), &mut ev);
+            // The group's bytes: 3 beside each indicator, 4 in a continuation.
+            let mut rest = group.as_slice();
+            let mut piece = |x: &mut Vec<u8>, n: usize| {
+                let (a, b) = rest.split_at(n.min(rest.len()));
+                x.extend_from_slice(a);
+                x.resize(x.len() + n - a.len(), 0);
+                rest = b;
+                !rest.is_empty()
+            };
+            let mut x = vec![12];
+            let mut more = piece(&mut x, 3);
+            dec.push(&field(&x, false, true), &mut ev);
+            let mut n = 0;
+            while more {
+                n += 1;
+                let mut x = Vec::new();
+                if n == 5 {
+                    // A label's first segment, then back to the MOT group.
+                    dec.push(&field(&[2, 0x60, 0x00, b'H'], false, true), &mut ev);
+                    x.push(13);
+                    more = piece(&mut x, 3);
+                    dec.push(&field(&x, false, true), &mut ev);
+                } else {
+                    more = piece(&mut x, 4);
+                    dec.push(&field(&x, false, false), &mut ev);
+                }
+            }
+            if ev.iter().any(|e| matches!(e, PadEvent::Mot { .. })) {
+                break;
+            }
+        }
+        let got = ev.iter().find_map(|e| match e {
+            PadEvent::Mot { data, .. } => Some(data.clone()),
+            _ => None,
+        });
+        assert_eq!(got.expect("the picture"), pic);
+        assert_eq!(dec.stats.mot_errors, 0);
     }
 
     #[test]

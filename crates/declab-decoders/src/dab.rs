@@ -363,6 +363,9 @@ impl Dab {
                     format!("{} · {} kbit/s · {}", sc.id, sc.bitrate(), sc.protection_name()),
                 ));
                 details.push(pair("AUs", format!("{} ({} bad)", p.au_ok, p.au_bad)));
+                if self.slides > 0 {
+                    details.push(pair("slides", self.slides.to_string()));
+                }
                 if p.rs_corrected + p.rs_failed > 0 {
                     details.push(pair(
                         "RS",
@@ -479,6 +482,7 @@ impl Decoder for Dab {
                     self.want = Some(sid);
                     self.playing = None;
                     self.dls = None;
+                    self.slides = 0;
                     self.demod.set_scope_subchannel(None);
                     self.start(out);
                 }

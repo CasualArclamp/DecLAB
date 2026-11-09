@@ -26,3 +26,10 @@ declab-decoders = { path = "../../crates/declab-decoders", default-features = fa
 declab-engine = { path = "../../crates/declab-engine" }
 declab-io = { path = "../../crates/declab-io" }
 anyhow.workspace = true
+
+[dev-dependencies]
+# For examples/dab_slides.rs, which runs DecDAB's receiver on every service.
+decdab-ofdm = { path = "../../crates/decdab-ofdm" }
+decdab-fic = { path = "../../crates/decdab-fic" }
+decdab-msc = { path = "../../crates/decdab-msc" }
+decdab-data = { path = "../../crates/decdab-data" }
