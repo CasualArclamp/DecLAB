@@ -849,6 +849,10 @@ impl Sat {
                     None => card.headline = "Waiting for frames".into(),
                 }
                 details.push(("Carrier".into(), format!("{:+.0} Hz", demod.carrier_offset_hz())));
+                if demod.spectrum_inverted() {
+                    // A C-band LNB (LO above the band) hands the carrier over mirrored.
+                    details.push(("Spectrum".into(), "inverted".into()));
+                }
                 details.push(("Frames".into(), format!("{} ok of {}", s.ok, s.frames)));
                 details.push((
                     "FEC failures".into(),
