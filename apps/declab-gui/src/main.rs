@@ -9,7 +9,7 @@
 //! status bar last. Laid out from the agreed mockups (docs/DESIGN.md §1).
 //!
 //! ```text
-//! declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr]
+//! declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr|pluto|fobos|sdrplay|uhd|remote]
 //!             [--net tcp://HOST:PORT|listen://ADDR:PORT|udp://ADDR:PORT --iq int8|int16|… --rate HZ]
 //!            [--decoder ID] [--chan HZ] [--zoom Z] [--wheel]
 //!            [--screenshot OUT.png] [--after SECS]
@@ -25,6 +25,7 @@ mod external;
 mod freq_display;
 mod gain_opt;
 mod ism_tabs;
+mod more_radios;
 mod panels;
 mod player;
 mod prefs;
@@ -50,6 +51,7 @@ use declab_engine::{DecoderView, Host, HostOptions, MAX_VFOS, Stats};
 const FOLLOW_HANG: Duration = Duration::from_secs(4);
 use declab_io::{IqFileReader, IqSource, format_from_path, name_hint};
 use eframe::egui::{self, Color32, RichText};
+use more_radios::{Extra, MoreControl, MoreRadios};
 use waterfall::{History, RingImage};
 use wheel::{Entry, Outcome, Wheel, family_colour};
 
@@ -154,11 +156,12 @@ impl Options {
                 }
                 "--decoder" => o.decoder = Some(value("a decoder id")?),
                 "--radio" => {
-                    o.radio = Some(match value("airspy, hackrf, rtlsdr or pluto")?.as_str() {
+                    o.radio = Some(match value("airspy, hackrf, rtlsdr, pluto, fobos, sdrplay, uhd or remote")?.as_str() {
                         "airspy" => SourceKind::Airspy,
                         "hackrf" => SourceKind::HackRf,
                         "rtlsdr" | "rtl" => SourceKind::RtlSdr,
                         "pluto" | "plutoplus" => SourceKind::Pluto,
+                        k if Extra::from_key(k).is_some() => SourceKind::More(Extra::from_key(k).unwrap()),
                         r => return Err(format!("unknown radio {r:?}")),
                     })
                 }
@@ -211,7 +214,7 @@ impl Options {
                 "--screenshot" => o.screenshot = Some(value("a .png path")?.into()),
                 "--after" => o.after = value("seconds")?.parse().map_err(|_| "--after: seconds")?,
                 "-h" | "--help" => {
-                    return Err("declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr|pluto] [--pluto-uri URI] \
+                    return Err("declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr|pluto|fobos|sdrplay|uhd|remote] [--pluto-uri URI] \
                                 [--net URL --iq TYPE] [--decoder ID] [--chan HZ] [--zoom Z] [--wheel] [--screenshot OUT.png] [--after SECS]"
                         .into());
                 }
@@ -299,6 +302,9 @@ enum SourceKind {
     Pluto,
     /// Raw IQ from another program over TCP or UDP (`declab_io::net`).
     Network,
+    /// The radios from DecSAT (`more_radios.rs`): Fobos, SDRplay, USRP, a
+    /// DecSAT server.
+    More(Extra),
     File,
 }
 
@@ -310,6 +316,7 @@ impl SourceKind {
             SourceKind::RtlSdr => "RTL-SDR",
             SourceKind::Pluto => "ADALM-PLUTO / Pluto+",
             SourceKind::Network => "Network IQ",
+            SourceKind::More(k) => k.label(),
             SourceKind::File => "IQ file",
         }
     }
@@ -320,6 +327,7 @@ impl SourceKind {
             SourceKind::RtlSdr => "rtlsdr",
             SourceKind::Pluto => "pluto",
             SourceKind::Network => "net",
+            SourceKind::More(k) => k.key(),
             SourceKind::File => "file",
         }
     }
@@ -337,6 +345,8 @@ enum Control {
     /// No bias tee on a Pluto: `apply_bias_tee` passes it by.
     #[cfg(feature = "pluto")]
     Pluto(declab_io::PlutoControl),
+    /// The Fobos, the SDRplay, a USRP or a DecSAT server's radio.
+    More(MoreControl),
 }
 
 struct App {
@@ -380,6 +390,8 @@ struct App {
     net_url: String,
     net_sample: declab_io::NetSample,
     net_rate: f64,
+    /// The Fobos, SDRplay, USRP and DecSAT-server settings.
+    more: MoreRadios,
     /// The Airspy gain optimiser while it runs, and what the last run found.
     opt: Option<gain_opt::Optimiser>,
     opt_note: Option<String>,
@@ -489,6 +501,7 @@ impl App {
                 Some("rtlsdr") => SourceKind::RtlSdr,
                 Some("net") => SourceKind::Network,
                 Some("pluto") => SourceKind::Pluto,
+                Some(k) if Extra::from_key(k).is_some() => SourceKind::More(Extra::from_key(k).unwrap()),
                 _ => SourceKind::Airspy,
             });
         let file = opts
@@ -553,6 +566,13 @@ impl App {
                 .filter(|_| kind == SourceKind::Network)
                 .or(prefs::num(&p, "net_rate"))
                 .unwrap_or(2e6),
+            more: {
+                let mut m = MoreRadios::load(|k| prefs::get(&p, k).map(String::from));
+                if let (SourceKind::More(k), Some(r)) = (kind, opts.rate) {
+                    m.set_rate(k, r);
+                }
+                m
+            },
             opt: None,
             opt_note: None,
             host: None,
@@ -981,6 +1001,7 @@ impl App {
             SourceKind::RtlSdr => declab_io::rtlsdr_proto::SAMPLE_RATE_HZ as f64,
             SourceKind::Pluto => self.pluto_rate,
             SourceKind::Network => self.net_rate,
+            SourceKind::More(k) => self.more.rate(k),
             SourceKind::File => self.file_rate,
         }
     }
@@ -1096,6 +1117,13 @@ impl App {
                 let src = PlutoSource::open(s).map_err(|e| e.to_string())?;
                 self.control = Control::Pluto(src.control());
                 Ok(Box::new(src))
+            }
+            SourceKind::More(k) => {
+                let (lo, hi) = k.range_hz();
+                let centre = self.live_centre(lo, hi, self.more.rate(k));
+                let (src, control) = self.more.open(k, centre as f64)?;
+                self.control = Control::More(control);
+                Ok(src)
             }
             #[allow(unreachable_patterns)]
             k => Err(format!("{} support was not built in", k.label())),
@@ -1679,7 +1707,7 @@ impl App {
         if !self.saving {
             return;
         }
-        prefs::set_many(&[
+        let mut all = vec![
             ("source", self.kind.key().into()),
             (
                 "file",
@@ -1715,7 +1743,9 @@ impl App {
             ("net_url", self.net_url.clone()),
             ("net_iq", self.net_sample.label().into()),
             ("net_rate", format!("{:.0}", self.net_rate)),
-        ]);
+        ];
+        all.extend(self.more.save());
+        prefs::set_many(&all);
     }
 
     /// Keep the slide's texture up to date with the view. A JPEG is decoded
@@ -1866,7 +1896,13 @@ impl App {
                     ui.label(RichText::new("source").color(Color32::GRAY));
                     let before = self.kind;
                     egui::ComboBox::from_id_salt("source").selected_text(self.kind.label()).show_ui(ui, |ui| {
-                        for k in [SourceKind::Airspy, SourceKind::HackRf, SourceKind::RtlSdr, SourceKind::Pluto, SourceKind::Network, SourceKind::File] {
+                        for k in [SourceKind::Airspy, SourceKind::HackRf, SourceKind::RtlSdr, SourceKind::Pluto] {
+                            ui.selectable_value(&mut self.kind, k, k.label());
+                        }
+                        for k in Extra::ALL {
+                            ui.selectable_value(&mut self.kind, SourceKind::More(k), k.label());
+                        }
+                        for k in [SourceKind::Network, SourceKind::File] {
                             ui.selectable_value(&mut self.kind, k, k.label());
                         }
                     });
@@ -1973,6 +2009,25 @@ impl App {
                         }
                         SourceKind::Network => self.network_ui(ui, running),
                         SourceKind::Pluto => self.pluto_ui(ui, running),
+                        SourceKind::More(k) => {
+                            // Rust note: `self.more` and `self.control` are
+                            // different fields, so one can be borrowed
+                            // mutably while the other is read.
+                            let live = match &self.control {
+                                Control::More(c) => Some(c),
+                                _ => None,
+                            };
+                            let ch = self.more.ui(k, ui, live);
+                            if let Some(c) = live {
+                                ui.label(RichText::new(c.info()).size(12.0).color(Color32::GRAY));
+                            }
+                            if ch.reopen || ch.save {
+                                self.save_prefs();
+                            }
+                            if ch.reopen && running {
+                                self.start();
+                            }
+                        }
                         SourceKind::RtlSdr => {
                             ui.label(RichText::new("rate").color(Color32::GRAY));
                             ui.label(RichText::new("2.048 MS/s").color(Color32::WHITE));
@@ -2006,7 +2061,7 @@ impl App {
                             });
                         }
                     }
-                    if !matches!(self.kind, SourceKind::File | SourceKind::Network | SourceKind::Pluto) {
+                    if !matches!(self.kind, SourceKind::File | SourceKind::Network | SourceKind::Pluto | SourceKind::More(_)) {
                         self.bias_tee_ui(ui);
                     }
                     ui.label(RichText::new("centre").color(Color32::GRAY));

@@ -11,6 +11,12 @@
 //!                      [--set KEY=VALUE] [--ts OUT.ts] [--pcap OUT.pcap] [--card] [--udp ADDR:PORT] [--http ADDR:PORT]
 //!                      [--sound]   (runs are silent unless --sound)
 //!                      [--pluto-uri auto|usb|ip:HOST] [--pluto-16bit]   (the Pluto, receive only)
+//! declab run <decoder> --radio fobos --freq HZ [--rate HZ] [--gain LNA,VGA] [--fobos-ext-clock]
+//! declab run <decoder> --radio sdrplay --freq HZ [--rate HZ] [--gain LNASTATE,IFGR] [--sdrplay-tuner-b]
+//! declab run <decoder> --radio uhd --freq HZ [--rate HZ] [--gain DB] [--uhd-args ARGS] [--uhd-antenna RX2]
+//! declab run <decoder> --radio remote --remote HOST[:PORT] --freq HZ --rate HZ [--remote-radio KEY]
+//!                      [--remote-password-file FILE] [--remote-bits 8] [--remote-zstd] [--gain NAME=V,NAME=V]
+//!                      (a radio behind DecSAT's decsat-server; its IQ is decoded here)
 //! declab run <decoder> --net tcp://HOST:PORT|listen://ADDR:PORT|udp://ADDR:PORT
 //!                      --rate HZ [--iq int8|uint8|int16|int32|float32] [--freq HZ] …
 //!                      (raw IQ from SDR++'s IQ Exporter, GNU Radio, an rtl_tcp server…)
@@ -94,7 +100,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     } else if let Some(url) = o.get("--net") {
         open_net(url, &o)?
     } else {
-        bail!("give --file <capture>, --radio hackrf|airspy|rtlsdr|pluto or --net tcp://HOST:PORT");
+        bail!("give --file <capture>, --radio hackrf|airspy|rtlsdr|pluto|fobos|sdrplay|uhd|remote or --net tcp://HOST:PORT");
     };
 
     let live = source.is_live();
@@ -358,6 +364,131 @@ fn open_pluto(_: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
     bail!("built without the pluto feature")
 }
 
+/// Two gain numbers, as `--gain A,B`.
+#[cfg(any(feature = "fobos", feature = "sdrplay"))]
+fn gain_pair(o: &Opts, what: &str) -> anyhow::Result<Option<(u8, u8)>> {
+    let Some(g) = o.get("--gain") else { return Ok(None) };
+    let p: Vec<u8> = g.split(',').map(str::parse).collect::<Result<_, _>>().with_context(|| format!("--gain {what}"))?;
+    let [a, b] = p[..] else { bail!("--gain {what}") };
+    Ok(Some((a, b)))
+}
+
+/// The RigExpert Fobos SDR, receive only (RigExpert's library is loaded at
+/// run time): `--gain LNA,VGA` (LNA step 0-3, VGA step 0-31 of 2 dB),
+/// `--rate` 8M to 50M, `--fobos-ext-clock` for 10 MHz on CLK IN.
+#[cfg(feature = "fobos")]
+fn open_fobos(o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    use declab_io::{FobosGains, FobosSettings, FobosSource};
+    let d = FobosSettings::default();
+    let gains = gain_pair(o, "LNA,VGA (0-3, 0-31)")?.map_or(d.gains, |(lna, vga)| FobosGains { lna, vga }.snapped());
+    let s = FobosSettings {
+        center_hz: o.hz("--freq")?.context("--freq")? as u64,
+        sample_rate: o.hz("--rate")?.unwrap_or(8e6) as u32,
+        gains,
+        external_clock: o.flag("--fobos-ext-clock"),
+    };
+    let src = FobosSource::open(s)?;
+    let i = src.control().info().clone();
+    println!("Fobos {}: hw {}, fw {}, {} {}", i.serial, i.hw_revision, i.fw_version, i.library, i.library_version);
+    Ok(Box::new(src))
+}
+
+#[cfg(not(feature = "fobos"))]
+fn open_fobos(_: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    bail!("built without the fobos feature")
+}
+
+/// An SDRplay RSP, receive only (SDRplay's API is loaded at run time):
+/// `--gain LNASTATE,IFGR` (both reductions: LNA state 0 = most gain, IF gain
+/// reduction 20-59 dB), `--rate` 2M to 10M, `--sdrplay-tuner-b` on an RSPduo.
+#[cfg(feature = "sdrplay")]
+fn open_sdrplay(o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    use declab_io::{SdrplayGains, SdrplaySettings, SdrplaySource};
+    let d = SdrplaySettings::default();
+    let gains = gain_pair(o, "LNASTATE,IFGR (0-9, 20-59)")?.map_or(d.gains, |(lna, gr)| SdrplayGains { lna, gr }.snapped());
+    let s = SdrplaySettings {
+        center_hz: o.hz("--freq")?.context("--freq")? as u64,
+        sample_rate: o.hz("--rate")?.unwrap_or(2e6) as u32,
+        gains,
+        tuner_b: o.flag("--sdrplay-tuner-b"),
+    };
+    let src = SdrplaySource::open(s)?;
+    let i = src.control().info().clone();
+    println!("SDRplay {} {}, tuner {}, API {:.2}", i.model, i.serial, i.tuner, i.api_version);
+    Ok(Box::new(src))
+}
+
+#[cfg(not(feature = "sdrplay"))]
+fn open_sdrplay(_: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    bail!("built without the sdrplay feature")
+}
+
+/// A USRP through UHD, receive only (uhd.dll is loaded at run time, Windows
+/// only): `--uhd-args` picks the device (`serial=…`, `type=b200`, `addr=…`),
+/// `--gain DB`, `--uhd-antenna RX2|TX/RX`.
+#[cfg(all(windows, feature = "uhd"))]
+fn open_uhd(o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    use declab_io::{UhdSettings, UhdSource};
+    let d = UhdSettings::default();
+    let s = UhdSettings {
+        device_args: o.get("--uhd-args").unwrap_or("").into(),
+        center_hz: o.hz("--freq")?.context("--freq")?,
+        rate: o.hz("--rate")?.unwrap_or(2e6),
+        gain: o.get("--gain").map(str::parse).transpose().context("--gain DB")?.unwrap_or(d.gain),
+        antenna: o.get("--uhd-antenna").map_or(d.antenna.clone(), String::from),
+        ..d
+    };
+    Ok(Box::new(UhdSource::open(s)?))
+}
+
+#[cfg(not(all(windows, feature = "uhd")))]
+fn open_uhd(_: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    bail!("built without the uhd feature (uhd.dll is loaded on Windows only)")
+}
+
+/// A radio behind DecSAT's `decsat-server`: `--remote HOST[:PORT]`, the
+/// server's name for the radio in `--remote-radio` (its first if not given),
+/// `--freq` and `--rate` for it, `--gain NAME=VALUE,…` by the server's stage
+/// names. The password, if the server wants one, is read from
+/// `--remote-password-file` (or the DECLAB_REMOTE_PASSWORD variable), so it
+/// is not left in the shell's history. Receive only, as the server is.
+#[cfg(feature = "remote")]
+fn open_remote(o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    use declab_io::remote::{ConnectOptions, IqParams, RadioRequest, RemoteIqSource};
+    let password = match o.get("--remote-password-file") {
+        Some(f) => Some(std::fs::read_to_string(f).with_context(|| format!("--remote-password-file {f}"))?.trim().to_string()),
+        None => std::env::var("DECLAB_REMOTE_PASSWORD").ok(),
+    };
+    let mut gains = Vec::new();
+    for part in o.get("--gain").unwrap_or("").split(',').filter(|p| !p.is_empty()) {
+        let (name, v) = part.split_once('=').context("--gain NAME=VALUE,… for a remote radio")?;
+        gains.push((name.to_string(), v.parse().with_context(|| format!("--gain {part}"))?));
+    }
+    let c = ConnectOptions {
+        addr: o.get("--remote").context("give --remote HOST[:PORT]")?.into(),
+        name: "declab".into(),
+        password,
+        takeover: o.flag("--remote-takeover"),
+    };
+    let radio = RadioRequest {
+        key: o.get("--remote-radio").unwrap_or("").into(),
+        center_hz: o.hz("--freq")?.context("--freq")?,
+        sample_rate: o.hz("--rate")?.context("give --rate: one of the remote radio's rates")?,
+        gains,
+    };
+    let p = IqParams {
+        bits: o.get("--remote-bits").map(str::parse).transpose().context("--remote-bits 4|6|8|10|12|16")?.unwrap_or(8),
+        zstd: if o.flag("--remote-zstd") { 1 } else { 0 },
+        slice: None,
+    };
+    Ok(Box::new(RemoteIqSource::connect(&c, radio, p)?))
+}
+
+#[cfg(not(feature = "remote"))]
+fn open_remote(_: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
+    bail!("built without the remote feature")
+}
+
 /// Raw IQ over the network. The stream carries no rate, so `--rate` is
 /// required; `--freq` only labels the band (an rtl_tcp server is tuned to it).
 fn open_net(url: &str, o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
@@ -384,7 +515,11 @@ fn open_radio(name: &str, o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
         "airspy" | "hydrasdr" => open_airspy(o),
         "rtlsdr" | "rtl" => open_rtlsdr(o),
         "pluto" | "plutoplus" => open_pluto(o),
-        other => bail!("unknown radio {other:?} (hackrf, airspy, hydrasdr, rtlsdr or pluto)"),
+        "fobos" => open_fobos(o),
+        "sdrplay" | "rsp" | "rspduo" => open_sdrplay(o),
+        "uhd" | "usrp" => open_uhd(o),
+        "remote" | "decsat" => open_remote(o),
+        other => bail!("unknown radio {other:?} (hackrf, airspy, hydrasdr, rtlsdr, pluto, fobos, sdrplay, uhd or remote)"),
     }
 }
 

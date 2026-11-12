@@ -2,8 +2,9 @@
 //! IQ input and output for DecLAB (from DecDVB-T's Airspy branch).
 //!
 //! Everything upstream of the demodulator talks to an [`IqSource`]: an IQ file
-//! (replay), the live HackRF One, Airspy R2, RTL-SDR or ADALM-PLUTO, or IQ over the
-//! network ([`net`]). Recording goes out through [`IqFileWriter`].
+//! (replay), the live HackRF One, Airspy R2, RTL-SDR, ADALM-PLUTO, Fobos SDR,
+//! SDRplay RSP or USRP, IQ over the network ([`net`]) or a radio behind a
+//! DecSAT server ([`remote`]). Recording goes out through [`IqFileWriter`].
 
 pub mod file;
 pub mod net;
@@ -23,6 +24,15 @@ pub mod hackrf;
 #[cfg(feature = "pluto")]
 pub mod pluto;
 
+#[cfg(feature = "fobos")]
+pub mod fobos;
+#[cfg(feature = "remote")]
+pub mod remote;
+#[cfg(feature = "sdrplay")]
+pub mod sdrplay;
+#[cfg(all(windows, feature = "uhd"))]
+pub mod uhd;
+
 pub use net::{NetIqControl, NetIqSettings, NetIqSource, NetMode, NetSample};
 pub use file::{IqFileReader, IqFileWriter, NameHint, format_from_path, name_hint};
 pub use rtlsdr_proto::{RtlGains, RtlSettings};
@@ -41,6 +51,17 @@ pub use pluto::{
 };
 #[cfg(feature = "hackrf")]
 pub use hackrf::{HackRfControl, HackRfGains, HackRfSettings, HackRfSource};
+
+#[cfg(feature = "fobos")]
+pub use fobos::{FOBOS_RATES, FobosControl, FobosGains, FobosInfo, FobosSettings, FobosSource};
+#[cfg(feature = "remote")]
+pub use remote::{RemoteControl, RemoteIqSource};
+#[cfg(feature = "sdrplay")]
+pub use sdrplay::{
+    SDRPLAY_RATES, SdrplayControl, SdrplayGains, SdrplayInfo, SdrplaySettings, SdrplaySource,
+};
+#[cfg(all(windows, feature = "uhd"))]
+pub use uhd::{UhdControl, UhdSettings, UhdSource};
 
 use declab_core::{Iq, Result};
 

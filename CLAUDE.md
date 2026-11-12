@@ -81,6 +81,10 @@ cargo run --release -p declab-cli -- run nfm --radio airspy --freq 446.05M --off
 cargo run --release -p declab-cli -- run usb --radio hackrf --freq 14.2M --gain 1,32,20
 cargo run --release -p declab-cli -- run wfm --radio pluto --freq 98M --rate 2.5M --gain 50   # ADALM-PLUTO / Pluto+, receive only (--pluto-uri auto|usb|ip:HOST, --gain DB|agc, --pluto-16bit)
 cargo test -p declab-io --features pluto live_pluto -- --ignored --nocapture   # a Pluto attached (env PLUTO_URI, default auto)
+cargo run --release -p declab-cli -- run wfm --radio fobos --freq 98M --rate 8M --gain 1,8   # Fobos SDR (--gain LNA,VGA; --fobos-ext-clock); also --radio sdrplay (--gain LNASTATE,IFGR, --sdrplay-tuner-b) and --radio uhd (--gain DB, --uhd-args, --uhd-antenna)
+cargo run --release -p declab-cli -- run wfm --radio remote --remote 127.0.0.1:5262 --remote-radio file --freq 98M --rate 10M --offset 0.8M   # a radio behind DecSAT's decsat-server (--remote-password-file, --remote-bits, --remote-zstd, --gain NAME=V,…)
+cargo test -p declab-io --features remote remote   # the server link against a stand-in server on loopback
+DECLAB_FOBOS_LIB=/path/to/lib cargo test -p declab-io --features fobos live_fobos -- --ignored --nocapture   # a Fobos attached; live_sdrplay likewise for an SDRplay
 ```
 
 Only an Airspy R2 is plugged in at the moment (the HackRF is not). All
@@ -89,6 +93,18 @@ WinUSB driver (the Pluto also works over TCP). The Pluto driver
 (`declab-io/src/pluto*`, from DecDVB-T) is receive only: it never opens the
 transmit side. The user's own
 DecDVB-T GUI may be holding the Airspy ("Access is denied"): never kill it.
+
+**The radios from DecSAT** (`declab-io/src/fobos.rs`, `sdrplay.rs`, `uhd.rs`,
+`remote*`; features `fobos`, `sdrplay`, `uhd`, `remote`, all on by default):
+the Fobos SDR, the SDRplay RSPs and a USRP load their maker's library at run
+time (`fobos_sdr.dll`/`fobos.dll`, `sdrplay_api.dll`, `uhd.dll`; UHD on
+Windows only), so nothing is needed to build them; `DECLAB_FOBOS_LIB` and
+`DECLAB_SDRPLAY_LIB` name a library file to use instead. `remote` is the
+client of DecSAT's `decsat-server` in its IQ mode (the wire types in
+`remote/msg.rs` must keep DecSAT's layout). All receive only. The GUI's
+settings and controls for the four are in `apps/declab-gui/src/more_radios.rs`.
+None has been run on its hardware here: the remote link is tested against a
+stand-in server, the others only compile.
 
 **Network IQ** (`declab-io/src/net.rs`) takes headerless IQ from another
 program, so any radio SDR++ drives (the SDRplay RSPduo, say) works on

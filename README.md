@@ -8,7 +8,7 @@
 If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
 
 **One software-defined radio receiver for everything on the air.** Point an
-RTL-SDR, Airspy, HydraSDR, HackRF or ADALM-PLUTO at the sky and DecLAB decodes terrestrial TV,
+RTL-SDR, Airspy, HydraSDR, HackRF, ADALM-PLUTO, Fobos SDR, SDRplay RSP or USRP at the sky and DecLAB decodes terrestrial TV,
 digital radio, FM, pagers, two-way digital voice, the ISM bands' sensors
 and remotes, and LoRa meshes, all in one window, all
 in Rust, all from one portable `.exe`.
@@ -112,6 +112,21 @@ Pluto USB driver (WinUSB); or give its network address, `ip:192.168.2.1`.
 A Pluto+ on Ethernet is `ip:ADDRESS`. Tezuka firmware streams 8-bit IQ,
 which DecLAB uses by itself, so USB carries about 13 MS/s instead of 6.8.
 
+**Fobos SDR, SDRplay RSP and USRP (receive only).** These three use their
+maker's own library, loaded when you start the radio, so DecLAB still runs
+without it. The Fobos needs RigExpert's `fobos_sdr.dll` (agile firmware) or
+`fobos.dll` (stock) beside `declab-gui.exe`; an SDRplay needs the SDRplay API
+installed from sdrplay.com; a USRP needs UHD installed (`uhd.dll` in
+`C:\Program Files\UHD\bin`, or its path in the `UHD_DLL` variable; Windows
+only). None of the three has been tried on the real radio from DecLAB yet.
+
+**A radio on another machine.** "DecSAT server" takes a radio from
+[DecSAT](https://github.com/CasualArclamp/DecSAT)'s `decsat-server` running
+elsewhere: give its address, and the server's name for the radio (`hackrf`,
+`pluto`, …; empty for its first). The IQ comes over one TCP connection,
+packed to 4 to 16 bits a sample, and is decoded here. The link is not
+encrypted: over the internet, use a VPN or an SSH tunnel.
+
 **Any other radio, over the network.** "Network IQ" takes raw IQ from
 another program: SDR++'s IQ Exporter (so an SDRplay RSPduo or anything else
 SDR++ drives), GNU Radio's TCP or UDP sinks, or an rtl_tcp server (which
@@ -140,6 +155,8 @@ declab run dab --file 11d_222.064MHz_4.096Msps.cs8 --service "classic fm" --wav 
 declab run voice --radio rtlsdr --freq 439.5M --gain 40.2 --card
 declab run wfm --radio airspy --freq 98M --offset 1.2M
 declab run wfm --radio pluto --freq 98M --pluto-uri ip:192.168.2.1 --gain agc
+declab run wfm --radio sdrplay --freq 98M --rate 2M --gain 4,40
+declab run wfm --radio remote --remote 192.168.1.20 --remote-radio hackrf --freq 98M --rate 8M --offset 0.8M
 declab run wfm --net tcp://127.0.0.1:7777 --iq int8 --rate 10M --freq 98M --offset 0.8M
 ```
 
