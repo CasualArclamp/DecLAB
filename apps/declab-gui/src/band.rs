@@ -56,6 +56,11 @@ pub struct BandInput<'a> {
     /// An LNB's local oscillator, added to the frequencies written on the
     /// band (the scale, the cursor's readout); 0 without one.
     pub lnb_lo_hz: f64,
+    /// That oscillator is above the band (C band): what is written is
+    /// L.O. - IF, and the band is drawn turned over, the highest IF on the
+    /// left, so it reads in downlink order. Everything handed in and every
+    /// [`Action`] stays in IF terms.
+    pub lnb_above: bool,
 }
 
 /// Another VFO's channel on the band.
@@ -138,8 +143,21 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
     let wf = Rect::from_min_max(pos2(plot_l, wf_top), pos2(plot_r, wf_top + wf_px / ppp));
     let span = inp.view_span_hz.max(1.0);
     let lo_hz = inp.view_center_hz - span / 2.0;
-    let x_of = |hz: f64| plot_l + ((hz - lo_hz) / span) as f32 * (plot_r - plot_l);
-    let hz_of = |x: f32| lo_hz + ((x - plot_l) / (plot_r - plot_l)) as f64 * span;
+    // Turned over behind an LNB whose oscillator is above the band.
+    let flip = inp.lnb_above && inp.lnb_lo_hz > 0.0;
+    let x_of = |hz: f64| {
+        let f = ((hz - lo_hz) / span) as f32;
+        plot_l + if flip { 1.0 - f } else { f } * (plot_r - plot_l)
+    };
+    let hz_of = |x: f32| {
+        let f = ((x - plot_l) / (plot_r - plot_l)) as f64;
+        lo_hz + if flip { 1.0 - f } else { f } * span
+    };
+    // The frequency written for an IF, and the IF for a written one.
+    let shown = |hz: f64| crate::lnb::rf(inp.lnb_lo_hz, hz, inp.lnb_above);
+    let if_of = |rf: f64| crate::lnb::tuned(inp.lnb_lo_hz, rf, inp.lnb_above);
+    // A pair of edges, the left one first whichever way the band runs.
+    let ordered = |a: f32, b: f32| if a <= b { (a, b) } else { (b, a) };
     let (lo_db, hi_db) = (inp.levels.0 - 10.0, inp.levels.1 + 5.0);
     let y_of = |db: f32| {
         let f = ((db - lo_db) / (hi_db - lo_db).max(1.0)).clamp(0.0, 1.0);
@@ -164,10 +182,10 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
     let step = tick_step(span);
     let decimals = if step >= 1e6 { 0 } else if step >= 100e3 { 1 } else if step >= 10e3 { 2 } else { 3 };
     // Ticks on round downlink frequencies when an LNB shifts them.
-    let off = inp.lnb_lo_hz;
-    let mut f = ((lo_hz + off) / step).ceil() * step;
-    while f < lo_hz + off + span {
-        let x = x_of(f - off);
+    let shown_lo = shown(lo_hz).min(shown(lo_hz + span));
+    let mut f = (shown_lo / step).ceil() * step;
+    while f < shown_lo + span {
+        let x = x_of(if_of(f));
         painter.line_segment([pos2(x, spec.top()), pos2(x, spec.bottom())], Stroke::new(1.0, grid));
         painter.text(
             pos2(x, spec.bottom() + 3.0),
@@ -189,13 +207,15 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
     // The trace: the strongest bin under each pixel column, filled below.
     let n = inp.spectrum_db.len();
     if n > 1 && inp.row_rate > 0.0 && seen_hi > seen_lo {
-        let (x0, x1) = (x_of(seen_lo).floor() as i32, x_of(seen_hi).ceil() as i32);
+        let (xa, xb) = ordered(x_of(seen_lo), x_of(seen_hi));
+        let (x0, x1) = (xa.floor() as i32, xb.ceil() as i32);
         let bin_of = |hz: f64| (((hz - row_lo) / inp.row_rate) * n as f64).clamp(0.0, n as f64 - 1.0) as usize;
         let mut pts: Vec<Pos2> = Vec::with_capacity((x1 - x0).max(0) as usize + 1);
         for xi in x0..x1 {
             let x = xi as f32;
             let (k0, k1) = (bin_of(hz_of(x)), bin_of(hz_of(x + 1.0)));
-            let m = inp.spectrum_db[k0..=k1.max(k0)].iter().copied().fold(f32::MIN, f32::max);
+            let (k0, k1) = (k0.min(k1), k0.max(k1));
+            let m = inp.spectrum_db[k0..=k1].iter().copied().fold(f32::MIN, f32::max);
             pts.push(pos2(x + 0.5, y_of(m)));
         }
         let fill = Color32::from_rgba_unmultiplied(70, 150, 255, 38);
@@ -223,8 +243,13 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
     {
         let u0 = ((w_lo - wf_lo) / inp.wf_rate) as f32;
         let u1 = ((w_hi - wf_lo) / inp.wf_rate) as f32;
-        let r = Rect::from_min_max(pos2(x_of(w_lo), wf.top()), pos2(x_of(w_hi), wf.bottom()));
-        let uv = Rect::from_min_max(pos2(u0, uv.min.y), pos2(u1, uv.max.y));
+        // Turned over: the texture's high end on the left.
+        let (u0, u1) = if flip { (u1, u0) } else { (u0, u1) };
+        let (xa, xb) = ordered(x_of(w_lo), x_of(w_hi));
+        let r = Rect::from_min_max(pos2(xa, wf.top()), pos2(xb, wf.bottom()));
+        // Rust note: built field by field, since `from_min_max` is meant for
+        // a rect whose min is its left; the image only reads the corners.
+        let uv = Rect { min: pos2(u0, uv.min.y), max: pos2(u1, uv.max.y) };
         painter.image(tex, r, uv, Color32::WHITE);
     }
     if inp.row_rate <= 0.0 {
@@ -233,7 +258,7 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
 
     // The other VFOs' channels: lighter than the selected one's.
     for o in &inp.others {
-        let (xa, xb) = (x_of(o.hz - o.bandwidth_hz / 2.0), x_of(o.hz + o.bandwidth_hz / 2.0));
+        let (xa, xb) = ordered(x_of(o.hz - o.bandwidth_hz / 2.0), x_of(o.hz + o.bandwidth_hz / 2.0));
         let (xa, xb) = if xb - xa < 3.0 { (x_of(o.hz) - 1.5, x_of(o.hz) + 1.5) } else { (xa, xb) };
         if xb < plot_l || xa > plot_r {
             continue;
@@ -259,7 +284,7 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
 
     // The decoder's channel: its band shaded, its edges in its colour, a label.
     if let Some((hz, bw, colour, label)) = &inp.channel {
-        let (xa, xb) = (x_of(hz - bw / 2.0), x_of(hz + bw / 2.0));
+        let (xa, xb) = ordered(x_of(hz - bw / 2.0), x_of(hz + bw / 2.0));
         let (xa, xb) = if xb - xa < 3.0 { (x_of(*hz) - 1.5, x_of(*hz) + 1.5) } else { (xa, xb) };
         if xb >= plot_l && xa <= plot_r {
             let (ca, cb) = (xa.max(plot_l), xb.min(plot_r));
@@ -318,7 +343,7 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
         painter.text(
             pos2(plot_r - 4.0, spec.top() + 26.0),
             Align2::RIGHT_TOP,
-            format!("{:.4} MHz{level}", (hz + inp.lnb_lo_hz) / 1e6),
+            format!("{:.4} MHz{level}", shown(hz) / 1e6),
             FontId::monospace(12.0),
             Color32::WHITE,
         );
@@ -337,13 +362,18 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
                 .sum()
         });
         if notches != 0 {
+            // How far up the view the pointer is, from its lowest IF.
             let frac = ((p.x - plot_l) / (plot_r - plot_l)) as f64;
+            let frac = if flip { 1.0 - frac } else { frac };
             actions.push(Action::Zoom { factor: 1.25f64.powi(notches), anchor_hz: hz, frac });
         }
     }
 
     // The channel's edges and body: hovering shows what a drag would do.
-    let edges = inp.channel.as_ref().map(|(hz, bw, _, _)| (*hz, *bw, x_of(hz - bw / 2.0), x_of(hz + bw / 2.0)));
+    let edges = inp.channel.as_ref().map(|(hz, bw, _, _)| {
+        let (xa, xb) = ordered(x_of(hz - bw / 2.0), x_of(hz + bw / 2.0));
+        (*hz, *bw, xa, xb)
+    });
     let grab_of = |p: Pos2| -> Option<Grab> {
         let (hz, _, xa, xb) = edges?;
         if !in_plot(p) {
@@ -414,7 +444,9 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Vec<Action> {
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
         let dx = resp.drag_delta().x as f64;
         if dx != 0.0 {
-            actions.push(Action::Pan(-dx / (plot_r - plot_l) as f64 * span));
+            // Turned over, a drag to the right brings higher IFs into view.
+            let dir = if flip { 1.0 } else { -1.0 };
+            actions.push(Action::Pan(dir * dx / (plot_r - plot_l) as f64 * span));
         }
     }
     if resp.drag_stopped_by(PointerButton::Middle) {
@@ -444,6 +476,11 @@ mod tests {
     }
 
     fn run_with(frames: Vec<Vec<egui::Event>>, inert: bool, channel: Option<(f64, f64)>) -> Vec<Action> {
+        run_lnb(frames, inert, channel, (0.0, false))
+    }
+
+    /// The same behind an LNB: its L.O., Hz, and whether that is above the band.
+    fn run_lnb(frames: Vec<Vec<egui::Event>>, inert: bool, channel: Option<(f64, f64)>, lnb: (f64, bool)) -> Vec<Action> {
         let spectrum = vec![-80.0f32; 1024];
         let mut sim = Sim::new(W, 600.0);
         let mut out = Vec::new();
@@ -467,7 +504,8 @@ mod tests {
                     moving: None,
                     inert,
                     idle_text: "",
-                    lnb_lo_hz: 0.0,
+                    lnb_lo_hz: lnb.0,
+                    lnb_above: lnb.1,
                 };
                 out.extend(show(ui, &inp));
             });
@@ -630,6 +668,7 @@ mod tests {
                     inert: false,
                     idle_text: "",
                     lnb_lo_hz: 0.0,
+                    lnb_above: false,
                 };
                 out.extend(show(ui, &inp));
             });
@@ -662,6 +701,67 @@ mod tests {
         let a = click_among(98.8e6, &[(1, 98.85e6, 400e3)], false, Some((98.8e6, 400e3)));
         assert!(a.iter().any(|a| matches!(a, Action::Tune(_))));
         assert!(!a.iter().any(|a| matches!(a, Action::Select(_))));
+    }
+
+    /// Behind a C-band LNB (L.O. above) the band is drawn turned over: a
+    /// quarter of the way across is three quarters of the way up the IF, and
+    /// what comes back is still the IF.
+    #[test]
+    fn an_lo_above_turns_the_band_over() {
+        let x = LEFT + 0.25 * PLOT_W as f32;
+        let click = || {
+            vec![
+                vec![moved(x, 300.0)],
+                vec![button(x, 300.0, PointerButton::Primary, true)],
+                vec![button(x, 300.0, PointerButton::Primary, false)],
+            ]
+        };
+        let tuned = |a: &[Action]| a.iter().find_map(|a| if let Action::Tune(h) = a { Some(*h) } else { None }).unwrap();
+        assert!((tuned(&run_lnb(click(), false, None, (5150e6, true))) - 100.5e6).abs() < 20e3);
+        // An L.O. below the band, or the tick with no L.O., leaves it as it was.
+        assert!((tuned(&run_lnb(click(), false, None, (9750e6, false))) - 95.5e6).abs() < 20e3);
+        assert!((tuned(&run_lnb(click(), false, None, (0.0, true))) - 95.5e6).abs() < 20e3);
+
+        // A drag to the right now brings higher IFs into view.
+        let a = run_lnb(
+            vec![
+                vec![moved(400.0, 300.0)],
+                vec![button(400.0, 300.0, PointerButton::Middle, true)],
+                vec![moved(450.0, 300.0)],
+                vec![moved(500.0, 300.0)],
+                vec![button(500.0, 300.0, PointerButton::Middle, false)],
+            ],
+            false,
+            None,
+            (5150e6, true),
+        );
+        assert!(pans(&a) > 0.5e6, "panned {}", pans(&a));
+
+        // Zoom: the anchor is the IF under the pointer, its place counted from the low IF.
+        let a = run_lnb(vec![vec![moved(x, 300.0)], vec![scroll(true)]], false, None, (5150e6, true));
+        let (anchor, frac) = a
+            .iter()
+            .find_map(|a| if let Action::Zoom { anchor_hz, frac, .. } = a { Some((*anchor_hz, *frac)) } else { None })
+            .unwrap();
+        assert!((anchor - 100.5e6).abs() < 20e3 && (frac - 0.75).abs() < 0.01, "{anchor} {frac}");
+
+        // The channel's edges still take a drag: dragging the left one (the
+        // high IF) outwards widens it.
+        let xf = |hz: f64| LEFT + ((103e6 - hz) / 10e6 * PLOT_W) as f32;
+        let a = run_lnb(
+            vec![
+                vec![moved(xf(98.5e6), 300.0)],
+                vec![button(xf(98.5e6), 300.0, PointerButton::Primary, true)],
+                vec![moved(xf(98.65e6), 300.0)],
+                vec![moved(xf(98.8e6), 300.0)],
+                vec![button(xf(98.8e6), 300.0, PointerButton::Primary, false)],
+            ],
+            false,
+            Some((98e6, 1e6)),
+            (5150e6, true),
+        );
+        let bw = a.iter().rev().find_map(|a| if let Action::Bandwidth(b) = a { Some(*b) } else { None }).unwrap();
+        assert!((bw - 1.6e6).abs() < 50e3, "{bw}");
     }
 
     #[test]

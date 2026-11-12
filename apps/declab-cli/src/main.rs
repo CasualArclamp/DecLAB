@@ -281,6 +281,8 @@ fn open_airspy(o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
     }
     let s = AirspySettings {
         center_hz: o.hz("--freq")?.context("--freq")? as u64,
+        // An R2: 10 or 2.5 MS/s; a Mini: 6 or 3. The board takes its nearest.
+        sample_rate: o.hz("--rate")?.unwrap_or(10e6) as u32,
         gains,
         bias_tee: o.flag("--bias-tee"),
         ..AirspySettings::default()
