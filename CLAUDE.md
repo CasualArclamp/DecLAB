@@ -79,6 +79,8 @@ cargo run --release -p declab-cli -- selftest level
 cargo run --release -p declab-cli -- run wfm --file x_98.000MHz_10Msps.cs8 --offset 1.2M --realtime
 cargo run --release -p declab-cli -- run nfm --radio airspy --freq 446.05M --offset 0
 cargo run --release -p declab-cli -- run usb --radio hackrf --freq 14.2M --gain 1,32,20
+cargo run --release -p declab-cli -- run wfm --radio airspy --freq 98M --rate 6M   # an Airspy Mini's rates (6M, 3M; an R2 has 10M and 2.5M): the board takes the nearest to --rate
+cargo run --release -p declab-gui -- out/sim_sat_gse.cf32 --rate 8M --freq 1023M --decoder sat --chan 1021.8M --set lo_hz=5150000000 --set lo_above=1 --screenshot out/x.png --after 7   # behind a C-band LNB (L.O. above): shown as 4128.2 MHz, the band drawn turned over
 cargo run --release -p declab-cli -- run wfm --radio pluto --freq 98M --rate 2.5M --gain 50   # ADALM-PLUTO / Pluto+, receive only (--pluto-uri auto|usb|ip:HOST, --gain DB|agc, --pluto-16bit)
 cargo test -p declab-io --features pluto live_pluto -- --ignored --nocapture   # a Pluto attached (env PLUTO_URI, default auto)
 cargo run --release -p declab-cli -- run wfm --radio fobos --freq 98M --rate 8M --gain 1,8   # Fobos SDR (--gain LNA,VGA; --fobos-ext-clock); also --radio sdrplay (--gain LNASTATE,IFGR, --sdrplay-tuner-b) and --radio uhd (--gain DB, --uhd-args, --uhd-antenna)

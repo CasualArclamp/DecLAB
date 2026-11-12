@@ -97,14 +97,21 @@ mod panel {
         /// radio sees the downlink itself). The app shows and takes
         /// frequencies as the downlink's, IF + L.O.; the decoder ignores it.
         lo: String,
+        /// That oscillator is above the band (a C-band LNB, 5150 MHz): the
+        /// downlink is L.O. - IF and arrives mirrored. As DecSAT's "LO
+        /// above" tick (same author); here it only changes what the app
+        /// shows, since the demodulator finds an inverted carrier itself.
+        above: bool,
     }
 
-    /// LNBs' usual local oscillators, MHz, for the menu.
-    const LO_PRESETS: [(&str, &str); 4] = [
-        ("9750", "Universal, low band"),
-        ("10600", "Universal, high band"),
-        ("10750", "Ku single band"),
-        ("11300", "Ku single band"),
+    /// LNBs' usual local oscillators, MHz, for the menu, and whether each
+    /// is above its band.
+    const LO_PRESETS: [(&str, &str, bool); 5] = [
+        ("9750", "Universal, low band", false),
+        ("10600", "Universal, high band", false),
+        ("10750", "Ku single band", false),
+        ("11300", "Ku single band", false),
+        ("5150", "C band (L.O. above)", true),
     ];
 
     impl SatPanel {
@@ -118,6 +125,11 @@ mod panel {
         }
 
         /// The L.O. in Hz for the app ("" when none or not a number).
+        /// "1" when the L.O. is above the band, for the app.
+        fn lo_above(&self) -> &'static str {
+            if self.above { "1" } else { "" }
+        }
+
         fn lo_hz(&self) -> String {
             self.lo.trim().parse::<f64>().ok().filter(|&m| m > 0.0).map_or(String::new(), |m| format!("{}", m * 1e6))
         }
@@ -129,6 +141,7 @@ mod panel {
                 Self::set("symbol_rate", &self.rate_hz()),
                 Self::set("gold", self.gold.trim()),
                 Self::set("lo_hz", &self.lo_hz()),
+                Self::set("lo_above", self.lo_above()),
             ]
         }
 
@@ -141,6 +154,7 @@ mod panel {
                 "lo_hz" => {
                     self.lo = value.parse::<f64>().map_or(String::new(), |hz| format!("{}", hz / 1e6));
                 }
+                "lo_above" => self.above = value == "1",
                 _ => {}
             }
         }
@@ -171,19 +185,28 @@ mod panel {
                     .lost_focus();
                 let mut picked = false;
                 ui.menu_button("▾", |ui| {
-                    for (mhz, name) in LO_PRESETS {
+                    for (mhz, name, above) in LO_PRESETS {
                         if ui.button(format!("{mhz} MHz  {name}")).clicked() {
                             self.lo = mhz.to_string();
+                            self.above = above;
                             picked = true;
                         }
                     }
                     if ui.button("None (no LNB)").clicked() {
                         self.lo.clear();
+                        self.above = false;
                         picked = true;
                     }
                 });
-                if typed || picked {
+                let ticked = ui
+                    .checkbox(&mut self.above, "L.O. above")
+                    .on_hover_text(
+                        "The L.O. is above the band (a C-band LNB, 5150 MHz): frequencies are the downlink's, L.O. - IF, and the band is drawn turned over to read in downlink order.",
+                    )
+                    .changed();
+                if typed || picked || ticked {
                     commands.push(Self::set("lo_hz", &self.lo_hz()));
+                    commands.push(Self::set("lo_above", self.lo_above()));
                 }
             });
         }

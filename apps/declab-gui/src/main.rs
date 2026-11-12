@@ -24,6 +24,7 @@ mod epg_view;
 mod external;
 mod freq_display;
 mod gain_opt;
+mod lnb;
 mod ism_tabs;
 mod more_radios;
 mod panels;
@@ -311,7 +312,7 @@ enum SourceKind {
 impl SourceKind {
     fn label(self) -> &'static str {
         match self {
-            SourceKind::Airspy => "Airspy R2 / HydraSDR",
+            SourceKind::Airspy => "Airspy R2 / Mini / HydraSDR",
             SourceKind::HackRf => "HackRF One",
             SourceKind::RtlSdr => "RTL-SDR",
             SourceKind::Pluto => "ADALM-PLUTO / Pluto+",
@@ -358,6 +359,9 @@ struct App {
     /// The radio's centre (what it is tuned to, or a file's label).
     center_hz: f64,
     hack_rate: f64,
+    /// The rate asked of the Airspy, Hz: 10 or 2.5 MS/s on an R2, 6 or 3 on
+    /// a Mini. The board takes its nearest, and this then says which.
+    air_rate: f64,
     hack_amp: bool,
     hack_lna: u16,
     hack_vga: u16,
@@ -526,6 +530,11 @@ impl App {
                 .rate
                 .filter(|_| kind == SourceKind::HackRf)
                 .or(prefs::num(&p, "hackrf_rate"))
+                .unwrap_or(10e6),
+            air_rate: opts
+                .rate
+                .filter(|_| kind == SourceKind::Airspy)
+                .or(prefs::num(&p, "airspy_rate"))
                 .unwrap_or(10e6),
             hack_amp: prefs::get(&p, "hackrf_amp") == Some("1"),
             hack_lna: prefs::num(&p, "hackrf_lna").unwrap_or(24),
@@ -955,6 +964,23 @@ impl App {
             .unwrap_or(0.0)
     }
 
+    /// Whether that oscillator is above the band (the satellite page's
+    /// "L.O. above" tick, for a C-band LNB): the downlink is L.O. - IF.
+    fn lo_above_of(&self, dec: usize) -> bool {
+        let Some(Some(p)) = self.panels.get(dec) else {
+            return false;
+        };
+        p.settings()
+            .into_iter()
+            .any(|c| matches!(c, declab_api::Command::Set { key, value } if key == "lo_above" && value == "1"))
+    }
+
+    /// The frequency to show for decoder `dec`'s channel at `hz`: the
+    /// downlink's behind an LNB, else `hz` itself.
+    fn shown_hz(&self, dec: usize, hz: f64) -> f64 {
+        lnb::rf(self.lo_of(dec), hz, self.lo_above_of(dec))
+    }
+
     /// Where a radio starts: the remembered centre if the radio can tune
     /// there and the channel lies in its span, else the channel itself,
     /// within the radio's range. (A file's centre, 0 Hz for a simulated
@@ -996,7 +1022,7 @@ impl App {
             return self.source_rate;
         }
         match self.kind {
-            SourceKind::Airspy => 10e6,
+            SourceKind::Airspy => self.air_rate,
             SourceKind::HackRf => self.hack_rate,
             SourceKind::RtlSdr => declab_io::rtlsdr_proto::SAMPLE_RATE_HZ as f64,
             SourceKind::Pluto => self.pluto_rate,
@@ -1066,9 +1092,10 @@ impl App {
             SourceKind::Airspy => {
                 use declab_io::{AirspyGains, AirspySettings, AirspySource};
                 use declab_io::airspy::proto::{FREQ_MAX_HZ, FREQ_MIN_HZ};
-                let centre = self.live_centre(FREQ_MIN_HZ as f64, FREQ_MAX_HZ as f64, 10e6);
+                let centre = self.live_centre(FREQ_MIN_HZ as f64, FREQ_MAX_HZ as f64, self.air_rate);
                 let s = AirspySettings {
                     center_hz: centre,
+                    sample_rate: self.air_rate as u32,
                     gains: AirspyGains {
                         lna: self.air_lna,
                         mixer: self.air_mix,
@@ -1079,6 +1106,8 @@ impl App {
                     ..AirspySettings::default()
                 };
                 let src = AirspySource::open(s).map_err(|e| e.to_string())?;
+                // The board's nearest rate: a Mini asked for 10 MS/s runs at 6.
+                self.air_rate = src.control().settings().sample_rate as f64;
                 self.control = Control::Airspy(src.control());
                 Ok(Box::new(src))
             }
@@ -1724,6 +1753,7 @@ impl App {
             ("follow_calls", if self.follow_calls { "1" } else { "0" }.into()),
             ("volume", format!("{:.2}", self.volume)),
             ("hackrf_rate", format!("{:.0}", self.hack_rate)),
+            ("airspy_rate", format!("{:.0}", self.air_rate)),
             ("hackrf_amp", if self.hack_amp { "1" } else { "0" }.into()),
             ("hackrf_lna", self.hack_lna.to_string()),
             ("hackrf_vga", self.hack_vga.to_string()),
@@ -1885,9 +1915,12 @@ impl App {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             let lo = self.lo_of(self.dec);
-            let mut hz = self.chan_hz + lo;
-            if freq_display::show(ui, &mut hz, lo, 6e9 + lo, 40.0) {
-                self.tune_channel(hz - lo);
+            let above = self.lo_above_of(self.dec);
+            let mut hz = lnb::rf(lo, self.chan_hz, above);
+            // What may be typed: the downlinks of IFs from 0 to 6 GHz.
+            let (min, max) = if above && lo > 0.0 { ((lo - 6e9).max(0.0), lo) } else { (lo, 6e9 + lo) };
+            if freq_display::show(ui, &mut hz, min, max, 40.0) {
+                self.tune_channel(lnb::tuned(lo, hz, above));
             }
             ui.add_space(14.0);
             ui.vertical(|ui| {
@@ -1969,7 +2002,21 @@ impl App {
                         }
                         SourceKind::Airspy => {
                             ui.label(RichText::new("rate").color(Color32::GRAY));
-                            ui.label(RichText::new("10.00 MS/s").color(Color32::WHITE));
+                            let before = self.air_rate;
+                            egui::ComboBox::from_id_salt("airspy_rate")
+                                .selected_text(format!("{:.2} MS/s", self.air_rate / 1e6))
+                                .show_ui(ui, |ui| {
+                                    #[cfg(feature = "airspy")]
+                                    for r in declab_io::airspy::proto::RATES_HZ {
+                                        let r = r as f64;
+                                        ui.selectable_value(&mut self.air_rate, r, format!("{:.2} MS/s", r / 1e6));
+                                    }
+                                })
+                                .response
+                                .on_hover_text("An R2 runs at 10 or 2.5 MS/s, a Mini at 6 or 3: the board takes the nearest it has.");
+                            if self.air_rate != before && running {
+                                self.start();
+                            }
                             let (mut start_opt, mut cancel_opt) = (false, false);
                             let mode = if self.air_linear { "linearity" } else { "sensitivity" };
                             let stages = (self.air_lna, self.air_mix, self.air_vga);
@@ -2297,7 +2344,7 @@ impl eframe::App for App {
                     n: s.n,
                     colour: s.colour,
                     decoder: declab_decoders::ALL[dec].info().name,
-                    freq_hz: chan + self.lo_of(dec),
+                    freq_hz: self.shown_hz(dec, chan),
                     status: match &s.follow {
                         Some(f) => format!(
                             "↪ {}{} · {}",
@@ -2408,7 +2455,7 @@ impl eframe::App for App {
                 self.update_slide(ui.ctx());
                 let mut ism_save = false;
                 ui.horizontal_top(|ui| {
-                    let chan = self.chan_hz + self.lo_of(self.dec);
+                    let chan = self.shown_hz(self.dec, self.chan_hz);
                     ui.allocate_ui_with_layout(
                         egui::vec2(widths[0], h),
                         egui::Layout::top_down(egui::Align::Min),
@@ -2615,7 +2662,7 @@ impl eframe::App for App {
                 self.follow_zoom(px, ctx.input(|i| i.max_texture_side));
                 let tex = self.ring.update(&ctx, &self.history);
                 let sel = self.slots.get(self.cur);
-                let label = format!("{} {} {:.4}", sel.map_or(1, |s| s.n), info.name, (self.chan_hz + self.lo_of(self.dec)) / 1e6);
+                let label = format!("{} {} {:.4}", sel.map_or(1, |s| s.n), info.name, self.shown_hz(self.dec, self.chan_hz) / 1e6);
                 let chan_colour = sel.map_or(colour, |s| s.colour);
                 let idle = match (&self.host, &self.error) {
                     (_, Some(e)) => e.clone(),
@@ -2652,6 +2699,7 @@ impl eframe::App for App {
                     inert: self.wheel.is_some(),
                     idle_text: &idle,
                     lnb_lo_hz: self.lo_of(self.dec),
+                    lnb_above: self.lo_above_of(self.dec),
                 };
                 if !skip.contains("band") {
                     actions = band::show(ui, &inp);

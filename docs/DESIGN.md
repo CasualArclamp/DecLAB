@@ -1151,8 +1151,8 @@ oscillators (Universal 9750 / 10600, single-band 10750 / 11300).
   "IF · L.O. …", and recordings are named by it, since the file holds IF.
 - **Per decoder, saved** like its other settings (`set.sat.lo_hz`, Hz); the
   decoder ignores the key. Other decoders on the same band show plain IF.
-- **High-side only** (downlink = IF + L.O.): a C-band LNB (5150 MHz, the
-  spectrum inverted) is not handled yet.
+- An L.O. below the band (downlink = IF + L.O.); a C-band LNB, whose L.O.
+  is above it, came later: §35.
 - The frequency display grew to 11 digits for 10 GHz and up.
 - `declab-gui --set KEY=VALUE` (repeatable) sets a setting of `--decoder`'s
   page for one run, as the CLI's `--set` does: `--set lo_hz=9750000000`.
@@ -1502,3 +1502,25 @@ sound.
   TS1, and closes 4 s after the call. The command-line app does not
   follow calls.
 
+## 35. Airspy Mini rates; an L.O. above the band (2026-11-12)
+
+- **Airspy rates.** The driver no longer insists on 10 MS/s. It reads the
+  board's rate list at open and takes the entry nearest to the rate asked
+  for, as DecSAT's Airspy front end does: an R2 lists 10 and 2.5 MS/s, a
+  Mini 6 and 3 MS/s, so a Mini asked for the default 10 runs at 6. The
+  real-to-IQ conversion is unchanged: the firmware keeps the tuner's IF on
+  fs/4 at every rate. The GUI has a rate list for the Airspy (saved as
+  `airspy_rate`, and showing what the board took once it runs); the CLI
+  takes `--rate`. Not yet run on a Mini, nor on an R2 at 2.5 MS/s.
+- **L.O. above** (the satellite page, beside the L.O. field; saved as
+  `set.sat.lo_above`; the menu's "5150 C band" sets it). A C-band LNB's
+  oscillator is above its band, so the downlink is L.O. − IF and the band
+  arrives mirrored. Still display only: frequencies for that VFO are
+  written and typed as L.O. − IF, and the band (spectrum, waterfall,
+  channels, pointer) is drawn turned over, the highest IF on the left, so
+  it reads in downlink order (`band.rs`, `lnb_above`; `lnb.rs` is DecSAT's
+  arithmetic). Nothing is conjugated, unlike DecSAT's `Mirror`: the VFOs
+  and the engine keep absolute IFs, and the DVB-S2 demodulator already
+  finds an inverted carrier by itself (its card says "Spectrum inverted").
+  A decoder that does not would need the samples turned over, which this
+  does not do. The view turns back when a VFO without the tick is selected.

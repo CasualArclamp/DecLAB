@@ -27,7 +27,7 @@ in Rust, all from one portable `.exe`.
 **Several decoders at once.** Run up to eight VFOs on one radio, each with its
 own decoder, sound and settings. The VFO list down the left collapses to a
 strip of numbered discs; click a channel on the band to select it, ctrl+click
-to add one. **Bias tee** for an LNA or active antenna on the Airspy R2
+to add one. **Bias tee** for an LNA or active antenna on the Airspy R2 and Mini
 (and HydraSDR RFOne), HackRF One and RTL-SDR Blog: off at every start, switched on by you.
 
 ## Screenshots
