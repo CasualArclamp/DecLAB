@@ -14,6 +14,10 @@ hackrf = ["declab-io/hackrf"]
 airspy = ["declab-io/airspy"]
 rtlsdr = ["declab-io/rtlsdr"]
 pluto = ["declab-io/pluto"]
+fobos = ["declab-io/fobos"]
+sdrplay = ["declab-io/sdrplay"]
+uhd = ["declab-io/uhd"]
+remote = ["declab-io/remote"]
 
 [dependencies]
 declab-api = { path = "../declab-api", default-features = false }

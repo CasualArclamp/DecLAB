@@ -13,12 +13,19 @@ name = "declab"
 path = "src/main.rs"
 
 [features]
-# All the radio drivers are pure Rust over nusb (no SDKs, no DLLs), so all are on.
-default = ["hackrf", "airspy", "rtlsdr", "pluto"]
+# The HackRF, Airspy, RTL-SDR and Pluto drivers are pure Rust over nusb (no
+# SDKs, no DLLs). The Fobos, SDRplay and USRP (UHD, Windows) ones load their
+# maker's library at run time, so nothing is needed to build them either, and
+# the remote link is plain TCP: all are on.
+default = ["hackrf", "airspy", "rtlsdr", "pluto", "fobos", "sdrplay", "uhd", "remote"]
 hackrf = ["declab-engine/hackrf"]
 airspy = ["declab-engine/airspy"]
 rtlsdr = ["declab-engine/rtlsdr"]
 pluto = ["declab-engine/pluto"]
+fobos = ["declab-engine/fobos"]
+sdrplay = ["declab-engine/sdrplay"]
+uhd = ["declab-engine/uhd"]
+remote = ["declab-engine/remote"]
 
 [dependencies]
 declab-api = { path = "../../crates/declab-api", default-features = false }
