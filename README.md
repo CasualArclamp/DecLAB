@@ -5,6 +5,8 @@
 
 # DecLAB
 
+[![release](https://img.shields.io/github/v/release/CasualArclamp/DecLAB?logo=github&label=release)](https://github.com/CasualArclamp/DecLAB/releases/latest)
+
 If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
 
 **One software-defined radio receiver for everything on the air.** Point an
