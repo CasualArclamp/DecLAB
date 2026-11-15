@@ -5,7 +5,7 @@
 
 # DecLAB
 
-[![release](https://img.shields.io/github/v/release/CasualArclamp/DecLAB?logo=github&label=release)](https://github.com/CasualArclamp/DecLAB/releases/latest)
+[![release](https://img.shields.io/github/v/release/CasualArclamp/DecLAB?logo=github&label=release)](https://github.com/CasualArclamp/DecLAB/releases/latest) [![downloads](https://img.shields.io/github/downloads/CasualArclamp/DecLAB/total?logo=github&label=downloads)](https://github.com/CasualArclamp/DecLAB/releases)
 
 If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
 
