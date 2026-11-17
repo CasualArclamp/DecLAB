@@ -72,6 +72,7 @@ fn main() {
                             declab_lora::meshcore::payload_type_name(p.payload_type),
                             p.summary
                         ),
+                        Payload::LoRaWan(w) => format!("LoRaWAN {} {}", w.mtype.name(), w.summary()),
                         Payload::Other => format!("{} bytes", fr.payload.len()),
                     }
                 };

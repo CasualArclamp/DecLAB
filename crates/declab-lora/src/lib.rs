@@ -12,16 +12,21 @@
 //!   meshtastic/protobufs (GPL-3.0).
 //! - [`meshcore`]: the packet header, route and path, adverts, and group
 //!   text on the Public channel (MeshCore, MIT).
+//! - [`lorawan`]: LoRaWAN's MAC header, read in clear on sync word 0x34.
+//! - [`region`]: the LoRaWAN Regional Parameters' channel plans and data
+//!   rates, and Meshtastic's regions: which channel a frame was sent on.
 //! - [`sim`]: a LoRa modulator and packets of both kinds, for tests and
 //!   the simulator.
 
 pub mod codec;
 pub mod crypto;
+pub mod lorawan;
 pub mod meshcore;
 pub mod meshtastic;
 mod mt_names;
 pub mod proto;
 pub mod receiver;
+pub mod region;
 pub mod sim;
 
 pub use receiver::{Receiver, RxFrame};
@@ -48,7 +53,8 @@ impl Default for Keys {
 pub enum Payload {
     Meshtastic(meshtastic::Packet),
     MeshCore(meshcore::Packet),
-    /// Another sync word (LoRaWAN's 0x34 …), or a payload that did not parse.
+    LoRaWan(lorawan::Frame),
+    /// Another sync word, or a payload that did not parse.
     Other,
 }
 
@@ -60,6 +66,7 @@ pub fn decode_payload(sync: Option<u8>, bytes: &[u8], keys: &Keys) -> Payload {
         Some(meshcore::SYNC_WORD) => {
             meshcore::decode(bytes, &keys.meshcore).map_or(Payload::Other, Payload::MeshCore)
         }
+        Some(lorawan::SYNC_WORD) => lorawan::parse(bytes).map_or(Payload::Other, Payload::LoRaWan),
         _ => Payload::Other,
     }
 }
