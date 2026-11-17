@@ -46,6 +46,7 @@ decsat-modem = { path = "../decsat-modem" }
 egui = { workspace = true, optional = true }
 
 [dev-dependencies]
+decdvbt-mod = { path = "../decdvbt-mod" }
 decsat-mod = { path = "../decsat-mod" }
 decsat-core = { path = "../decsat-core" }
 decsat-gse = { path = "../decsat-gse" }

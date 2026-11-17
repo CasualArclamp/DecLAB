@@ -709,6 +709,7 @@ dependencies = [
  "decdab-msc",
  "decdab-ofdm",
  "decdvbt-core",
+ "decdvbt-mod",
  "decdvbt-ofdm",
  "decdvbt-rx",
  "decdvbt-ts",

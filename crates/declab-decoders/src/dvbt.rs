@@ -10,6 +10,11 @@
 //! their now/next. The card is DecDVB-T's: the mode, the effective SNR
 //! against the C/N the mode needs for quasi error free reception (EN 300 744
 //! Table A.1 for DVB-T; the PLP's code for T2), and the mode's details.
+//!
+//! The channel's width sets every clock of the signal, so the receiver is
+//! made for one width. Left on auto, the decoder tries 8, 7, 6 and 5 MHz in
+//! turn ([`AUTO_WIDTHS`]), [`DWELL_S`] each, until one is followed; the
+//! panel can also fix the width (1.7 MHz T2 and 1 MHz DATV only that way).
 
 use declab_api::{
     Block, Card, Command, Decoder, DecoderFactory, DecoderInfo, Family, Gauge, InputSpec, Iq, Lock,
@@ -32,6 +37,14 @@ const SCOPES_S: f64 = 1.0 / 15.0;
 const SERVICES_S: f64 = 1.0;
 /// Points kept for the scope.
 const SCOPE_POINTS: usize = 6000;
+/// The widths an auto search tries, in this order: the broadcast channels
+/// (8 MHz UHF; 7 MHz VHF band III and Australia; 6 MHz the Americas' and
+/// Taiwan's; 5 MHz EN 300 744 Annex G and DVB-T2's).
+const AUTO_WIDTHS: [Bandwidth; 4] = [Bandwidth::Mhz8, Bandwidth::Mhz7, Bandwidth::Mhz6, Bandwidth::Mhz5];
+/// How long an auto search gives each width with nothing followed (seconds):
+/// time for both acquisitions to try several DVB-T2 frames (up to 250 ms
+/// each) and DVB-T's 68-symbol TPS frame.
+const DWELL_S: f64 = 2.0;
 
 pub struct Factory;
 
@@ -42,13 +55,14 @@ impl DecoderFactory for Factory {
             name: "DVB-T/T2",
             family: Family::Terrestrial,
             standard: "EN 300 744 / EN 302 755",
-            summary: "Terrestrial TV, either standard found blind (8 MHz)",
+            summary: "Terrestrial TV, either standard and the channel's width found blind",
         }
     }
 
     fn input(&self, _source_rate: f64) -> InputSpec {
         // The radio's samples, untouched (with the channel centred): an 8 MHz
-        // channel's 7.77 MHz (T2 extended) is the width to keep.
+        // channel's 7.77 MHz (T2 extended) is the width to keep, and the
+        // receiver's FFT leaves out what a narrower channel does not use.
         InputSpec { sample_rate: None, bandwidth_hz: 7.77e6, block_len: 131_072 }
     }
 
@@ -100,6 +114,19 @@ struct Dvbt {
     /// The PLP asked for (None: the first data PLP); kept across a reset.
     plp: Option<u8>,
     last_plps: PlpList,
+    /// The width asked for (None: search, [`AUTO_WIDTHS`]); kept across a reset.
+    width_choice: Option<Bandwidth>,
+    /// The width the receiver is made for (None: not chosen yet: the first
+    /// to try). Kept across a reset, so a retune tries the last one first.
+    width: Option<Bandwidth>,
+    /// When (in samples) the receiver last followed a signal, or the width
+    /// was last changed: the auto search moves on [`DWELL_S`] after it.
+    followed_at: u64,
+}
+
+/// A width as the setting spells it: "auto" or "7", "1.7"...
+fn parse_width(v: &str) -> Option<Option<Bandwidth>> {
+    if v == "auto" { Some(None) } else { Bandwidth::parse(v).map(Some) }
 }
 
 impl Dvbt {
@@ -120,11 +147,14 @@ impl Dvbt {
         } else {
             Lock::Searching
         };
-        let card = match standard {
+        let width = rx.bandwidth();
+        let mut card = match standard {
             Standard::Dvbt2 => t2_card(&t2, self.stream_mbps),
-            Standard::Dvbt => t_card(&t, self.stream_mbps),
+            Standard::Dvbt => t_card(&t, width, self.stream_mbps),
             Standard::Searching => searching_card(&t, &t2),
         };
+        let how = if self.width_choice.is_some() { "" } else if standard == Standard::Searching { " (trying, auto)" } else { " (auto)" };
+        card.details.insert(0, kv("channel width", format!("{}{how}", width.name())));
         if decoding {
             let (snr, eff) = if standard == Standard::Dvbt2 { (t2.snr_db, t2.effective_snr_db) } else { (t.snr_db, t.effective_snr_db) };
             out.measure("MER", snr as f64, "dB");
@@ -187,8 +217,9 @@ impl Dvbt {
 impl Decoder for Dvbt {
     fn process(&mut self, block: &Block<'_>, out: &mut Sink) {
         let rate = block.tuning.sample_rate;
-        if self.rx.is_none() || self.rate != rate {
-            let mut rx = AutoReceiver::new(rate, 0.0);
+        let width = *self.width.get_or_insert(self.width_choice.unwrap_or(AUTO_WIDTHS[0]));
+        if self.rx.is_none() || self.rate != rate || self.rx.as_ref().is_some_and(|r| r.bandwidth() != width) {
+            let mut rx = AutoReceiver::with_bandwidth(rate, 0.0, width);
             rx.set_plp(self.plp);
             // From a radio the T2 FEC gives up a frame rather than hold the
             // worker when it is behind (a radio's samples do not wait); from
@@ -209,6 +240,11 @@ impl Decoder for Dvbt {
         if let Some(s) = rx.take_scopes() {
             self.points = decdvbt_rx::scope::thin(s.data.into_iter(), SCOPE_POINTS);
         }
+        let followed = match rx.standard() {
+            Standard::Dvbt => rx.dvbt().tracking,
+            Standard::Dvbt2 => rx.dvbt2().tracking,
+            Standard::Searching => false,
+        };
         let (packets, _) = self.ts.as_chunks::<188>();
         for p in packets {
             self.analyser.packet(p);
@@ -216,6 +252,14 @@ impl Decoder for Dvbt {
         }
         self.ts_bytes += self.ts.len() as u64;
         self.samples += block.iq.len() as u64;
+        if followed || self.width_choice.is_some() {
+            self.followed_at = self.samples;
+        } else if self.samples - self.followed_at >= every(DWELL_S) {
+            // Nothing in this width: the next one (made on the next block).
+            let k = AUTO_WIDTHS.iter().position(|&w| w == width).map_or(0, |k| (k + 1) % AUTO_WIDTHS.len());
+            self.width = Some(AUTO_WIDTHS[k]);
+            self.followed_at = self.samples;
+        }
 
         if self.samples - self.report_at >= every(REPORT_S) {
             self.report_at = self.samples;
@@ -230,6 +274,20 @@ impl Decoder for Dvbt {
 
     fn command(&mut self, cmd: Command, out: &mut Sink) {
         if let Command::Set { key, value } = cmd {
+            if key == "bandwidth" {
+                let Some(choice) = parse_width(&value) else { return };
+                if choice != self.width_choice {
+                    self.width_choice = choice;
+                    // A width asked for is made at once; auto starts from the
+                    // one the receiver has.
+                    if choice.is_some() {
+                        self.width = choice;
+                    }
+                    self.followed_at = self.samples;
+                    out.log(format!("channel width: {}", choice.map_or("auto".into(), |w| w.name().to_string())));
+                }
+                return;
+            }
             if key != "plp" {
                 return;
             }
@@ -244,9 +302,11 @@ impl Decoder for Dvbt {
     fn reset(&mut self) {
         // A retune: the receiver starts looking again; the TS tables are the
         // new multiplex's. The PLP asked for stays.
-        let plp = self.plp;
+        let (plp, width_choice, width) = (self.plp, self.width_choice, self.width);
         *self = Dvbt::default();
         self.plp = plp;
+        self.width_choice = width_choice;
+        self.width = width;
     }
 
     fn wants_threads(&self) -> usize {
@@ -266,11 +326,11 @@ fn gauge(snr: f32, eff: f32, qef: Option<f32>) -> Gauge {
     Gauge { label: label.into(), value_db: value, need_db: qef, need_label: "QEF".into(), range: (0.0, 35.0) }
 }
 
-fn t_card(t: &ReceiverStatus, mbps: Option<f64>) -> Card {
+fn t_card(t: &ReceiverStatus, width: Bandwidth, mbps: Option<f64>) -> Card {
     let mut details = Vec::new();
     let mode = t.tps.map(|tps| {
         let mut m = Mode::uk(tps.modulation, tps.rate_hp);
-        m.bandwidth = Bandwidth::Mhz8;
+        m.bandwidth = width;
         m.fft = tps.fft;
         m.guard = tps.guard;
         m.rate_lp = tps.rate_lp;
@@ -356,13 +416,29 @@ fn searching_card(t: &ReceiverStatus, t2: &T2Status) -> Card {
     Card { title: "DVB-T / T2".into(), headline: "searching".into(), gauge: None, details, text: Vec::new() }
 }
 
-/// The DVB-T/T2 settings panel: which PLP of a T2 multiplex to decode.
+/// The DVB-T/T2 settings panel: the channel's width, and which PLP of a T2
+/// multiplex to decode.
 #[cfg(feature = "ui")]
 mod panel {
     use declab_api::{Command, Panel};
+    use decdvbt_core::dvbt::Bandwidth;
     use egui::{RichText, Ui};
 
-    use super::PlpList;
+    use super::{PlpList, parse_width};
+
+    /// The widths offered, widest first, with where each is used.
+    const WIDTHS: [(Bandwidth, &str); 6] = [
+        (Bandwidth::Mhz8, "8 MHz"),
+        (Bandwidth::Mhz7, "7 MHz (VHF band III)"),
+        (Bandwidth::Mhz6, "6 MHz"),
+        (Bandwidth::Mhz5, "5 MHz"),
+        (Bandwidth::Mhz1_7, "1.7 MHz (DVB-T2 only)"),
+        (Bandwidth::Mhz1, "1 MHz (DATV, DVB-T only)"),
+    ];
+
+    fn width_value(w: Option<Bandwidth>) -> String {
+        w.map_or("auto".into(), |w| w.token().trim_end_matches("mhz").to_string())
+    }
 
     #[derive(Default)]
     pub struct DvbtPanel {
@@ -370,6 +446,8 @@ mod panel {
         plps: PlpList,
         /// None: the first data PLP.
         chosen: Option<u8>,
+        /// The channel's width (None: searched for).
+        width: Option<Bandwidth>,
     }
 
     impl Panel for DvbtPanel {
@@ -380,6 +458,21 @@ mod panel {
         }
 
         fn ui(&mut self, ui: &mut Ui, commands: &mut Vec<Command>) {
+            ui.label("Channel width");
+            let wlabel = |w: Option<Bandwidth>| {
+                w.map_or("auto (8, 7, 6, 5 MHz)", |w| WIDTHS.iter().find(|x| x.0 == w).map_or("?", |x| x.1))
+            };
+            let before = self.width;
+            egui::ComboBox::from_id_salt("dvbt_width").selected_text(wlabel(self.width)).width(260.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.width, None, wlabel(None));
+                for (w, _) in WIDTHS {
+                    ui.selectable_value(&mut self.width, Some(w), wlabel(Some(w)));
+                }
+            });
+            if self.width != before {
+                commands.push(Command::Set { key: "bandwidth".into(), value: width_value(self.width) });
+            }
+            ui.add_space(6.0);
             ui.label("DVB-T2 PLP (physical layer pipe)");
             let label = |c: Option<u8>| c.map_or("first data PLP".to_string(), |p| format!("PLP {p}"));
             let before = self.chosen;
@@ -399,13 +492,107 @@ mod panel {
         }
 
         fn settings(&self) -> Vec<Command> {
-            vec![Command::Set { key: "plp".into(), value: self.chosen.map_or("auto".into(), |p| p.to_string()) }]
+            vec![
+                Command::Set { key: "bandwidth".into(), value: width_value(self.width) },
+                Command::Set { key: "plp".into(), value: self.chosen.map_or("auto".into(), |p| p.to_string()) },
+            ]
         }
 
         fn restore(&mut self, key: &str, value: &str) {
-            if key == "plp" {
-                self.chosen = value.parse().ok();
+            match key {
+                "plp" => self.chosen = value.parse().ok(),
+                "bandwidth" => self.width = parse_width(value).flatten(),
+                _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The width search end to end: a signal modulated in a channel narrower
+    //! than 8 MHz, as a radio at 8 MS/s delivers it, must be found and
+    //! decoded by the decoder left on auto (issue #11: 7, 6 and 5 MHz were
+    //! never found).
+    use super::*;
+    use declab_api::Tuning;
+    use decdvbt_mod::channel::Channel;
+    use decdvbt_mod::sim::{SimOptions, T2SimOptions, generate, generate_t2};
+    use decdvbt_mod::t2::T2Config;
+
+    const RADIO_HZ: f64 = 8e6;
+
+    fn channel() -> Channel {
+        Channel { cn_db: Some(28.0), cfo_hz: 3_100.0, sco_ppm: 6.0, seed: 11, ..Default::default() }
+    }
+
+    /// Run `x` through a decoder starting its search at `first`: the width
+    /// it settled on, its lock, and the packets out.
+    fn decode(x: &[Iq], first: Bandwidth) -> (Bandwidth, Lock, usize) {
+        let mut d = Dvbt { width: Some(first), ..Dvbt::default() };
+        let (mut lock, mut packets) = (Lock::Searching, 0);
+        for (k, b) in x.chunks(131_072).enumerate() {
+            let mut out = Sink::default();
+            let block = Block {
+                iq: b,
+                tuning: Tuning { center_hz: 0.0, sample_rate: RADIO_HZ, generation: 0 },
+                first_sample: (k * 131_072) as u64,
+                dropped_before: 0,
+                live: false,
+            };
+            d.process(&block, &mut out);
+            if out.card.is_some() {
+                lock = out.lock;
+            }
+            packets += out.ts.len();
+        }
+        (d.rx.as_ref().unwrap().bandwidth(), lock, packets)
+    }
+
+    #[test]
+    fn seven_mhz_dvbt_is_found_after_eight() {
+        let opts = SimOptions {
+            mode: Mode::parse("64qam-2/3-8k-1/32-7mhz").unwrap(),
+            cell_id: None,
+            ts_file: None,
+            seconds: 4.0,
+            out_rate_hz: Some(RADIO_HZ),
+            level_dbfs: -18.0,
+            channel: channel(),
+        };
+        let mut x = Vec::new();
+        generate(&opts, |b| {
+            x.extend_from_slice(b);
+            Ok(())
+        })
+        .unwrap();
+        let (w, lock, packets) = decode(&x, Bandwidth::Mhz8);
+        assert_eq!(w, Bandwidth::Mhz7);
+        assert_eq!(lock, Lock::Locked);
+        assert!(packets > 1000, "{packets} packets");
+    }
+
+    #[test]
+    fn five_mhz_t2_is_found_after_six() {
+        let cfg = T2Config::parse("8k-1/16-pp4-16qam-3/4-short-ext-5mhz").unwrap();
+        let frames = (3.5 / cfg.frame_s()).ceil() as usize;
+        let opts = T2SimOptions {
+            cfg,
+            ts_file: None,
+            frames,
+            out_rate_hz: Some(RADIO_HZ),
+            level_dbfs: -18.0,
+            channel: channel(),
+        };
+        let mut x = Vec::new();
+        generate_t2(&opts, |b| {
+            x.extend_from_slice(b);
+            Ok(())
+        })
+        .unwrap();
+        let (w, lock, packets) = decode(&x, Bandwidth::Mhz6);
+        assert_eq!(w, Bandwidth::Mhz5);
+        assert_eq!(lock, Lock::Locked);
+        assert!(packets > 1000, "{packets} packets");
     }
 }
