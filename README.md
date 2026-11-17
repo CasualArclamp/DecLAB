@@ -34,6 +34,10 @@ to add one. **Bias tee** for an LNA or active antenna on the Airspy R2 and Mini
 **Decimation** for every live source (*decimate* in the top bar, `--decimate N`
 on the command line): the radio's rate divided by 2 to 64 by half-band filters,
 for narrow signals: less CPU and a finer waterfall.
+**Auto-record** (*auto-rec* in the top bar, `--auto-record DIR`): every VFO's
+sound, a WAV file a transmission, opened when a squelch opens or a digital
+voice call starts and closed after a pause, named for the time, frequency and
+decoder.
 
 ## Screenshots
 

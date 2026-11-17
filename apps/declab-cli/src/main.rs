@@ -9,6 +9,7 @@
 //! declab run <decoder> --radio hackrf|airspy|rtlsdr|pluto --freq HZ [--rate HZ] [--offset HZ]
 //!                      [--gain AMP,LNA,VGA | DB | agc] [--ppm PPM] [--bias-tee] [--seconds S] [--record OUT.cs8] [--record-channel OUT.cf32]
 //!                      [--set KEY=VALUE] [--ts OUT.ts] [--pcap OUT.pcap] [--card] [--udp ADDR:PORT] [--http ADDR:PORT]
+//!                      [--auto-record DIR [--auto-record-hang S]]   (a WAV a transmission)
 //!                      [--sound]   (runs are silent unless --sound)
 //!                      [--pluto-uri auto|usb|ip:HOST] [--pluto-16bit]   (the Pluto, receive only)
 //! declab run <decoder> --radio fobos --freq HZ [--rate HZ] [--gain LNA,VGA] [--fobos-ext-clock]
@@ -150,6 +151,16 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         // The decoder's sound, as 16-bit PCM.
         host.write_audio(Some(PathBuf::from(path)))?;
     }
+    if let Some(dir) = o.get("--auto-record") {
+        // The sound a transmission a file (squelch open, a voice call).
+        let d = declab_engine::AutoRecord::default();
+        let hang_s = o.get("--auto-record-hang").map(str::parse::<f64>).transpose().context("--auto-record-hang")?;
+        host.set_auto_record(Some(declab_engine::AutoRecord {
+            dir: PathBuf::from(dir),
+            hang_s: hang_s.unwrap_or(d.hang_s),
+            ..d
+        }));
+    }
     // A decoder setting, as its panel would send it: `--set symbol_rate=2000000`.
     for (i, a) in o.0.iter().enumerate() {
         if a == "--set"
@@ -256,6 +267,14 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     );
     let wall = t0.elapsed().as_secs_f64();
     host.write_audio(None)?;
+    host.set_auto_record(None);
+    if v.recorded > 0 || v.record_error.is_some() {
+        println!(
+            "auto-record: {} recordings{}",
+            v.recorded,
+            v.record_error.as_ref().map_or(String::new(), |e| format!(" ({e})"))
+        );
+    }
     drop(host);
     println!("process CPU {:.0} % of one core on average over {wall:.1} s", 100.0 * cpu / wall.max(1e-3));
     Ok(())
