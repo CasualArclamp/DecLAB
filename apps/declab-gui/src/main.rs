@@ -18,6 +18,10 @@
 //! A screenshot run opens, runs `--after` seconds (default 4), saves the
 //! window and closes; it neither reads nor writes the preferences.
 
+// No console window behind the app's own when it is opened from Explorer;
+// `parent_console` gives back the output a shell expects.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod band;
 mod data_tabs;
 mod epg_view;
@@ -28,6 +32,7 @@ mod lnb;
 mod ism_tabs;
 mod more_radios;
 mod panels;
+mod parent_console;
 mod player;
 mod prefs;
 mod redbutton;
@@ -265,6 +270,7 @@ fn window_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result {
+    parent_console::attach();
     let opts = match Options::from_args() {
         Ok(o) => o,
         Err(e) => {
