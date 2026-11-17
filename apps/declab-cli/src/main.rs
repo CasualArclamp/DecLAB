@@ -19,6 +19,7 @@
 //!                      (a radio behind DecSAT's decsat-server; its IQ is decoded here)
 //! declab run <decoder> --net tcp://HOST:PORT|listen://ADDR:PORT|udp://ADDR:PORT
 //!                      --rate HZ [--iq int8|uint8|int16|int32|float32] [--freq HZ] …
+//! Any live source: [--decimate 2|4|8|16|32|64] divides its rate before the decoder.
 //!                      (raw IQ from SDR++'s IQ Exporter, GNU Radio, an rtl_tcp server…)
 //! ```
 //!
@@ -101,6 +102,19 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         open_net(url, &o)?
     } else {
         bail!("give --file <capture>, --radio hackrf|airspy|rtlsdr|pluto|fobos|sdrplay|uhd|remote or --net tcp://HOST:PORT");
+    };
+    // `--decimate N`: a live source's rate divided by 2 … 64 before the
+    // engine (half-band filters, `declab_io::Decimate`).
+    let source = match o.get("--decimate") {
+        Some(d) => {
+            let d: u32 = d
+                .parse()
+                .ok()
+                .filter(|d| declab_io::DECIMATIONS.contains(d))
+                .context("--decimate: 1, 2, 4, 8, 16, 32 or 64")?;
+            if source.is_live() { declab_io::Decimate::wrap(source, d) } else { source }
+        }
+        None => source,
     };
 
     let live = source.is_live();

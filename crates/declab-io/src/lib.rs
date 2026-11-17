@@ -6,6 +6,7 @@
 //! SDRplay RSP or USRP, IQ over the network ([`net`]) or a radio behind a
 //! DecSAT server ([`remote`]). Recording goes out through [`IqFileWriter`].
 
+pub mod decimate;
 pub mod file;
 pub mod net;
 pub mod raw_stream;
@@ -34,6 +35,7 @@ pub mod sdrplay;
 pub mod uhd;
 
 pub use net::{NetIqControl, NetIqSettings, NetIqSource, NetMode, NetSample};
+pub use decimate::{DECIMATIONS, Decimate, snap_decimation};
 pub use file::{IqFileReader, IqFileWriter, NameHint, format_from_path, name_hint};
 pub use rtlsdr_proto::{RtlGains, RtlSettings};
 pub use wav::{CaptureInfo, WavIq, probe_capture};
