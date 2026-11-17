@@ -31,6 +31,9 @@ own decoder, sound and settings. The VFO list down the left collapses to a
 strip of numbered discs; click a channel on the band to select it, ctrl+click
 to add one. **Bias tee** for an LNA or active antenna on the Airspy R2 and Mini
 (and HydraSDR RFOne), HackRF One and RTL-SDR Blog: off at every start, switched on by you.
+**Decimation** for every live source (*decimate* in the top bar, `--decimate N`
+on the command line): the radio's rate divided by 2 to 64 by half-band filters,
+for narrow signals: less CPU and a finer waterfall.
 
 ## Screenshots
 

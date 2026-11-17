@@ -11,7 +11,7 @@
 //! ```text
 //! declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr|pluto|fobos|sdrplay|uhd|remote]
 //!             [--net tcp://HOST:PORT|listen://ADDR:PORT|udp://ADDR:PORT --iq int8|int16|… --rate HZ]
-//!            [--decoder ID] [--chan HZ] [--zoom Z] [--wheel]
+//!            [--decimate N] [--decoder ID] [--chan HZ] [--zoom Z] [--wheel]
 //!            [--screenshot OUT.png] [--after SECS]
 //! ```
 //!
@@ -114,6 +114,9 @@ struct Options {
     /// `--bias-tee`: power the antenna port from the start (it is never
     /// saved, so it is off at every start unless this is given).
     bias_tee: bool,
+    /// `--decimate N`: divide the live source's rate by 2, 4 … 64 for this
+    /// run (otherwise as last chosen).
+    decimate: Option<u32>,
     /// `--vfo ID@FREQ` (repeatable): more VFOs, besides the one `--decoder`
     /// and `--chan` give.
     vfos: Vec<(String, f64)>,
@@ -203,6 +206,9 @@ impl Options {
                     o.sets.push((k.to_string(), val.to_string()));
                 }
                 "--bias-tee" => o.bias_tee = true,
+                "--decimate" => {
+                    o.decimate = Some(value("a factor")?.parse().map_err(|_| "--decimate: 1, 2, 4 … 64")?)
+                }
                 "--in-app" => o.in_app = true,
                 "--play" => {
                     o.play = Some(
@@ -216,7 +222,7 @@ impl Options {
                 "--after" => o.after = value("seconds")?.parse().map_err(|_| "--after: seconds")?,
                 "-h" | "--help" => {
                     return Err("declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr|pluto|fobos|sdrplay|uhd|remote] [--pluto-uri URI] \
-                                [--net URL --iq TYPE] [--decoder ID] [--chan HZ] [--zoom Z] [--wheel] [--screenshot OUT.png] [--after SECS]"
+                                [--net URL --iq TYPE] [--decimate N] [--decoder ID] [--chan HZ] [--zoom Z] [--wheel] [--screenshot OUT.png] [--after SECS]"
                         .into());
                 }
                 f if !f.starts_with("--") => o.file = Some(f.into()),
@@ -369,6 +375,9 @@ struct App {
     /// Never saved: off at every start of the program, since DC on the wrong
     /// antenna can damage it.
     bias_tee: bool,
+    /// A live source's rate is divided by this before the engine (1 = as
+    /// it comes): one setting for every radio and the network stream.
+    decimation: u32,
     air_lna: u8,
     air_mix: u8,
     air_vga: u8,
@@ -540,6 +549,9 @@ impl App {
             hack_lna: prefs::num(&p, "hackrf_lna").unwrap_or(24),
             hack_vga: prefs::num(&p, "hackrf_vga").unwrap_or(20),
             bias_tee: opts.bias_tee,
+            decimation: declab_io::snap_decimation(
+                opts.decimate.or(prefs::num(&p, "decimation")).unwrap_or(1),
+            ),
             air_lna: prefs::num(&p, "airspy_lna").unwrap_or(12),
             air_mix: prefs::num(&p, "airspy_mix").unwrap_or(10),
             air_vga: prefs::num(&p, "airspy_vga").unwrap_or(8),
@@ -988,6 +1000,8 @@ impl App {
     /// was, the radio refused to start.)
     #[allow(dead_code)] // unused when no radio is built in
     fn live_centre(&mut self, lo_hz: f64, hi_hz: f64, rate: f64) -> u64 {
+        // The span left after decimation.
+        let rate = rate / f64::from(self.decimation);
         let tunable = (lo_hz..=hi_hz).contains(&self.center_hz);
         if !tunable || (self.chan_hz - self.center_hz).abs() > rate / 2.0 {
             self.center_hz = self.chan_hz.clamp(lo_hz, hi_hz).round();
@@ -1022,6 +1036,14 @@ impl App {
             return self.source_rate;
         }
         match self.kind {
+            SourceKind::File => self.file_rate,
+            _ => self.radio_rate() / f64::from(self.decimation),
+        }
+    }
+
+    /// The chosen live source's own rate, before decimation.
+    fn radio_rate(&self) -> f64 {
+        match self.kind {
             SourceKind::Airspy => self.air_rate,
             SourceKind::HackRf => self.hack_rate,
             SourceKind::RtlSdr => declab_io::rtlsdr_proto::SAMPLE_RATE_HZ as f64,
@@ -1029,6 +1051,37 @@ impl App {
             SourceKind::Network => self.net_rate,
             SourceKind::More(k) => self.more.rate(k),
             SourceKind::File => self.file_rate,
+        }
+    }
+
+    /// The Decimation picker, for every live source: its rate divided by
+    /// 2 to 64 (`declab_io::Decimate`) before the engine. Changing it
+    /// restarts a running source, as changing the rate does.
+    fn decimation_ui(&mut self, ui: &mut egui::Ui) {
+        let rate = self.radio_rate();
+        let label = |d: u32| {
+            if d <= 1 { "none".to_string() } else { format!("÷{d} · {} MS/s", panels::value(rate / f64::from(d) / 1e6)) }
+        };
+        let before = self.decimation;
+        ui.label(RichText::new("decimate").color(Color32::GRAY));
+        egui::ComboBox::from_id_salt("decimation")
+            .selected_text(label(self.decimation))
+            .show_ui(ui, |ui| {
+                for d in declab_io::DECIMATIONS {
+                    ui.selectable_value(&mut self.decimation, d, label(d));
+                }
+            })
+            .response
+            .on_hover_text(
+                "Divides the source's sample rate before anything else (half-band\n\
+                 filters), for narrow signals: less CPU and a finer waterfall.\n\
+                 The middle 80 % of the new span is flat and free of aliases.",
+            );
+        if self.decimation != before {
+            self.save_prefs();
+            if self.host.is_some() {
+                self.start();
+            }
         }
     }
 
@@ -1163,6 +1216,9 @@ impl App {
         self.stop();
         match self.open_source() {
             Ok(src) => {
+                // A live source's rate divided first, when asked for: the
+                // span, the VFOs and the waterfall all follow the new rate.
+                let src = if src.is_live() { declab_io::Decimate::wrap(src, self.decimation) } else { src };
                 // A stream tuned at its sender is shown as a file is: its
                 // band stays put and a drag does not try to retune it.
                 self.live = src.is_live() && src.can_retune();
@@ -1752,6 +1808,7 @@ impl App {
             ("vfo_rail", if self.rail_open { "1" } else { "0" }.into()),
             ("follow_calls", if self.follow_calls { "1" } else { "0" }.into()),
             ("volume", format!("{:.2}", self.volume)),
+            ("decimation", self.decimation.to_string()),
             ("hackrf_rate", format!("{:.0}", self.hack_rate)),
             ("airspy_rate", format!("{:.0}", self.air_rate)),
             ("hackrf_amp", if self.hack_amp { "1" } else { "0" }.into()),
@@ -2110,6 +2167,9 @@ impl App {
                     }
                     if !matches!(self.kind, SourceKind::File | SourceKind::Network | SourceKind::Pluto | SourceKind::More(_)) {
                         self.bias_tee_ui(ui);
+                    }
+                    if self.kind != SourceKind::File {
+                        self.decimation_ui(ui);
                     }
                     ui.label(RichText::new("centre").color(Color32::GRAY));
                     ui.label(RichText::new(format!("{:.3} MHz", self.center_hz / 1e6)).color(Color32::WHITE));
