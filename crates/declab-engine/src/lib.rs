@@ -10,6 +10,7 @@
 //! - [`meter`]: CPU meters.
 
 pub mod audio;
+pub mod autorec;
 pub mod frontend;
 pub mod host;
 pub mod hub;
@@ -17,5 +18,6 @@ pub mod meter;
 pub mod spectrum;
 pub mod waterfall;
 
+pub use autorec::AutoRecord;
 pub use host::{ChannelInfo, DecoderView, Host, HostOptions, MAX_VFOS, Row, Stats, VfoId};
 pub use hub::{CarouselLink, CarouselState, Outputs, TsHub, TsView};

@@ -19,7 +19,7 @@
 //! decoded flat out (the CLI) loses nothing.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -35,6 +35,7 @@ use declab_dsp::{Ddc, Resampler};
 use declab_io::{IqFileWriter, IqSource, format_from_path};
 
 use crate::audio::AudioOut;
+use crate::autorec::{AutoRecord, Recorder};
 use crate::frontend::{FrontEnd, FrontEndReading, FrontEndSettings};
 use crate::hub::{Feeder, Outputs, TsHub, TsView};
 use crate::meter::{Stage, StageLoad, StageMeter};
@@ -168,6 +169,12 @@ pub struct DecoderView {
     pub cpu_percent: f32,
     /// Sound output in use, or why there is none.
     pub audio: Option<String>,
+    /// The auto-recorder's file being written (`Host::set_auto_record`).
+    pub recording: Option<PathBuf>,
+    /// Recordings it has kept, the last of them, and its last error.
+    pub recorded: u64,
+    pub last_recording: Option<PathBuf>,
+    pub record_error: Option<String>,
     /// Transport-stream packets the decoder has made (`Sink::ts`).
     pub ts_packets: u64,
     /// IP datagrams (DVB-S2 GSE) and their bytes since the decoder started.
@@ -250,6 +257,8 @@ struct Shared {
     in_flight: AtomicUsize,
     /// The following VFO whose call has the sound, and when it last spoke.
     speaker: Mutex<Option<(VfoId, Instant)>>,
+    /// Every VFO's sound recorded a transmission a file, when set.
+    auto_record: Mutex<Option<Arc<AutoRecord>>>,
 }
 
 /// Quiet after which a followed call lets another have the sound.
@@ -349,6 +358,7 @@ impl Host {
             running: AtomicBool::new(true),
             speaker: Mutex::new(None),
             in_flight: AtomicUsize::new(0),
+            auto_record: Mutex::new(None),
         });
         let (cmd, cmd_rx) = mpsc::channel();
         let sh = shared.clone();
@@ -685,6 +695,12 @@ impl Host {
 
     pub fn set_front_end(&self, s: FrontEndSettings) {
         let _ = self.cmd.send(SourceCmd::FrontEnd(s));
+    }
+
+    /// Record every VFO's sound by itself, a file a transmission (see
+    /// [`crate::autorec`]), or stop (a recording under way is finished).
+    pub fn set_auto_record(&self, cfg: Option<AutoRecord>) {
+        *self.shared.auto_record.lock().unwrap() = cfg.map(Arc::new);
     }
 
     pub fn write_audio(&self, path: Option<PathBuf>) -> std::io::Result<()> {
@@ -1112,6 +1128,12 @@ fn worker_thread(
     let mut audio: Option<AudioOut> = None;
     let mut busy = Duration::ZERO;
     let mut window = Instant::now();
+    // The auto-recorder, its settings as last seen, the stream's time and
+    // the channel's RF frequency.
+    let mut rec = Recorder::default();
+    let mut rec_cfg: Option<Arc<AutoRecord>> = None;
+    let mut stream_s = 0.0f64;
+    let mut rf_hz = 0.0f64;
 
     loop {
         let msg = match rx.recv_timeout(Duration::from_millis(200)) {
@@ -1189,6 +1211,8 @@ fn worker_thread(
                     live: meta.live,
                 };
                 first_sample += iq.len() as u64;
+                stream_s += iq.len() as f64 / out_rate;
+                rf_hz = meta.center_hz + offset;
                 if let Some(f) = vs.chan_file.lock().unwrap().as_mut() {
                     use std::io::Write;
                     for z in iq {
@@ -1233,13 +1257,25 @@ fn worker_thread(
                 f32::from_bits(sh.volume.load(Ordering::Relaxed)) * f32::from_bits(vs.gain.load(Ordering::Relaxed)),
             );
             let mut wav = vs.wav_file.lock().unwrap();
+            let auto = sh.auto_record.lock().unwrap().clone();
+            let decoder_id = vs.view.lock().unwrap().id;
             for chunk in sink.audio.drain(..) {
                 if let Some(w) = wav.as_mut() {
                     w.push(chunk.sample_rate, chunk.channels, &chunk.samples);
                 }
+                if let Some(cfg) = &auto {
+                    rec.audio(cfg, stream_s, rf_hz, decoder_id, chunk.sample_rate, chunk.channels, &chunk.samples);
+                }
                 a.push(chunk.sample_rate, chunk.channels, chunk.samples);
             }
         }
+        // End a recording gone quiet, or every one when switched off.
+        let auto = sh.auto_record.lock().unwrap().clone();
+        match &auto {
+            Some(cfg) => rec.tick(cfg, stream_s),
+            None => rec.finish(rec_cfg.as_ref().map_or(0.0, |c| c.min_s)),
+        }
+        rec_cfg = auto;
         let audio_status = audio.as_ref().and_then(AudioOut::status);
         if !sink.waterfalls.is_empty() {
             let mut q = vs.mini_rows.lock().unwrap();
@@ -1261,6 +1297,10 @@ fn worker_thread(
             v.audio = audio_status;
         }
         v.lock = sink.lock;
+        v.recording = rec.recording().map(Path::to_path_buf);
+        v.recorded = rec.kept;
+        v.last_recording.clone_from(&rec.last);
+        v.record_error.clone_from(&rec.error);
         for m in sink.measurements.drain(..) {
             match v.measurements.iter_mut().find(|x| x.name == m.name) {
                 Some(x) => *x = m,
@@ -1364,6 +1404,7 @@ fn worker_thread(
             sh.in_flight.fetch_sub(1, Ordering::AcqRel);
         }
     }
+    rec.finish(rec_cfg.as_ref().map_or(0.0, |c| c.min_s));
     // Blocks never taken off the queue.
     for m in rx.try_iter() {
         if matches!(m, WorkerMsg::Block(..)) {
@@ -1374,7 +1415,7 @@ fn worker_thread(
 
 /// A WAV file being written: 16-bit PCM, its header's sizes filled in when
 /// it is finished.
-struct WavOut {
+pub(crate) struct WavOut {
     file: std::io::BufWriter<std::fs::File>,
     /// Rate and channels, from the first chunk.
     shape: Option<(u32, u16)>,
@@ -1382,6 +1423,10 @@ struct WavOut {
 }
 
 impl WavOut {
+    pub(crate) fn create(path: &Path) -> std::io::Result<WavOut> {
+        Ok(WavOut { file: std::io::BufWriter::new(std::fs::File::create(path)?), shape: None, bytes: 0 })
+    }
+
     fn header(rate: u32, ch: u16, bytes: u32) -> Vec<u8> {
         let mut h = Vec::with_capacity(44);
         h.extend_from_slice(b"RIFF");
@@ -1399,7 +1444,7 @@ impl WavOut {
         h
     }
 
-    fn push(&mut self, rate: u32, ch: u16, samples: &[f32]) {
+    pub(crate) fn push(&mut self, rate: u32, ch: u16, samples: &[f32]) {
         use std::io::Write;
         if samples.is_empty() || rate == 0 {
             return;
@@ -1423,7 +1468,7 @@ impl WavOut {
         self.bytes += 2 * samples.len() as u32;
     }
 
-    fn finish(mut self) -> std::io::Result<()> {
+    pub(crate) fn finish(mut self) -> std::io::Result<()> {
         use std::io::{Seek, SeekFrom, Write};
         self.file.flush()?;
         if let Some((rate, ch)) = self.shape {

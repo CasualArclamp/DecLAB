@@ -12,7 +12,7 @@
 //! declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr|pluto|fobos|sdrplay|uhd|remote]
 //!             [--net tcp://HOST:PORT|listen://ADDR:PORT|udp://ADDR:PORT --iq int8|int16|… --rate HZ]
 //!            [--decimate N] [--decoder ID] [--chan HZ] [--zoom Z] [--wheel]
-//!            [--screenshot OUT.png] [--after SECS]
+//!            [--auto-record DIR] [--screenshot OUT.png] [--after SECS]
 //! ```
 //!
 //! A screenshot run opens, runs `--after` seconds (default 4), saves the
@@ -46,7 +46,7 @@ use std::time::{Duration, Instant};
 
 use declab_api::{DecoderFactory, Family, Panel};
 use declab_engine::meter::CpuGauge;
-use declab_engine::{DecoderView, Host, HostOptions, MAX_VFOS, Stats};
+use declab_engine::{AutoRecord, DecoderView, Host, HostOptions, MAX_VFOS, Stats};
 
 /// How long a followed call's VFO stays after its grant and its voice stop.
 const FOLLOW_HANG: Duration = Duration::from_secs(4);
@@ -125,6 +125,9 @@ struct Options {
     /// `--set KEY=VALUE` (repeatable): a setting of the `--decoder`'s panel,
     /// as the CLI's `--set` (`lo_hz=9750000000` for an LNB, say).
     sets: Vec<(String, String)>,
+    /// `--auto-record DIR`: record each transmission there (as the menu's
+    /// switch, which it turns on).
+    auto_record: Option<PathBuf>,
     screenshot: Option<PathBuf>,
     after: f64,
 }
@@ -219,10 +222,11 @@ impl Options {
                 }
                 "--window" => o.window = Some(value("ts or epg")?),
                 "--screenshot" => o.screenshot = Some(value("a .png path")?.into()),
+                "--auto-record" => o.auto_record = Some(value("a folder")?.into()),
                 "--after" => o.after = value("seconds")?.parse().map_err(|_| "--after: seconds")?,
                 "-h" | "--help" => {
                     return Err("declab-gui [CAPTURE] [--rate HZ] [--freq HZ] [--radio airspy|hackrf|rtlsdr|pluto|fobos|sdrplay|uhd|remote] [--pluto-uri URI] \
-                                [--net URL --iq TYPE] [--decimate N] [--decoder ID] [--chan HZ] [--zoom Z] [--wheel] [--screenshot OUT.png] [--after SECS]"
+                                [--net URL --iq TYPE] [--decimate N] [--decoder ID] [--chan HZ] [--zoom Z] [--wheel] [--auto-record DIR] [--screenshot OUT.png] [--after SECS]"
                         .into());
                 }
                 f if !f.starts_with("--") => o.file = Some(f.into()),
@@ -378,6 +382,9 @@ struct App {
     /// A live source's rate is divided by this before the engine (1 = as
     /// it comes): one setting for every radio and the network stream.
     decimation: u32,
+    /// Every VFO's sound recorded by itself, a file a transmission (when on).
+    auto_rec_on: bool,
+    auto_rec: AutoRecord,
     air_lna: u8,
     air_mix: u8,
     air_vga: u8,
@@ -552,6 +559,18 @@ impl App {
             decimation: declab_io::snap_decimation(
                 opts.decimate.or(prefs::num(&p, "decimation")).unwrap_or(1),
             ),
+            auto_rec_on: opts.auto_record.is_some() || prefs::get(&p, "auto_rec") == Some("1"),
+            auto_rec: {
+                let d = AutoRecord::default();
+                AutoRecord {
+                    dir: opts.auto_record.clone().unwrap_or_else(|| {
+                        prefs::get(&p, "auto_rec_dir").filter(|s| !s.is_empty()).map_or(d.dir.clone(), PathBuf::from)
+                    }),
+                    hang_s: prefs::num(&p, "auto_rec_hang").unwrap_or(d.hang_s).clamp(0.5, 10.0),
+                    threshold_dbfs: prefs::num(&p, "auto_rec_level").unwrap_or(d.threshold_dbfs).clamp(-80.0, -10.0),
+                    ..d
+                }
+            },
             air_lna: prefs::num(&p, "airspy_lna").unwrap_or(12),
             air_mix: prefs::num(&p, "airspy_mix").unwrap_or(10),
             air_vga: prefs::num(&p, "airspy_vga").unwrap_or(8),
@@ -1057,6 +1076,74 @@ impl App {
     /// The Decimation picker, for every live source: its rate divided by
     /// 2 to 64 (`declab_io::Decimate`) before the engine. Changing it
     /// restarts a running source, as changing the rate does.
+    /// The auto-recorder's menu: on or off, where, how long a pause ends a
+    /// recording, how loud counts as heard; and what it has done.
+    fn auto_rec_ui(&mut self, ui: &mut egui::Ui) {
+        // Every VFO's view: the selected one's is current, the others' a
+        // look every few frames.
+        let views = || {
+            std::iter::once(&self.view)
+                .chain(self.slots.iter().enumerate().filter(|(i, _)| *i != self.cur).map(|(_, s)| &s.view))
+        };
+        let now: Vec<String> = views()
+            .filter_map(|v| v.recording.as_ref())
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        let kept: u64 = views().map(|v| v.recorded).sum();
+        let error = views().find_map(|v| v.record_error.clone());
+        let title = match (self.auto_rec_on, now.is_empty()) {
+            (false, _) => RichText::new("auto-rec").color(Color32::GRAY),
+            (true, true) => RichText::new(format!("○ auto-rec · {kept}")).color(panels::RED),
+            (true, false) => RichText::new(format!("● REC · {kept}")).color(panels::RED).strong(),
+        };
+        let before = (self.auto_rec_on, self.auto_rec.clone());
+        ui.menu_button(title, |ui| {
+            ui.checkbox(&mut self.auto_rec_on, "Record each transmission")
+                .on_hover_text(
+                    "Every VFO's sound, a WAV file a transmission: a file opens when the\n\
+                     sound rises above the level below (a squelch opening, a digital\n\
+                     voice call) and closes after the pause. Set a squelch on analog VFOs.",
+                );
+            ui.horizontal(|ui| {
+                ui.label("folder");
+                let mut dir = self.auto_rec.dir.display().to_string();
+                if ui.add(egui::TextEdit::singleline(&mut dir).desired_width(180.0)).changed() {
+                    self.auto_rec.dir = PathBuf::from(dir);
+                }
+                if ui.button("…").clicked()
+                    && let Some(d) = rfd::FileDialog::new().set_directory(&self.auto_rec.dir).pick_folder()
+                {
+                    self.auto_rec.dir = d;
+                }
+            });
+            ui.add(egui::Slider::new(&mut self.auto_rec.hang_s, 0.5..=10.0).text("s pause ends it"));
+            ui.add(egui::Slider::new(&mut self.auto_rec.threshold_dbfs, -80.0..=-10.0).text("dBFS counts as heard"));
+            ui.label(
+                RichText::new("Files: YYYYMMDD-HHMMSSZ_<MHz>_<decoder>.wav (UTC); under half a second of sound is not kept.")
+                    .size(11.0)
+                    .color(Color32::GRAY),
+            );
+            if self.auto_rec_on {
+                ui.label(format!("{kept} kept"));
+                for n in &now {
+                    ui.label(RichText::new(format!("● {n}")).color(panels::RED));
+                }
+                if let Some(last) = views().find_map(|v| v.last_recording.as_ref()) {
+                    ui.label(RichText::new(format!("last: {}", last.display())).size(11.0).color(Color32::GRAY));
+                }
+            }
+            if let Some(e) = &error {
+                ui.label(RichText::new(e).color(panels::RED));
+            }
+        });
+        if (self.auto_rec_on, &self.auto_rec) != (before.0, &before.1) {
+            self.save_prefs();
+            if let Some(h) = &self.host {
+                h.set_auto_record(self.auto_rec_on.then(|| self.auto_rec.clone()));
+            }
+        }
+    }
+
     fn decimation_ui(&mut self, ui: &mut egui::Ui) {
         let rate = self.radio_rate();
         let label = |d: u32| {
@@ -1240,6 +1327,7 @@ impl App {
                 let mut host = Host::start(src, opts);
                 // Screenshot (test) runs are silent.
                 host.set_volume(self.effective_volume());
+                host.set_auto_record(self.auto_rec_on.then(|| self.auto_rec.clone()));
                 // Every VFO, in order (the first is the one that may retune
                 // the radio), each with its decoder's settings.
                 self.stash();
@@ -1809,6 +1897,10 @@ impl App {
             ("follow_calls", if self.follow_calls { "1" } else { "0" }.into()),
             ("volume", format!("{:.2}", self.volume)),
             ("decimation", self.decimation.to_string()),
+            ("auto_rec", if self.auto_rec_on { "1" } else { "0" }.into()),
+            ("auto_rec_dir", self.auto_rec.dir.display().to_string()),
+            ("auto_rec_hang", format!("{:.1}", self.auto_rec.hang_s)),
+            ("auto_rec_level", format!("{:.0}", self.auto_rec.threshold_dbfs)),
             ("hackrf_rate", format!("{:.0}", self.hack_rate)),
             ("airspy_rate", format!("{:.0}", self.air_rate)),
             ("hackrf_amp", if self.hack_amp { "1" } else { "0" }.into()),
@@ -2176,6 +2268,7 @@ impl App {
                     if lo > 0.0 {
                         ui.label(RichText::new(format!("IF · L.O. {:.3} MHz", lo / 1e6)).color(Color32::GRAY));
                     }
+                    self.auto_rec_ui(ui);
                     let rec = self.stats.recording.as_ref().map(|(_, b)| *b);
                     if running {
                         let label = match rec {
