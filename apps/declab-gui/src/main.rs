@@ -362,6 +362,8 @@ struct App {
     /// The rate asked of the Airspy, Hz: 10 or 2.5 MS/s on an R2, 6 or 3 on
     /// a Mini. The board takes its nearest, and this then says which.
     air_rate: f64,
+    /// The Airspy's decimation on the host: 1 (none) to 64.
+    air_decim: u32,
     hack_amp: bool,
     hack_lna: u16,
     hack_vga: u16,
@@ -536,6 +538,7 @@ impl App {
                 .filter(|_| kind == SourceKind::Airspy)
                 .or(prefs::num(&p, "airspy_rate"))
                 .unwrap_or(10e6),
+            air_decim: prefs::num(&p, "airspy_decim").filter(|&d: &u32| d.is_power_of_two() && d <= 64).unwrap_or(1),
             hack_amp: prefs::get(&p, "hackrf_amp") == Some("1"),
             hack_lna: prefs::num(&p, "hackrf_lna").unwrap_or(24),
             hack_vga: prefs::num(&p, "hackrf_vga").unwrap_or(20),
@@ -1022,7 +1025,7 @@ impl App {
             return self.source_rate;
         }
         match self.kind {
-            SourceKind::Airspy => self.air_rate,
+            SourceKind::Airspy => self.air_rate / self.air_decim as f64,
             SourceKind::HackRf => self.hack_rate,
             SourceKind::RtlSdr => declab_io::rtlsdr_proto::SAMPLE_RATE_HZ as f64,
             SourceKind::Pluto => self.pluto_rate,
@@ -1092,7 +1095,8 @@ impl App {
             SourceKind::Airspy => {
                 use declab_io::{AirspyGains, AirspySettings, AirspySource};
                 use declab_io::airspy::proto::{FREQ_MAX_HZ, FREQ_MIN_HZ};
-                let centre = self.live_centre(FREQ_MIN_HZ as f64, FREQ_MAX_HZ as f64, self.air_rate);
+                let centre =
+                    self.live_centre(FREQ_MIN_HZ as f64, FREQ_MAX_HZ as f64, self.air_rate / self.air_decim as f64);
                 let s = AirspySettings {
                     center_hz: centre,
                     sample_rate: self.air_rate as u32,
@@ -1103,6 +1107,7 @@ impl App {
                     }
                     .clamped(),
                     bias_tee: self.bias_tee,
+                    decimation: self.air_decim,
                     ..AirspySettings::default()
                 };
                 let src = AirspySource::open(s).map_err(|e| e.to_string())?;
@@ -1754,6 +1759,7 @@ impl App {
             ("volume", format!("{:.2}", self.volume)),
             ("hackrf_rate", format!("{:.0}", self.hack_rate)),
             ("airspy_rate", format!("{:.0}", self.air_rate)),
+            ("airspy_decim", self.air_decim.to_string()),
             ("hackrf_amp", if self.hack_amp { "1" } else { "0" }.into()),
             ("hackrf_lna", self.hack_lna.to_string()),
             ("hackrf_vga", self.hack_vga.to_string()),
@@ -2014,7 +2020,28 @@ impl App {
                                 })
                                 .response
                                 .on_hover_text("An R2 runs at 10 or 2.5 MS/s, a Mini at 6 or 3: the board takes the nearest it has.");
-                            if self.air_rate != before && running {
+                            let before_decim = self.air_decim;
+                            let decim_text = |d: u32| if d == 1 { "no decimation".to_string() } else { format!("÷ {d}") };
+                            egui::ComboBox::from_id_salt("airspy_decim")
+                                .selected_text(decim_text(self.air_decim))
+                                .show_ui(ui, |ui| {
+                                    for d in [1u32, 2, 4, 8, 16, 32, 64] {
+                                        let out = self.air_rate / d as f64;
+                                        let label = if d == 1 {
+                                            decim_text(d)
+                                        } else if out >= 1e6 {
+                                            format!("÷ {d} ({:.3} MS/s)", out / 1e6)
+                                        } else {
+                                            format!("÷ {d} ({:.1} kS/s)", out / 1e3)
+                                        };
+                                        ui.selectable_value(&mut self.air_decim, d, label);
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Decimation on the PC: a narrower band at a lower rate, with less of the ADC's noise                                      in it (about a bit more for every ×4). Clean over the inner 80 % of what is left.",
+                                );
+                            if (self.air_rate != before || self.air_decim != before_decim) && running {
                                 self.start();
                             }
                             let (mut start_opt, mut cancel_opt) = (false, false);

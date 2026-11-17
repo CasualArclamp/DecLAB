@@ -31,6 +31,8 @@ own decoder, sound and settings. The VFO list down the left collapses to a
 strip of numbered discs; click a channel on the band to select it, ctrl+click
 to add one. **Bias tee** for an LNA or active antenna on the Airspy R2 and Mini
 (and HydraSDR RFOne), HackRF One and RTL-SDR Blog: off at every start, switched on by you.
+**Airspy decimation** ÷2 to ÷64 on the PC: a narrower band at a lower rate, with less of the ADC's
+noise in it.
 
 ## Screenshots
 

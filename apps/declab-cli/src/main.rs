@@ -7,7 +7,7 @@
 //! declab run <decoder> --file <capture> [--rate HZ] [--freq HZ] [--offset HZ]
 //!                      [--bandwidth HZ] [--seconds S] [--realtime]
 //! declab run <decoder> --radio hackrf|airspy|rtlsdr|pluto --freq HZ [--rate HZ] [--offset HZ]
-//!                      [--gain AMP,LNA,VGA | DB | agc] [--ppm PPM] [--bias-tee] [--seconds S] [--record OUT.cs8] [--record-channel OUT.cf32]
+//!                      [--gain AMP,LNA,VGA | DB | agc] [--ppm PPM] [--bias-tee] [--decim N (airspy)] [--seconds S] [--record OUT.cs8] [--record-channel OUT.cf32]
 //!                      [--set KEY=VALUE] [--ts OUT.ts] [--pcap OUT.pcap] [--card] [--udp ADDR:PORT] [--http ADDR:PORT]
 //!                      [--sound]   (runs are silent unless --sound)
 //!                      [--pluto-uri auto|usb|ip:HOST] [--pluto-16bit]   (the Pluto, receive only)
@@ -285,6 +285,8 @@ fn open_airspy(o: &Opts) -> anyhow::Result<Box<dyn IqSource>> {
         sample_rate: o.hz("--rate")?.unwrap_or(10e6) as u32,
         gains,
         bias_tee: o.flag("--bias-tee"),
+        // Host decimation: 1 (none), 2, 4 ... 64.
+        decimation: o.get("--decim").map(str::parse).transpose().context("--decim 1|2|4|8|16|32|64")?.unwrap_or(1),
         ..AirspySettings::default()
     };
     Ok(Box::new(AirspySource::open(s)?))

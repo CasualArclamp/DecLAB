@@ -31,6 +31,7 @@
 //! are dropped and counted rather than stalling the USB side.
 
 pub mod convert;
+pub mod decimate;
 pub mod proto;
 
 use std::str::FromStr;
@@ -45,6 +46,7 @@ use futures_lite::future::block_on;
 use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient, RequestBuffer};
 
 use self::convert::RealToIq;
+use self::decimate::Decimator;
 use self::proto::{Command, Dir, Model, Step};
 use crate::IqSource;
 
@@ -191,6 +193,9 @@ pub struct AirspySettings {
     pub packed: bool,
     /// Power the antenna port (an LNA or active antenna). Off by default.
     pub bias_tee: bool,
+    /// Decimation on the host, 1 (none) to 64 in powers of two
+    /// ([`decimate`]): the source's rate is `sample_rate / decimation`.
+    pub decimation: u32,
 }
 
 impl Default for AirspySettings {
@@ -201,6 +206,7 @@ impl Default for AirspySettings {
             gains: AirspyGains::default(),
             packed: false,
             bias_tee: false,
+            decimation: 1,
         }
     }
 }
@@ -468,6 +474,12 @@ impl AirspySource {
                 settings.sample_rate
             )));
         }
+        if !decimate::valid(settings.decimation) {
+            return Err(Error::Other(format!(
+                "Airspy decimation {} is not supported: 1, 2, 4, 8, 16, 32 or 64",
+                settings.decimation
+            )));
+        }
         // Checked before any USB access.
         proto::set_freq(Model::AirspyR2, settings.center_hz)?;
         let gains = settings.gains.clamped();
@@ -525,10 +537,11 @@ impl AirspySource {
             let stop = Arc::clone(&stop);
             let overflows = Arc::clone(&overflows);
             let packed = settings.packed;
+            let decim = Decimator::new(settings.decimation);
             std::thread::Builder::new()
                 .name("airspy-rx".into())
                 .spawn(move || {
-                    reader(&usb, packed, &tx, &recycle_rx, &stop, &overflows);
+                    reader(&usb, packed, decim, &tx, &recycle_rx, &stop, &overflows);
                     let _ = done_tx.send(());
                 })
                 .map_err(|e| Error::Other(format!("cannot start the Airspy reader: {e}")))?
@@ -566,6 +579,7 @@ impl AirspySource {
 fn reader(
     usb: &Usb,
     packed: bool,
+    mut decim: Decimator,
     tx: &SyncSender<Vec<Iq>>,
     recycle: &Receiver<Vec<Iq>>,
     stop: &AtomicBool,
@@ -593,7 +607,9 @@ fn reader(
             // a lost buffer and start the filter again.
             overflows.fetch_add(1, Ordering::Relaxed);
             conv.reset();
+            decim.reset();
         }
+        decim.process(&mut buf);
         // The transfer goes straight back in so the queue stays full.
         queue.submit(RequestBuffer::reuse(done.data, size));
         match tx.try_send(buf) {
@@ -617,8 +633,10 @@ impl IqSource for AirspySource {
     }
 
     fn sample_rate(&self) -> f64 {
-        // What the board was set to, which may not be what was asked for.
-        self.control.settings().sample_rate as f64
+        // What the board was set to, which may not be what was asked for,
+        // over the decimation.
+        let s = self.control.settings();
+        s.sample_rate as f64 / s.decimation as f64
     }
 
     fn center_freq(&self) -> f64 {
@@ -628,10 +646,11 @@ impl IqSource for AirspySource {
     fn describe(&self) -> String {
         let s = self.control.settings();
         format!(
-            "{} @ {:.4} MHz, {:.2} MS/s, LNA {} Mixer {} VGA {}{}",
+            "{} @ {:.4} MHz, {:.2} MS/s{}, LNA {} Mixer {} VGA {}{}",
             self.control.model.name(),
             s.center_hz as f64 / 1e6,
             s.sample_rate as f64 / 1e6,
+            if s.decimation > 1 { format!(" ÷ {}", s.decimation) } else { String::new() },
             s.gains.lna,
             s.gains.mixer,
             s.gains.vga,
