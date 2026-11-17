@@ -1,5 +1,5 @@
 // made by CasualArclamp
-//! LoRa: Meshtastic and MeshCore. The receiver (CSS demodulation, every
+//! LoRa: Meshtastic, MeshCore and LoRaWAN's headers. The receiver (CSS demodulation, every
 //! bandwidth and spreading factor at once, so the presets are found by
 //! themselves) and the two meshes' packets are `crates/declab-lora`; this
 //! file wraps them.
@@ -8,6 +8,11 @@
 //! about a quarter of its bandwidth of the VFO's frequency, so put the VFO
 //! on the mesh's channel (869.525 MHz for Meshtastic's EU_868 LongFast and
 //! MeshCore's 250 kHz preset; a second VFO for another).
+//!
+//! Each frame is placed by its RF frequency (the VFO's plus its offset):
+//! a Meshtastic frame in its region's slots, a LoRaWAN one in the Regional
+//! Parameters' channel plans, with its data rate (`declab_lora::region`).
+//! The panel can fix the plan and the region, and lists their channels.
 //!
 //! Card: the latest packet's preset, its SNR against what its SF needs,
 //! offset, drift, sender. Scope "Dechirp": the latest frame's symbols (bin
@@ -24,7 +29,7 @@ use declab_api::{
 };
 use declab_lora::meshtastic::{self, node_name};
 use declab_lora::receiver::{BANDWIDTHS, Config, INPUT_RATE, ROW_BINS, RxFrame};
-use declab_lora::{Keys, Payload, Receiver, decode_payload, meshcore};
+use declab_lora::{Keys, Payload, Receiver, decode_payload, lorawan, meshcore, region};
 
 /// The host filters to this much of the 1 MS/s channel. 400 kHz makes the
 /// host's cut from a 10 MS/s radio a plain ÷10 (it decimates to at least
@@ -78,7 +83,9 @@ impl DecoderFactory for Factory {
 /// `mt_channels` (Meshtastic channels besides the presets' defaults:
 /// "Name=PSK;…", PSK in base64 as the apps show it), `mc_channels`
 /// (MeshCore channels besides Public: "#hashtag;Name=PSK;…"), `bad_crc`
-/// (frames that failed their CRC to the log: on/off).
+/// (frames that failed their CRC to the log: on/off), `lorawan_plan`
+/// ("auto" or "EU868", "US915" ...) and `mt_region` ("auto" or "EU_868" ...):
+/// which plan or region frames are placed in.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub bw: [bool; 4],
@@ -86,6 +93,10 @@ pub struct Settings {
     pub mt_channels: Vec<(String, String)>,
     pub mc_channels: Vec<(String, String)>,
     pub bad_crc: bool,
+    /// A LoRaWAN plan's name, or "auto" (every plan).
+    pub lorawan_plan: String,
+    /// A Meshtastic region's name, or "auto" (every region).
+    pub mt_region: String,
 }
 
 impl Default for Settings {
@@ -96,6 +107,8 @@ impl Default for Settings {
             mt_channels: Vec::new(),
             mc_channels: Vec::new(),
             bad_crc: true,
+            lorawan_plan: "auto".into(),
+            mt_region: "auto".into(),
         }
     }
 }
@@ -149,6 +162,20 @@ impl Settings {
             "mt_channels" => self.mt_channels = parse_channels(value),
             "mc_channels" => self.mc_channels = parse_channels(value),
             "bad_crc" => self.bad_crc = value == "on",
+            "lorawan_plan" => {
+                self.lorawan_plan = match region::plan(value) {
+                    Some(p) => p.name.into(),
+                    None if value == "auto" => "auto".into(),
+                    None => return Err(format!("lora: no LoRaWAN plan {value:?}")),
+                }
+            }
+            "mt_region" => {
+                self.mt_region = match region::mt_region(value) {
+                    Some(r) => r.name.into(),
+                    None if value == "auto" => "auto".into(),
+                    None => return Err(format!("lora: no Meshtastic region {value:?}")),
+                }
+            }
             // The panel's tab (`--set tab=packets`): not the decoder's.
             "tab" => {}
             k => return Err(format!("lora: no setting {k:?}")),
@@ -178,7 +205,41 @@ impl Settings {
             set("mt_channels", join_channels(&self.mt_channels)),
             set("mc_channels", join_channels(&self.mc_channels)),
             set("bad_crc", if self.bad_crc { "on" } else { "off" }.into()),
+            set("lorawan_plan", self.lorawan_plan.clone()),
+            set("mt_region", self.mt_region.clone()),
         ]
+    }
+
+    /// Where a frame at `hz`, SF `sf` in `bw_hz` with sync word `sync` was
+    /// sent: "US ch 20 (LongFast's)", "EU868 default ch 1 DR5"; empty when
+    /// it fits nothing (or is MeshCore's, which has no channel plan).
+    fn place(&self, hz: f64, sf: u8, bw_hz: f64, sync: Option<u8>) -> String {
+        let only = |s: &str| (s != "auto").then(|| s.to_string());
+        if sync == Some(meshtastic::SYNC_WORD) {
+            let preset = meshtastic::preset_name(bw_hz, sf);
+            let hits = region::identify_mt(hz, bw_hz, preset, only(&self.mt_region).as_deref());
+            let mut v: Vec<String> = hits
+                .iter()
+                .take(3)
+                .map(|(r, k, default)| match (default, preset) {
+                    (true, Some(p)) => format!("{r} ch {} ({p} default)", k + 1),
+                    _ => format!("{r} ch {}", k + 1),
+                })
+                .collect();
+            if hits.len() > 3 {
+                v.push("…".into());
+            }
+            return v.join(", ");
+        }
+        if sync != Some(lorawan::SYNC_WORD) {
+            return String::new();
+        }
+        let hits = region::identify(hz, sf, bw_hz, only(&self.lorawan_plan).as_deref());
+        let Some(first) = hits.first() else { return String::new() };
+        // The plans that put it on the same channel and rate, together.
+        let plans: Vec<&str> =
+            hits.iter().filter(|h| h.channel == first.channel && h.dr == first.dr).map(|h| h.plan).collect();
+        format!("{} {} DR{}", plans.join("/"), first.channel, first.dr)
     }
 
     fn config(&self) -> Config {
@@ -219,6 +280,7 @@ pub enum Net {
     Lora,
     Meshtastic,
     MeshCore,
+    LoRaWan,
 }
 
 impl Net {
@@ -226,6 +288,7 @@ impl Net {
         match self {
             Net::Meshtastic => "MT",
             Net::MeshCore => "MC",
+            Net::LoRaWan => "LW",
             Net::Lora => "—",
         }
     }
@@ -233,6 +296,7 @@ impl Net {
         match self {
             Net::Meshtastic => "Meshtastic",
             Net::MeshCore => "MeshCore",
+            Net::LoRaWan => "LoRaWAN",
             Net::Lora => "LoRa",
         }
     }
@@ -287,6 +351,8 @@ pub struct PacketRow {
     pub cfo_hz: f64,
     pub crc_ok: bool,
     pub summary: String,
+    /// Where it was sent: "EU868 default ch 1 DR5" (empty: unknown).
+    pub region: String,
     pub fields: Vec<(String, String)>,
     pub bytes: Vec<u8>,
     /// Meshtastic: the decrypted `Data` message.
@@ -410,6 +476,15 @@ impl Lora {
                 .push(("offset".into(), format!("{:+.0} Hz", f.cfo_hz)));
             row.fields
                 .push(("drift".into(), format!("{:+.1} ppm", f.drift_ppm)));
+            // The RF frequency, when the source says where it is tuned.
+            if self.rx.centre_hz > 0.0 {
+                let hz = self.rx.centre_hz + f.cfo_hz;
+                row.fields.push(("frequency".into(), format!("{:.4} MHz", hz / 1e6)));
+                row.region = self.settings.place(hz, f.sf, f.bw_hz, f.sync);
+                if !row.region.is_empty() {
+                    row.fields.push(("region".into(), row.region.clone()));
+                }
+            }
             if !fr.crc_ok {
                 self.crc_fail += 1;
                 row.kind = "CRC failed".into();
@@ -603,6 +678,32 @@ impl Lora {
                         None => {}
                     }
                 }
+                Payload::LoRaWan(w) => {
+                    row.net = Net::LoRaWan;
+                    row.kind = w.mtype.name().into();
+                    row.from_to = w.from_to();
+                    row.summary = w.summary();
+                    row.fields.extend(w.fields());
+                    // The devices heard, by DevAddr (or DevEUI when joining).
+                    let id = match &w.body {
+                        lorawan::Body::Data(d) if w.mtype.uplink() => Some(format!("{:08X}", d.dev_addr)),
+                        lorawan::Body::Join { dev_eui, .. } => Some(format!("{dev_eui:016X}")),
+                        _ => None,
+                    };
+                    if let Some(id) = id {
+                        let (snr, at) = (f.snr_db, f.at_s);
+                        let (kind, summary, place) = (row.kind.clone(), row.summary.clone(), row.region.clone());
+                        let n = self.node(Net::LoRaWan, &id, at);
+                        n.count += 1;
+                        n.last_s = at;
+                        n.snr_db = snr;
+                        if let lorawan::Body::Data(d) = &w.body {
+                            n.name = lorawan::network(d.dev_addr).unwrap_or_default().into();
+                        }
+                        n.kind = if place.is_empty() { "device".into() } else { place };
+                        n.latest = format!("{kind}: {summary}");
+                    }
+                }
                 Payload::Other => {
                     row.kind = f.sync.map_or("LoRa".into(), |s| format!("sync 0x{s:02X}"));
                     row.summary = format!("{} bytes", fr.payload.len());
@@ -664,6 +765,9 @@ impl Lora {
                     pair("offset", format!("{:+.2} kHz", f.cfo_hz / 1e3)),
                     pair("drift", format!("{:+.1} ppm", f.drift_ppm)),
                 ];
+                if !row.region.is_empty() {
+                    details.insert(1, pair("region", row.region.clone()));
+                }
                 if !row.from_to.is_empty() {
                     details.push(pair("from → to", row.from_to.clone()));
                 }
@@ -826,7 +930,7 @@ pub mod panel {
     use declab_api::{Command, Panel};
     use egui::{Color32, RichText, Ui};
 
-    use super::{BANDWIDTHS, MsgRow, Net, News, NodeRow, PacketRow, Settings, bw_label, clock};
+    use super::{BANDWIDTHS, MsgRow, Net, News, NodeRow, PacketRow, Settings, bw_label, clock, meshtastic, region};
 
     const GREY: Color32 = Color32::from_gray(154);
     const GREEN: Color32 = Color32::from_rgb(110, 210, 120);
@@ -868,6 +972,7 @@ pub mod panel {
         RichText::new(n.short()).color(match n {
             Net::Meshtastic => BLUE,
             Net::MeshCore => AMBER,
+            Net::LoRaWan => GREEN,
             Net::Lora => GREY,
         })
     }
@@ -1212,6 +1317,57 @@ pub mod panel {
             }
         }
 
+        /// The LoRaWAN plan and Meshtastic region frames are placed in, and
+        /// where their channels are (what to put the VFOs on).
+        fn regions(&mut self, ui: &mut Ui) {
+            ui.label(RichText::new("Regions: which channel and data rate a frame was sent on").color(GREY));
+            ui.horizontal(|ui| {
+                ui.label("LoRaWAN plan");
+                egui::ComboBox::from_id_salt("lora_plan").selected_text(self.s.lorawan_plan.clone()).show_ui(
+                    ui,
+                    |ui| {
+                        ui.selectable_value(&mut self.s.lorawan_plan, "auto".to_string(), "auto (every plan)");
+                        for p in region::PLANS {
+                            ui.selectable_value(&mut self.s.lorawan_plan, p.name.to_string(), p.name);
+                        }
+                    },
+                );
+                ui.label("Meshtastic region");
+                egui::ComboBox::from_id_salt("lora_mt_region").selected_text(self.s.mt_region.clone()).show_ui(
+                    ui,
+                    |ui| {
+                        ui.selectable_value(&mut self.s.mt_region, "auto".to_string(), "auto (every region)");
+                        for r in region::MT_REGIONS {
+                            ui.selectable_value(&mut self.s.mt_region, r.name.to_string(), r.name);
+                        }
+                    },
+                );
+            });
+            let small = |t: String| RichText::new(t).size(11.0).color(GREY);
+            if let Some(p) = region::plan(&self.s.lorawan_plan) {
+                for line in p.describe() {
+                    ui.label(small(line));
+                }
+            }
+            if let Some(r) = region::mt_region(&self.s.mt_region) {
+                // Each preset's default channel there: where a mesh is.
+                let presets: Vec<String> = meshtastic::PRESETS
+                    .iter()
+                    .filter_map(|&(name, bw, _, _)| {
+                        let k = r.default_slot(region::mt_hash_name(name), bw)?;
+                        Some(format!("{name} {:.3}", r.channel_hz(k, bw) / 1e6))
+                    })
+                    .collect();
+                ui.label(small(format!(
+                    "{}: {:.3} to {:.3} MHz; default channels (MHz): {}",
+                    r.name,
+                    r.start_mhz,
+                    r.end_mhz,
+                    presets.join(", ")
+                )));
+            }
+        }
+
         fn keys_tab(&mut self, ui: &mut Ui, commands: &mut Vec<Command>) {
             let before = self.s.clone();
             ui.label(
@@ -1316,6 +1472,8 @@ pub mod panel {
                 }
             });
             ui.add_space(6.0);
+            self.regions(ui);
+            ui.add_space(6.0);
             ui.checkbox(&mut self.s.bad_crc, "frames that fail their CRC to the log");
             for e in &self.key_errors {
                 ui.label(RichText::new(e).color(AMBER));
@@ -1379,6 +1537,13 @@ mod tests {
         assert!(msgs.iter().any(|m| m.text == "anyone on the north side?"
             && m.from == "Delta"
             && m.channel == "Public"));
+        // Placed in Meshtastic's EU_868 band, on LongFast's own channel.
+        let mt: Vec<&PacketRow> =
+            news.iter().flat_map(|n| &n.packets).filter(|p| p.net == Net::Meshtastic).collect();
+        assert!(!mt.is_empty());
+        for p in mt {
+            assert_eq!(p.region, "EU_868 ch 1 (LongFast default)");
+        }
         let nodes = news.iter().rev().find_map(|n| n.nodes.clone()).unwrap();
         let alfa = nodes
             .iter()
@@ -1404,6 +1569,48 @@ mod tests {
     }
 
     #[test]
+    fn lorawan_uplink_is_read_and_placed() {
+        // An unconfirmed uplink from a TTN device on EU868's first default
+        // channel at SF9 (DR3), its crystal 4 kHz off.
+        let fs = INPUT_RATE;
+        let tx = sim::Tx { bw: 125e3, sf: 9, cr: 1, sync: lorawan::SYNC_WORD, preamble: 8 };
+        let bytes = [0x40, 0x2C, 0x1A, 0x0B, 0x26, 0x80, 0x07, 0x00, 0x02, 0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3, 4];
+        let mut x = Vec::new();
+        sim::modulate(&tx, &bytes, fs, 4e3, 0.0, 0.5, 30_000, &mut x);
+        x.resize(x.len() + 60_000, Complex32::default());
+        Noise::new(3).add(&mut x, 1e-3);
+        let mut d = Lora::new(Settings::default());
+        let mut sink = Sink::default();
+        let mut rows = Vec::new();
+        for (i, b) in x.chunks(65_536).enumerate() {
+            let block = Block {
+                iq: b,
+                tuning: Tuning { center_hz: 868.1e6, sample_rate: fs, generation: 0 },
+                first_sample: (i * 65_536) as u64,
+                dropped_before: 0,
+                live: false,
+            };
+            sink.clear();
+            d.process(&block, &mut sink);
+            for c in sink.custom.drain(..) {
+                if let Ok(n) = c.downcast::<News>() {
+                    rows.extend(n.packets);
+                }
+            }
+        }
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        let p = &rows[0];
+        assert_eq!(p.net, Net::LoRaWan);
+        assert_eq!(p.kind, "Unconfirmed data up");
+        assert_eq!(p.summary, "DevAddr 260B1A2C · FCnt 7 · port 2 · 4 bytes");
+        assert_eq!(p.region, "EU868 default ch 1 DR3");
+        assert!(p.fields.iter().any(|(k, v)| k == "DevAddr" && v == "260B1A2C (The Things Network)"));
+        // Fixed to another plan, the same frame fits nothing.
+        d.settings.lorawan_plan = "US915".into();
+        assert_eq!(d.settings.place(868.104e6, 9, 125e3, Some(lorawan::SYNC_WORD)), "");
+    }
+
+    #[test]
     fn settings_round_trip() {
         let mut s = Settings::default();
         s.set("bw", "250,62.5").unwrap();
@@ -1411,6 +1618,9 @@ mod tests {
         s.set("mt_channels", "Mine=AQ==").unwrap();
         s.set("mc_channels", "#test;Club=izOH6cXN6mrJ5e26oRXNcg==")
             .unwrap();
+        s.set("lorawan_plan", "as923-2").unwrap();
+        s.set("mt_region", "eu_868").unwrap();
+        assert!(s.set("lorawan_plan", "EU999").is_err());
         let mut t = Settings::default();
         for c in s.commands() {
             if let Command::Set { key, value } = c {
@@ -1419,6 +1629,7 @@ mod tests {
         }
         assert_eq!(s, t);
         assert_eq!(t.bw, [false, true, false, true]);
+        assert_eq!((t.lorawan_plan.as_str(), t.mt_region.as_str()), ("AS923-2", "EU_868"));
         assert_eq!(t.sf, [false, true, false, false, true, false]);
         let (k, e) = t.keys();
         assert!(e.is_empty() && k.meshcore.len() == 3 && k.meshtastic[0].name == "Mine");

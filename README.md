@@ -23,7 +23,7 @@ in Rust, all from one portable `.exe`.
 | 〰️ **Analog** | FM with RDS, NFM, AM, USB, LSB, DSB and CW; squelch by level, SNR or noise |
 | 📟 **Pagers** | POCSAG and FLEX |
 | 🌡️ **ISM devices** | Weather stations and sensors, remotes and door/window sensors, tyre-pressure sensors, energy monitors and meters on 433, 868, 315, 345 and 915 MHz, as [rtl_433](https://github.com/merbanan/rtl_433) decodes them (Oregon Scientific, Acurite, LaCrosse, Fine Offset/Ecowitt, Bresser, Nexus and more), plus your own flex decoders; bursts found anywhere in a 2 MHz channel, several at once |
-| 📡 **LoRa mesh** | Meshtastic and MeshCore: every LoRa preset (SF7–12, 62.5–500 kHz) found by itself; Meshtastic's default channels decrypted (text, positions, node info, telemetry), MeshCore's adverts and Public channel; nodes, messages and packets tables |
+| 📡 **LoRa mesh** | Meshtastic and MeshCore: every LoRa preset (SF7–12, 62.5–500 kHz) found by itself; Meshtastic's default channels decrypted (text, positions, node info, telemetry), MeshCore's adverts and Public channel; LoRaWAN headers (DevAddr, FCnt, port, join requests); each frame placed in its region's channel and data rate (LoRaWAN Regional Parameters plans, Meshtastic regions); nodes, messages and packets tables |
 | 🎙️ **Digital voice** | DMR (Tier I, II and III, LRRP positions), NXDN48, NXDN96, P25 phase 1 and phase 2 (TDMA, scrambling found by itself; a control channel's grants open a VFO for each call) and TETRA, detected by itself; data as a hex dump, LRRP table and IP view |
 
 **Several decoders at once.** Run up to eight VFOs on one radio, each with its
@@ -198,7 +198,10 @@ in each file. The LoRa coding chain is ported from
 the Meshtastic field numbers come from
 [meshtastic/protobufs](https://github.com/meshtastic/protobufs) (GPL-3.0)
 and MeshCore's layouts from [MeshCore](https://github.com/meshcore-dev/MeshCore)
-(MIT). DAB+ audio is decoded by
+(MIT). The LoRaWAN channel plans and data rates are the LoRa Alliance's
+Regional Parameters as [LoRaMac-node](https://github.com/Lora-net/LoRaMac-node)
+(Revised BSD) tabulates them, and Meshtastic's regions and channel formula
+come from its [firmware](https://github.com/meshtastic/firmware) (GPL-3.0). DAB+ audio is decoded by
 [libxaac](https://github.com/ittiam-systems/libxaac) (Apache-2.0).
 
 ## Licence
