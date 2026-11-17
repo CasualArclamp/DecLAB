@@ -162,7 +162,7 @@ impl Alpha {
 }
 
 /// The channel's width: it sets the elementary period T (EN 300 744 §4.7:
-/// 7/64, 1/8 or 7/48 µs; EN 302 755 §9.5, Table 66, for DVB-T2), so every
+/// 7/64, 1/8 or 7/48 µs, and 7/40 µs in Annex G; EN 302 755 §9.5, Table 66, for DVB-T2), so every
 /// duration and frequency of the signal scales with it while its samples at
 /// 1/T stay the same. Shared by DVB-T and DVB-T2: not every width is in both
 /// standards ([`Bandwidth::dvbt`], [`Bandwidth::t2`]).
@@ -176,6 +176,7 @@ impl Alpha {
 pub enum Bandwidth {
     Mhz1,
     Mhz1_7,
+    Mhz5,
     Mhz6,
     Mhz7,
     Mhz8,
@@ -183,9 +184,10 @@ pub enum Bandwidth {
 
 impl Bandwidth {
     /// Every width, narrowest first.
-    pub const ALL: [Bandwidth; 5] = [
+    pub const ALL: [Bandwidth; 6] = [
         Bandwidth::Mhz1,
         Bandwidth::Mhz1_7,
+        Bandwidth::Mhz5,
         Bandwidth::Mhz6,
         Bandwidth::Mhz7,
         Bandwidth::Mhz8,
@@ -196,6 +198,7 @@ impl Bandwidth {
         match self {
             Bandwidth::Mhz1 => 1.0,
             Bandwidth::Mhz1_7 => 1.7,
+            Bandwidth::Mhz5 => 5.0,
             Bandwidth::Mhz6 => 6.0,
             Bandwidth::Mhz7 => 7.0,
             Bandwidth::Mhz8 => 8.0,
@@ -207,6 +210,7 @@ impl Bandwidth {
         match self {
             Bandwidth::Mhz1 => "1 MHz",
             Bandwidth::Mhz1_7 => "1.7 MHz",
+            Bandwidth::Mhz5 => "5 MHz",
             Bandwidth::Mhz6 => "6 MHz",
             Bandwidth::Mhz7 => "7 MHz",
             Bandwidth::Mhz8 => "8 MHz",
@@ -218,6 +222,7 @@ impl Bandwidth {
         match self {
             Bandwidth::Mhz1 => "1mhz",
             Bandwidth::Mhz1_7 => "1.7mhz",
+            Bandwidth::Mhz5 => "5mhz",
             Bandwidth::Mhz6 => "6mhz",
             Bandwidth::Mhz7 => "7mhz",
             Bandwidth::Mhz8 => "8mhz",
@@ -231,6 +236,7 @@ impl Bandwidth {
         Some(match t {
             "1" => Bandwidth::Mhz1,
             "1.7" | "1.712" => Bandwidth::Mhz1_7,
+            "5" => Bandwidth::Mhz5,
             "6" => Bandwidth::Mhz6,
             "7" => Bandwidth::Mhz7,
             "8" => Bandwidth::Mhz8,
@@ -262,6 +268,8 @@ impl Bandwidth {
             Bandwidth::Mhz1 => 7.0 / 8.0 * 1e-6,
             // EN 302 755 Table 66.
             Bandwidth::Mhz1_7 => 71.0 / 131.0 * 1e-6,
+            // EN 300 744 Annex G; EN 302 755 Table 66.
+            Bandwidth::Mhz5 => 7.0 / 40.0 * 1e-6,
             Bandwidth::Mhz6 => 7.0 / 48.0 * 1e-6,
             Bandwidth::Mhz7 => 1.0 / 8.0 * 1e-6,
             Bandwidth::Mhz8 => 7.0 / 64.0 * 1e-6,
@@ -285,6 +293,7 @@ impl Bandwidth {
             Bandwidth::Mhz8 => Some(0),
             Bandwidth::Mhz7 => Some(1),
             Bandwidth::Mhz6 => Some(2),
+            Bandwidth::Mhz5 => Some(3),
             Bandwidth::Mhz1 => Some(7),
             Bandwidth::Mhz1_7 => None,
         }
@@ -304,6 +313,7 @@ impl Bandwidth {
             Bandwidth::Mhz8 => Some(0),
             Bandwidth::Mhz7 => Some(1),
             Bandwidth::Mhz6 => Some(2),
+            Bandwidth::Mhz5 => Some(3),
             Bandwidth::Mhz1_7 => Some(5),
             Bandwidth::Mhz1 => None,
         }
@@ -547,6 +557,11 @@ mod tests {
         assert_eq!(Bandwidth::parse("1.712"), Some(Bandwidth::Mhz1_7));
         assert!(Bandwidth::Mhz1.dvbt() && !Bandwidth::Mhz1.t2());
         assert!(!Bandwidth::Mhz1_7.dvbt() && Bandwidth::Mhz1_7.t2());
+        // 5 MHz: T = 7/40 µs, 40/7 MS/s, in both standards.
+        assert!((Bandwidth::Mhz5.sample_rate_hz() - 40e6 / 7.0).abs() < 1e-6);
+        assert!(Bandwidth::Mhz5.dvbt() && Bandwidth::Mhz5.t2());
+        assert_eq!(Bandwidth::terrestrial_khz(Bandwidth::Mhz5.terrestrial_code().unwrap()), 5000);
+        assert_eq!(Bandwidth::t2_khz(Bandwidth::Mhz5.t2_code().unwrap()), 5000);
     }
 
     #[test]
